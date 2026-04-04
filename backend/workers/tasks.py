@@ -35,28 +35,28 @@ async def _execute(self, session_id: str, user_input: str, provider: str = "open
         # if not SessionManager.add_message(session_id, "user", user_input):
         #     raise Exception("Session not found or failed to add message")
 
-        # 2. 获取上下文
+        # 2. 获取上下文消息
         messages = SessionManager.get_messages(session_id)
         
-        # 3. 在消息开头加入系统设定
+        # 3. 获取 system_prompt（不再在这里拼接！传递给 Executor/Provider 内部处理）
         system_prompt = get_system_prompt("default")
-        messages_with_system = [{"role": "system", "content": system_prompt}] + messages
 
         # 4. 生成 browser_session_id (与 chat session 关联)
         browser_session_id = f"bs_{session_id[:12]}"
 
         # 5. 创建新的 AgentExecutor 实例（避免全局单例问题）
-        # 传入 model 参数和 browser_session_id
+        # 传入 model、browser_session_id 和 system_prompt
         executor = AgentExecutor(
             provider=provider, 
             model=model,
-            browser_session_id=browser_session_id
+            browser_session_id=browser_session_id,
+            system_prompt=system_prompt  # 新增：传递给 Executor
         )
 
         result = ""
-        # 5. Agent执行（流式）
+        # 6. Agent执行（流式）
         chunk_count = 0
-        async for chunk in executor.execute_stream(messages_with_system):
+        async for chunk in executor.execute_stream(messages):  # 不再传入 messages_with_system
             chunk_count += 1
             #print(f"[Task Debug] Chunk {chunk_count}: {chunk}")
             

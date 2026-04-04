@@ -1,8 +1,8 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from typing import List, Optional
+from typing import List, Optional, Union, Dict, Any
 from datetime import datetime
-from models.chat_session import ChatSession, ChatMessage
+from models.chat_session import ChatSession, ChatMessage, MessageContentItem
 from schemas.chat_session import ChatSessionCreate
 
 
@@ -43,16 +43,50 @@ class ChatSessionService:
         ).first()
     
     @staticmethod
-    def add_message(db: Session, session_id: int, role: str, content: str) -> ChatMessage:
-        """添加消息到会话"""
+    def add_message(db: Session, session_id: int, role: str, 
+                   content: Union[str, List[Dict[str, Any]]]) -> ChatMessage:
+        """
+        添加消息到会话（支持多模态）
+        
+        Args:
+            db: 数据库会话
+            session_id: 会话 ID（数据库主键）
+            role: 消息角色 (user/assistant/system)
+            content: 消息内容
+                - 字符串：纯文本消息（向后兼容）
+                - 列表：多模态内容项 [{"type": "text|image|audio", "content": "...", "id": "optional"}]
+        
+        Returns:
+            ChatMessage 对象
+        """
         db_message = ChatMessage(
             session_id=session_id,
             role=role,
-            content=content
         )
         db.add(db_message)
         db.commit()
         db.refresh(db_message)
+        
+        # 标准化 content 为列表格式
+        if isinstance(content, str):
+            content_items = [{"type": "text", "content": content}]
+        elif isinstance(content, list):
+            content_items = content
+        else:
+            content_items = [{"type": "text", "content": str(content)}]
+        
+        # 添加内容项到子表
+        for idx, item in enumerate(content_items):
+            content_item = MessageContentItem(
+                message_id=db_message.id,
+                type=item.get("type", "text"),
+                content=item.get("content", ""),
+                content_id=item.get("id"),  # 可选标识符
+                sort_order=idx,
+            )
+            db.add(content_item)
+        
+        db.commit()
         
         # 更新会话的 updated_at
         db.query(ChatSession).filter(ChatSession.id == session_id).update(
@@ -63,8 +97,71 @@ class ChatSessionService:
         return db_message
     
     @staticmethod
+    def get_message_with_contents(db: Session, message_id: int) -> Optional[Dict[str, Any]]:
+        """
+        获取消息及其完整的多模态内容
+        
+        Returns:
+            {
+                "id": int,
+                "role": str,
+                "content": [
+                    {
+                        "type": str,
+                        "content": str,
+                        "id": Optional[str],
+                    }
+                ],
+                "created_at": datetime
+            }
+            或 None
+        """
+        message = db.query(ChatMessage).filter(ChatMessage.id == message_id).first()
+        if not message:
+            return None
+            
+        contents = db.query(MessageContentItem)\
+            .filter(MessageContentItem.message_id == message_id)\
+            .order_by(MessageContentItem.sort_order)\
+            .all()
+        
+        return {
+            "id": message.id,
+            "role": message.role,
+            "content": [
+                {
+                    "type": c.type,
+                    "content": c.content,
+                    "id": c.content_id,
+                }
+                for c in contents
+            ],
+            "created_at": message.created_at.isoformat(),
+        }
+    
+    @staticmethod
+    def get_session_messages_with_contents(db: Session, session_db_id: int) -> List[Dict[str, Any]]:
+        """
+        获取会话的所有消息（包含完整多模态内容）
+        
+        Returns:
+            [message_dict, ...]  # 每个 message_dict 包含完整的 content 列表
+        """
+        messages = db.query(ChatMessage).filter(
+            ChatMessage.session_id == session_db_id
+        ).order_by(ChatMessage.created_at).all()
+        
+        result = []
+        for msg in messages:
+            full_msg = ChatSessionService.get_message_with_contents(db, msg.id)
+            if full_msg:
+                result.append(full_msg)
+        
+        return result
+    
+    @staticmethod
     def get_session_messages(db: Session, session_id: int) -> List[ChatMessage]:
-        """获取会话的所有消息"""
+        """获取会话的所有消息（仅消息记录，不含详细内容）"""
         return db.query(ChatMessage).filter(
             ChatMessage.session_id == session_id
         ).order_by(ChatMessage.created_at).all()
@@ -85,18 +182,15 @@ class ChatSessionService:
         start = time.time()
         session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
         query_time = time.time() - start
-        print(f"[Delete Service Debug] Step 2.1 - Query session by id: {query_time:.3f}s")
         
         if session:
             start = time.time()
             db.delete(session)
             delete_op_time = time.time() - start
-            print(f"[Delete Service Debug] Step 2.2 - Delete operation: {delete_op_time:.3f}s")
             
             start = time.time()
             db.commit()
             commit_time = time.time() - start
-            print(f"[Delete Service Debug] Step 2.3 - Commit: {commit_time:.3f}s")
             
             return True
         return False

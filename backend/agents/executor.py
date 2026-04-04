@@ -1,7 +1,7 @@
 from typing import List, Dict, Any, AsyncGenerator
 from langgraph.graph import StateGraph, END
 
-from llm.client import llm_client as llm_client_instance
+from llm.client import llm_client_instance
 from tools import get_tool_runtime, ToolResult
 
 
@@ -127,10 +127,11 @@ class AgentExecutor:
     model: str = None
     browser_session_id: str = None
 
-    def __init__(self, provider: str = "openai", model: str = None, browser_session_id: str = None):
+    def __init__(self, provider: str = "openai", model: str = None, browser_session_id: str = None, system_prompt=None):
         self.provider = provider
         self.model = model
         self.browser_session_id = browser_session_id
+        self.system_prompt = system_prompt  # 新增：存储系统提示词
         self.graph = self._build_graph()
 
     # ====== Graph构建 ======
@@ -182,7 +183,8 @@ class AgentExecutor:
             messages,
             provider=self.provider,
             model=self.model,  # 传入动态模型
-            tools=tools if tools else None
+            tools=tools if tools else None,
+            system_prompt=self.system_prompt  # 新增：传递系统提示词
         )
 
         # 调试日志

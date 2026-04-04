@@ -28,8 +28,24 @@ class ChatMessage(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey("chat_sessions.id"), nullable=False)
     role = Column(String(20), nullable=False)  # user / assistant / system
-    content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # 关联会话
     session = relationship("ChatSession", back_populates="messages")
+    # 关联内容项（多模态）
+    content_items = relationship("MessageContentItem", back_populates="message", cascade="all, delete-orphan")
+
+
+class MessageContentItem(Base):
+    __tablename__ = "message_content_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("chat_messages.id"), nullable=False)
+    type = Column(String(20), nullable=False)  # text / image / audio / video
+    content = Column(Text, nullable=False)      # 实际内容（文本、base64、URL等）
+    content_id = Column(String(100), nullable=True)  # 可选标识符（如 image1）
+    sort_order = Column(Integer, default=0)     # 排序顺序
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # 关联消息
+    message = relationship("ChatMessage", back_populates="content_items")

@@ -1,9 +1,12 @@
+import base64
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from .base import BaseProviderImpl
 
 
 class DeepSeekProvider(BaseProviderImpl):
+    """DeepSeek Provider - 支持多模态（使用 OpenAI 兼容接口）"""
+    
     def __init__(self, config: Dict[str, Any]):
         self.api_key = config.get("api_key", "")
         self.model_name = config.get("model", "deepseek-chat")
@@ -14,15 +17,64 @@ class DeepSeekProvider(BaseProviderImpl):
             model="deepseek-embedding",
         )
 
+    def _convert_to_provider_format(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """转换为 DeepSeek API 格式（与 OpenAI 类似）"""
+        converted = []
+        
+        for msg in self._normalize_messages(messages):
+            new_msg = {"role": msg["role"]}
+            
+            content_list = msg.get("content", [])
+            deepseek_content = []
+            
+            has_multimodal = any(item.get("type") in ["image", "audio"] for item in content_list)
+            
+            for item in content_list:
+                item_type = item.get("type")
+                
+                if item_type == "text":
+                    deepseek_content.append({
+                        "type": "text",
+                        "text": item.get("content", "")
+                    })
+                elif item_type == "image":
+                    image_data = item.get("content", "")
+                    if isinstance(image_data, bytes):
+                        b64 = base64.b64encode(image_data).decode()
+                        url = f"data:image/png;base64,{b64}"
+                    else:
+                        url = str(image_data)
+                    deepseek_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": url}
+                    })
+            
+            if has_multimodal or len(deepseek_content) > 1:
+                new_msg["content"] = deepseek_content
+            else:
+                new_msg["content"] = deepseek_content[0]["text"] if deepseek_content else ""
+            
+            if msg.get("tool_calls"):
+                new_msg["tool_calls"] = msg["tool_calls"]
+            if msg.get("tool_call_id"):
+                new_msg["tool_call_id"] = msg["tool_call_id"]
+            
+            converted.append(new_msg)
+        
+        return converted
+
     async def chat(
         self,
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        system_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """DeepSeek 聊天接口，支持工具调用"""
         from langchain_core.messages import ToolMessage
+        
+        messages_with_system = self._add_system_prompt(messages, system_prompt)
+        provider_messages = self._convert_to_provider_format(messages_with_system)
         
         model = ChatOpenAI(
             model=self.model_name,
@@ -32,16 +84,34 @@ class DeepSeekProvider(BaseProviderImpl):
             max_tokens=max_tokens,
         )
         
-        # 绑定工具（如果提供）
         if tools:
             model = model.bind_tools(tools)
         
-        # 转换消息为 LangChain 格式
-        langchain_messages = self._convert_messages_to_langchain(messages)
+        langchain_messages = []
+        for msg in provider_messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text_parts = [item.get("text", "") for item in content if item.get("type") == "text"]
+                content = "\n".join(text_parts)
+            
+            if role == "system":
+                from langchain_core.messages import SystemMessage
+                langchain_messages.append(SystemMessage(content=content))
+            elif role == "user":
+                from langchain_core.messages import HumanMessage
+                langchain_messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                from langchain_core.messages import AIMessage
+                ai_msg = AIMessage(content=content)
+                if msg.get("tool_calls"):
+                    ai_msg.tool_calls = msg["tool_calls"]
+                langchain_messages.append(ai_msg)
+            elif role == "tool":
+                langchain_messages.append(ToolMessage(content=str(content), tool_call_id=msg.get("tool_call_id", "")))
         
         response = await model.ainvoke(langchain_messages)
         
-        # 转换为统一格式返回
         result = {
             "content": response.content,
             "role": "assistant",
@@ -49,7 +119,6 @@ class DeepSeekProvider(BaseProviderImpl):
             "reasoning_content": None,
         }
         
-        # 处理 tool_calls
         if hasattr(response, "tool_calls") and response.tool_calls:
             result["tool_calls"] = [
                 {
@@ -64,46 +133,37 @@ class DeepSeekProvider(BaseProviderImpl):
             ]
         
         return result
-    
-    def _convert_messages_to_langchain(self, messages: List[Dict[str, Any]]) -> List[BaseMessage]:
-        """将统一格式消息转换为 LangChain 消息"""
-        from langchain_core.messages import ToolMessage
-        
-        result = []
-        for msg in messages:
-            role = msg.get("role")
-            content = msg.get("content", "")
-            
-            if role == "system":
-                result.append(SystemMessage(content=content))
-            elif role == "user":
-                result.append(HumanMessage(content=content))
-            elif role == "assistant":
-                # assistant 消息可能包含 tool_calls
-                ai_msg = AIMessage(content=content)
-                if msg.get("tool_calls"):
-                    ai_msg.tool_calls = msg["tool_calls"]
-                result.append(ai_msg)
-            elif role == "tool":
-                # tool 消息
-                result.append(ToolMessage(
-                    content=content,
-                    tool_call_id=msg.get("tool_call_id", "")
-                ))
-        return result
 
     async def stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: float = 0.7,
+        system_prompt: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
+        messages_with_system = self._add_system_prompt(messages, system_prompt)
+        provider_messages = self._convert_to_provider_format(messages_with_system)
+        
         model = ChatOpenAI(
             model=self.model_name,
             api_key=self.api_key,
             base_url=self.base_url,
             temperature=temperature,
         )
-        langchain_messages = self._convert_messages(messages)
+        
+        langchain_messages = []
+        for msg in provider_messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text_parts = [item.get("text", "") for item in content if item.get("type") == "text"]
+                content = "\n".join(text_parts)
+            
+            if msg["role"] == "user":
+                from langchain_core.messages import HumanMessage
+                langchain_messages.append(HumanMessage(content=content))
+            elif msg["role"] == "assistant":
+                from langchain_core.messages import AIMessage
+                langchain_messages.append(AIMessage(content=content))
+        
         async for chunk in model.astream(langchain_messages):
             if chunk.content:
                 yield {

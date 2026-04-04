@@ -1,12 +1,35 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Union, Any
+
+
+class ContentItemBase(BaseModel):
+    """内容项基础模型"""
+    type: str  # text / image / audio / video
+    content: str
+    id: Optional[str] = None  # 可选标识符（如 image1, audio_001）
+
+
+class ContentItemCreate(ContentItemBase):
+    """创建内容项"""
+    pass
+
+
+class ContentItemResponse(ContentItemBase):
+    """响应内容项"""
+    db_id: Optional[int] = None  # 数据库主键
+    message_id: int
+    sort_order: int = 0
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
 
 
 class ChatMessageResponse(BaseModel):
     id: int
     role: str
-    content: str
+    content: List[ContentItemResponse]
     created_at: datetime
     
     class Config:
@@ -29,7 +52,15 @@ class ChatSessionResponse(ChatSessionBase):
     user_id: int
     created_at: datetime
     updated_at: Optional[datetime]
-    # 不包含 messages，避免 N+1 查询
     
     class Config:
         from_attributes = True
+
+
+class MessageCreate(BaseModel):
+    """创建消息（支持多模态）"""
+    session_id: str
+    content: Union[str, List[ContentItemCreate]]  # 兼容旧格式（字符串）和新格式（列表）
+    provider: Optional[str] = "openai"
+    model: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None

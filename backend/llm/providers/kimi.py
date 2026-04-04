@@ -1,62 +1,85 @@
+import base64
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from openai import OpenAI, AsyncOpenAI, APITimeoutError, APIError
 from .base import BaseProviderImpl
 
 
 class KimiProvider(BaseProviderImpl):
-    """
-    Moonshot AI (Kimi) Provider
-    使用 OpenAI 兼容接口
-    文档: https://platform.moonshot.cn/docs/api-reference
-    """
-
+    """Moonshot AI (Kimi) Provider - 支持多模态"""
+    
     def __init__(self, config: Dict[str, Any]):
         self.api_key = config.get("api_key", "")
         self.model_name = config.get("model", "kimi-k2.5")
         self.base_url = config.get("base_url", "https://api.moonshot.cn/v1")
         
-        # 同步客户端
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-        )
-        # 异步客户端
-        self.async_client = AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-        )
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def _convert_to_provider_format(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """转换为 Kimi API 格式"""
+        converted = []
+        
+        for msg in self._normalize_messages(messages):
+            new_msg = {"role": msg["role"]}
+            
+            content_list = msg.get("content", [])
+            kimi_content = []
+            
+            has_multimodal = any(item.get("type") in ["image", "audio"] for item in content_list)
+            
+            for item in content_list:
+                item_type = item.get("type")
+                
+                if item_type == "text":
+                    kimi_content.append({
+                        "type": "text",
+                        "text": item.get("content", "")
+                    })
+                elif item_type == "image":
+                    image_data = item.get("content", "")
+                    if isinstance(image_data, bytes):
+                        b64 = base64.b64encode(image_data).decode()
+                        url = f"data:image/png;base64,{b64}"
+                    else:
+                        url = str(image_data)
+                    kimi_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": url}
+                    })
+            
+            if has_multimodal or len(kimi_content) > 1:
+                new_msg["content"] = kimi_content
+            else:
+                new_msg["content"] = kimi_content[0]["text"] if kimi_content else ""
+            
+            if msg.get("tool_calls"):
+                new_msg["tool_calls"] = msg["tool_calls"]
+            if msg.get("tool_call_id"):
+                new_msg["tool_call_id"] = msg["tool_call_id"]
+            
+            converted.append(new_msg)
+        
+        return converted
 
     async def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        聊天完成，支持工具调用
+        messages_with_system = self._add_system_prompt(messages, system_prompt)
+        provider_messages = self._convert_to_provider_format(messages_with_system)
         
-        Args:
-            messages: 消息列表
-            temperature: 温度参数
-            max_tokens: 最大 token 数
-            tools: 工具列表，格式为 OpenAI 工具格式
-            tool_choice: 工具选择策略，如 "auto", "none", 或指定工具
-        """
-        # 构建请求参数
-        # Kimi 某些模型只支持 temperature=1
         kwargs = {
             "model": self.model_name,
-            "messages": messages,
+            "messages": provider_messages,
         }
         
-        # 只有非 reasoning 模型才传 temperature
         if "kimi-k2" not in self.model_name:
             kwargs["temperature"] = temperature
-        
-        # if max_tokens is not None:
-        #     kwargs["max_tokens"] = max_tokens
             
         if tools is not None:
             kwargs["tools"] = tools
@@ -64,14 +87,9 @@ class KimiProvider(BaseProviderImpl):
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
         
-        # 调试日志 - 打印入参
-        print(f"[Kimi Debug] Request params: {kwargs}")
-        #print(f"[Kimi Debug] Messages: {messages}")
-        
         try:
             response = await self.async_client.chat.completions.create(**kwargs)
         except APITimeoutError as e:
-            print(f"[Kimi Error] 请求超时: {e}")
             return {
                 "content": "抱歉，Kimi API 请求超时，请稍后重试。",
                 "tool_calls": None,
@@ -81,7 +99,6 @@ class KimiProvider(BaseProviderImpl):
                 "error_message": str(e),
             }
         except APIError as e:
-            print(f"[Kimi Error] API 错误: {e}")
             return {
                 "content": f"抱歉，Kimi API 调用失败: {e.message}",
                 "tool_calls": None,
@@ -91,7 +108,6 @@ class KimiProvider(BaseProviderImpl):
                 "error_message": str(e),
             }
         except Exception as e:
-            print(f"[Kimi Error] 未知错误: {e}")
             return {
                 "content": f"抱歉，调用 Kimi 时发生错误: {str(e)}",
                 "tool_calls": None,
@@ -103,11 +119,6 @@ class KimiProvider(BaseProviderImpl):
         
         message = response.choices[0].message
         
-        # 调试日志 - 打印返回结果
-        print(f"[Kimi Debug] Response: {message}")
-        print(f"[Kimi Debug] Content: {message.content}")
-        print(f"[Kimi Debug] Tool calls: {message.tool_calls if hasattr(message, 'tool_calls') else None}")
-        
         result = {
             "content": message.content,
             "tool_calls": None,
@@ -115,11 +126,9 @@ class KimiProvider(BaseProviderImpl):
             "reasoning_content": None,
         }
         
-        # 检查是否有 reasoning_content（Kimi K2 推理模型）
         if hasattr(message, "reasoning_content") and message.reasoning_content:
             result["reasoning_content"] = message.reasoning_content
         
-        # 检查是否有 tool_calls
         if hasattr(message, "tool_calls") and message.tool_calls:
             result["tool_calls"] = [
                 {
@@ -137,21 +146,20 @@ class KimiProvider(BaseProviderImpl):
 
     async def stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: float = 0.7,
         tools: Optional[List[Dict[str, Any]]] = None,
+        system_prompt: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        流式聊天完成，支持工具调用
-        """
-        # Kimi 某些模型只支持 temperature=1
+        messages_with_system = self._add_system_prompt(messages, system_prompt)
+        provider_messages = self._convert_to_provider_format(messages_with_system)
+        
         kwargs = {
             "model": self.model_name,
-            "messages": messages,
+            "messages": provider_messages,
             "stream": True,
         }
         
-        # 只有非 reasoning 模型才传 temperature
         if "kimi-k2" not in self.model_name:
             kwargs["temperature"] = temperature
         
@@ -160,28 +168,11 @@ class KimiProvider(BaseProviderImpl):
         
         try:
             stream = await self.async_client.chat.completions.create(**kwargs)
-        except APITimeoutError as e:
-            print(f"[Kimi Error] 流式请求超时: {e}")
+        except (APITimeoutError, APIError, Exception) as e:
             yield {
-                "content": "抱歉，Kimi API 请求超时，请稍后重试。",
+                "content": f"Kimi 流式请求错误: {str(e)}",
                 "finish_reason": "error",
-                "error": "timeout",
-            }
-            return
-        except APIError as e:
-            print(f"[Kimi Error] 流式 API 错误: {e}")
-            yield {
-                "content": f"抱歉，Kimi API 调用失败: {e.message}",
-                "finish_reason": "error",
-                "error": "api_error",
-            }
-            return
-        except Exception as e:
-            print(f"[Kimi Error] 流式未知错误: {e}")
-            yield {
-                "content": f"抱歉，调用 Kimi 时发生错误: {str(e)}",
-                "finish_reason": "error",
-                "error": "unknown",
+                "error": "stream_error",
             }
             return
         
@@ -193,7 +184,6 @@ class KimiProvider(BaseProviderImpl):
                 if delta.content:
                     result["content"] = delta.content
                     
-                # 检查是否有 tool_calls
                 if hasattr(delta, "tool_calls") and delta.tool_calls:
                     result["tool_calls"] = [
                         {
@@ -211,7 +201,6 @@ class KimiProvider(BaseProviderImpl):
                 yield result
 
     async def embedding(self, text: str) -> List[float]:
-        """获取文本的 embedding 向量"""
         response = await self.async_client.embeddings.create(
             model="moonshot-embedding",
             input=text,
@@ -219,7 +208,6 @@ class KimiProvider(BaseProviderImpl):
         return response.data[0].embedding
 
     async def embedding_batch(self, texts: List[str]) -> List[List[float]]:
-        """批量获取文本的 embedding 向量"""
         response = await self.async_client.embeddings.create(
             model="moonshot-embedding",
             input=texts,
