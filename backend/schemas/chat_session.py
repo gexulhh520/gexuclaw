@@ -14,7 +14,7 @@ class ChatMessageResponse(BaseModel):
 
 
 class ChatSessionBase(BaseModel):
-    title: Optional[str] = "新会话"
+    title: Optional[str] = "聊天会话"
     provider: str = "openai"
     model: Optional[str] = None
 

@@ -49,6 +49,7 @@
               <el-option label="OpenAI" value="openai" />
               <el-option label="DeepSeek" value="deepseek" />
               <el-option label="Kimi" value="kimi" />
+              <el-option label="Gemma4" value="gemma4" />
             </el-select>
             <el-input
               v-model="selectedModel"
@@ -96,6 +97,15 @@
             @keydown.enter.prevent="sendMessage"
             :disabled="isLoading"
           />
+          <el-button 
+            :type="isRecording ? 'danger' : 'default'" 
+            :class="isRecording ? 'recording-btn' : ''"
+            @click="toggleVoiceInput" 
+            :disabled="isLoading"
+            circle
+          >
+            <el-icon><Microphone /></el-icon>
+          </el-button>
           <el-button type="primary" @click="sendMessage" :loading="isLoading">
             发送
           </el-button>
@@ -111,7 +121,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
 import { useUserStore } from '@/stores/user'
-import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown } from '@element-plus/icons-vue'
+import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone } from '@element-plus/icons-vue'
 import type { LLMProvider } from '@/api/client'
 import axios from 'axios'
 
@@ -141,6 +151,8 @@ const inputMessage = ref('')
 const selectedProvider = ref<LLMProvider>('kimi')
 const selectedModel = ref('')
 const sessions = ref<any[]>([])
+const isRecording = ref(false)
+let recognition: any = null
 
 // 使用 computed 来获取响应式 store 属性
 const sessionId = computed(() => chatStore.sessionId)
@@ -283,6 +295,59 @@ function handleCommand(command: string) {
   }
 }
 
+// 语音输入功能
+function initSpeechRecognition() {
+  const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+  if (!SpeechRecognition) {
+    return false
+  }
+  
+  recognition = new SpeechRecognition()
+  recognition.continuous = false
+  recognition.interimResults = true
+  recognition.lang = 'zh-CN'
+  
+  recognition.onresult = (event: any) => {
+    const transcript = event.results[0][0].transcript
+    inputMessage.value = transcript
+  }
+  
+  recognition.onerror = (event: any) => {
+    console.error('语音识别错误:', event.error)
+    isRecording.value = false
+    if (event.error === 'not-allowed') {
+      ElMessage.error('请允许麦克风权限')
+    } else {
+      ElMessage.error('语音识别失败，请重试')
+    }
+  }
+  
+  recognition.onend = () => {
+    isRecording.value = false
+  }
+  
+  return true
+}
+
+function toggleVoiceInput() {
+  if (!recognition) {
+    const supported = initSpeechRecognition()
+    if (!supported) {
+      ElMessage.warning('您的浏览器不支持语音识别，请使用 Chrome 浏览器')
+      return
+    }
+  }
+  
+  if (isRecording.value) {
+    recognition.stop()
+    isRecording.value = false
+  } else {
+    recognition.start()
+    isRecording.value = true
+    ElMessage.success('开始录音，请说话...')
+  }
+}
+
 // 页面加载
 onMounted(async () => {
   await fetchSessions()
@@ -301,6 +366,9 @@ onMounted(async () => {
 // 页面关闭时断开 WebSocket
 onUnmounted(() => {
   chatStore.disconnect()
+  if (recognition && isRecording.value) {
+    recognition.stop()
+  }
 })
 </script>
 
@@ -309,6 +377,16 @@ onUnmounted(() => {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+:deep(.el-container) {
+  height: 100vh;
+  overflow: hidden;
+}
+
+:deep(.el-main) {
+  overflow: hidden;
 }
 
 .sidebar {
@@ -316,6 +394,8 @@ onUnmounted(() => {
   border-right: 1px solid #e4e7ed;
   display: flex;
   flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .sidebar-header {
@@ -331,6 +411,8 @@ onUnmounted(() => {
   flex: 1;
   overflow-y: auto;
   padding: 8px;
+  min-height: 0;
+  max-height: calc(100vh - 140px);
 }
 
 .session-item {
@@ -393,6 +475,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
+  flex-shrink: 0;
 }
 
 .chat-header h2 {
@@ -411,6 +494,8 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: 20px;
   background: #ffffff;
+  min-height: 0;
+  max-height: calc(100vh - 140px);
 }
 
 .welcome {
@@ -484,9 +569,26 @@ onUnmounted(() => {
   padding: 20px;
   background: #fff;
   border-top: 1px solid #e4e7ed;
+  flex-shrink: 0;
 }
 
 .chat-input .el-input {
   flex: 1;
+}
+
+.recording-btn {
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(245, 108, 108, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(245, 108, 108, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 108, 108, 0);
+  }
 }
 </style>

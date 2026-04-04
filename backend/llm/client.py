@@ -5,6 +5,7 @@ from llm.providers import (
     OpenAIProvider,
     DeepSeekProvider,
     KimiProvider,
+    Gemma4Provider,
 )
 
 settings = get_settings()
@@ -24,6 +25,11 @@ class LLMClient:
             "kimi": KimiProvider({
                 "api_key": getattr(settings, "KIMI_API_KEY", ""),
                 "model": getattr(settings, "KIMI_MODEL", "kimi-k2.5"),
+            }),
+            "gemma4": Gemma4Provider({
+                "api_key": "ollama",
+                "model": "gemma4:e2b",
+                "base_url": "http://localhost:11434/v1",
             }),
         }
         self.default = "openai"

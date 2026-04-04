@@ -379,6 +379,25 @@ class BrowserTool(BaseTool):
                 ],
                 func=self.download_file,
             ),
+            "get_page_markdown": ToolOperation(
+                name="get_page_markdown",
+                description="获取页面内容并转换为 Markdown 格式,可用于页面信息获取",
+                parameters=[
+                    {
+                        "name": "session_id",
+                        "type": "string",
+                        "required": True,
+                        "description": "会话 ID",
+                    },
+                    {
+                        "name": "selector",
+                        "type": "string",
+                        "required": False,
+                        "description": "CSS 选择器，指定要转换的区域（默认整个页面）",
+                    },
+                ],
+                func=self.get_page_markdown,
+            ),
         }
 
     # ==================== 浏览器控制（异步操作）====================
@@ -673,3 +692,48 @@ class BrowserTool(BaseTool):
                         return ToolResult(False, error=f"下载失败，状态码: {response.status}")
         except Exception as e:
             return ToolResult(False, error=str(e))
+
+    async def get_page_markdown(self, session_id: str, selector: Optional[str] = None) -> ToolResult:
+        """获取页面内容并转换为 Markdown 格式"""
+        try:
+            page = await self._get_page(session_id)
+            if not page:
+                return ToolResult(False, error=f"Session '{session_id}' 不存在")
+
+            # 获取页面 HTML
+            if selector:
+                # 获取指定元素的 HTML
+                element = await page.query_selector(selector)
+                if not element:
+                    return ToolResult(False, error=f"未找到元素: {selector}")
+                html = await element.inner_html()
+            else:
+                # 获取整个页面的 body HTML
+                html = await page.inner_html("body")
+
+            # 使用 markdownify 转换为 Markdown
+            try:
+                from markdownify import markdownify as md
+                markdown_content = md(html, heading_style="ATX")
+            except ImportError:
+                return ToolResult(
+                    False, 
+                    error="未安装 markdownify，请运行: pip install markdownify"
+                )
+
+            # 限制返回内容长度（避免 token 过多）
+            max_length = 10000
+            if len(markdown_content) > max_length:
+                markdown_content = markdown_content[:max_length] + "\n\n... (内容已截断)"
+
+            return ToolResult(
+                True,
+                data=markdown_content,
+                meta={
+                    "url": page.url,
+                    "length": len(markdown_content),
+                    "message": f"页面已转换为 Markdown，共 {len(markdown_content)} 字符"
+                }
+            )
+        except Exception as e:
+            return ToolResult(False, error=f"获取页面 Markdown 失败: {str(e)}")

@@ -1,5 +1,5 @@
 from typing import Optional, List, Dict, Any, AsyncGenerator
-from openai import OpenAI, AsyncOpenAI
+from openai import OpenAI, AsyncOpenAI, APITimeoutError, APIError
 from .base import BaseProviderImpl
 
 
@@ -55,8 +55,8 @@ class KimiProvider(BaseProviderImpl):
         if "kimi-k2" not in self.model_name:
             kwargs["temperature"] = temperature
         
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
+        # if max_tokens is not None:
+        #     kwargs["max_tokens"] = max_tokens
             
         if tools is not None:
             kwargs["tools"] = tools
@@ -65,10 +65,41 @@ class KimiProvider(BaseProviderImpl):
             kwargs["tool_choice"] = tool_choice
         
         # 调试日志 - 打印入参
-        #print(f"[Kimi Debug] Request params: {kwargs}")
+        print(f"[Kimi Debug] Request params: {kwargs}")
         #print(f"[Kimi Debug] Messages: {messages}")
         
-        response = await self.async_client.chat.completions.create(**kwargs)
+        try:
+            response = await self.async_client.chat.completions.create(**kwargs)
+        except APITimeoutError as e:
+            print(f"[Kimi Error] 请求超时: {e}")
+            return {
+                "content": "抱歉，Kimi API 请求超时，请稍后重试。",
+                "tool_calls": None,
+                "role": "assistant",
+                "reasoning_content": None,
+                "error": "timeout",
+                "error_message": str(e),
+            }
+        except APIError as e:
+            print(f"[Kimi Error] API 错误: {e}")
+            return {
+                "content": f"抱歉，Kimi API 调用失败: {e.message}",
+                "tool_calls": None,
+                "role": "assistant",
+                "reasoning_content": None,
+                "error": "api_error",
+                "error_message": str(e),
+            }
+        except Exception as e:
+            print(f"[Kimi Error] 未知错误: {e}")
+            return {
+                "content": f"抱歉，调用 Kimi 时发生错误: {str(e)}",
+                "tool_calls": None,
+                "role": "assistant",
+                "reasoning_content": None,
+                "error": "unknown",
+                "error_message": str(e),
+            }
         
         message = response.choices[0].message
         
@@ -127,7 +158,32 @@ class KimiProvider(BaseProviderImpl):
         if tools is not None:
             kwargs["tools"] = tools
         
-        stream = await self.async_client.chat.completions.create(**kwargs)
+        try:
+            stream = await self.async_client.chat.completions.create(**kwargs)
+        except APITimeoutError as e:
+            print(f"[Kimi Error] 流式请求超时: {e}")
+            yield {
+                "content": "抱歉，Kimi API 请求超时，请稍后重试。",
+                "finish_reason": "error",
+                "error": "timeout",
+            }
+            return
+        except APIError as e:
+            print(f"[Kimi Error] 流式 API 错误: {e}")
+            yield {
+                "content": f"抱歉，Kimi API 调用失败: {e.message}",
+                "finish_reason": "error",
+                "error": "api_error",
+            }
+            return
+        except Exception as e:
+            print(f"[Kimi Error] 流式未知错误: {e}")
+            yield {
+                "content": f"抱歉，调用 Kimi 时发生错误: {str(e)}",
+                "finish_reason": "error",
+                "error": "unknown",
+            }
+            return
         
         async for chunk in stream:
             if chunk.choices:

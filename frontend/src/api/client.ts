@@ -36,7 +36,7 @@ export interface Message {
   metadata?: any
 }
 
-export type LLMProvider = 'openai' | 'deepseek' | 'kimi'
+export type LLMProvider = 'openai' | 'deepseek' | 'kimi' | 'gemma4'
 
 export const api = {
   async createSession(provider?: string, model?: string): Promise<{ session_id: string }> {

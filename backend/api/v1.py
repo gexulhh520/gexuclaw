@@ -50,7 +50,7 @@ async def create_session(
     
     # 同时在 PostgreSQL 创建会话记录
     session_data = ChatSessionCreate(
-        title="新会话",
+        title="聊天会话",
         provider=data.provider or "openai",
         model=data.model
     )
