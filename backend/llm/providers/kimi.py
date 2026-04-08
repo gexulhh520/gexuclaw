@@ -16,7 +16,57 @@ class KimiProvider(BaseProviderImpl):
         self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def _convert_to_provider_format(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """转换为 Kimi API 格式"""
+        """
+        转换为 Kimi API 格式
+        
+        输入格式 (messages):
+        ```python
+        [
+            {
+                "role": "user",  # 或 "assistant", "system", "tool"
+                "content": [
+                    {"type": "text", "content": "文本内容"},
+                    {"type": "image", "content": "图片路径/base64/URL"},
+                    {"type": "audio", "content": "音频路径/base64"}
+                ],
+                "tool_calls": [...],  # 可选，assistant 角色可能有
+                "tool_call_id": "..."  # 可选，tool 角色可能有
+            }
+        ]
+        ```
+        
+        输出格式 (转换后):
+        ```python
+        [
+            {
+                "role": "user",
+                "content": [  # 多模态或长度>1 时为数组
+                    {
+                        "type": "text",
+                        "text": "文本内容"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,xxx 或 https://xxx"
+                        }
+                    }
+                ],
+                # 或纯文本时： "content": "纯文本内容"
+                "tool_calls": [...],  # 保留
+                "tool_call_id": "..."  # 保留
+            }
+        ]
+        ```
+        
+        转换规则:
+        1. text -> {"type": "text", "text": "..."}
+        2. image -> {"type": "image_url", "image_url": {"url": "data:... 或 URL"}}
+           - 自动读取本地文件路径并转 base64
+           - 自动添加 MIME type
+        3. audio -> 暂不支持 (Kimi API 限制)
+        4. 纯文本时 content 为字符串，多模态时 content 为数组
+        """
         converted = []
         
         for msg in self._normalize_messages(messages):
@@ -37,11 +87,22 @@ class KimiProvider(BaseProviderImpl):
                     })
                 elif item_type == "image":
                     image_data = item.get("content", "")
-                    if isinstance(image_data, bytes):
+                    
+                    # Try to read file and convert to base64
+                    b64 = self._content_to_base64(image_data)
+                    
+                    if b64:
+                        if b64.startswith("data:"):
+                            url = b64  # Already data URL
+                        else:
+                            mime = self._get_mime_type(image_data) if isinstance(image_data, str) else "image/png"
+                            url = f"data:{mime};base64,{b64}"
+                    elif isinstance(image_data, bytes):
                         b64 = base64.b64encode(image_data).decode()
                         url = f"data:image/png;base64,{b64}"
                     else:
-                        url = str(image_data)
+                        url = str(image_data)  # Fallback
+                    
                     kimi_content.append({
                         "type": "image_url",
                         "image_url": {"url": url}

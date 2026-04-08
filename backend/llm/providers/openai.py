@@ -48,17 +48,20 @@ class OpenAIProvider(BaseProviderImpl):
                 elif item_type == "image":
                     image_data = item.get("content", "")
                     
-                    if isinstance(image_data, bytes):
+                    # Try to read file and convert to base64
+                    b64 = self._content_to_base64(image_data)
+                    
+                    if b64:
+                        if b64.startswith("data:"):
+                            url = b64  # Already data URL
+                        else:
+                            mime = self._get_mime_type(image_data) if isinstance(image_data, str) else "image/png"
+                            url = f"data:{mime};base64,{b64}"
+                    elif isinstance(image_data, bytes):
                         b64 = base64.b64encode(image_data).decode()
-                        mime = item.get("mime_type", "image/png")
-                        url = f"data:{mime};base64,{b64}"
-                    elif isinstance(image_data, str) and image_data.startswith(("http://", "https://", "data:")):
-                        url = image_data
-                    elif isinstance(image_data, str):
-                        b64 = base64.b64encode(image_data.encode()).decode()
                         url = f"data:image/png;base64,{b64}"
                     else:
-                        url = str(image_data)
+                        url = str(image_data)  # Fallback
                     
                     openai_content.append({
                         "type": "image_url",
@@ -68,15 +71,19 @@ class OpenAIProvider(BaseProviderImpl):
                 elif item_type == "audio":
                     audio_data = item.get("content", "")
                     
-                    if isinstance(audio_data, bytes):
+                    # Try to read file and convert to base64
+                    b64 = self._content_to_base64(audio_data)
+                    
+                    if b64:
+                        if b64.startswith("data:"):
+                            # Extract base64 from data URL
+                            b64 = b64.split(",", 1)[-1] if "," in b64 else b64
+                        else:
+                            pass  # Already base64
+                    elif isinstance(audio_data, bytes):
                         b64 = base64.b64encode(audio_data).decode()
-                    elif isinstance(audio_data, str):
-                        try:
-                            b64 = base64.b64encode(audio_data.encode()).decode()
-                        except:
-                            b64 = audio_data
                     else:
-                        b64 = str(audio_data)
+                        b64 = str(audio_data)  # Fallback
                     
                     openai_content.append({
                         "type": "input_audio",

@@ -39,11 +39,22 @@ class DeepSeekProvider(BaseProviderImpl):
                     })
                 elif item_type == "image":
                     image_data = item.get("content", "")
-                    if isinstance(image_data, bytes):
+                    
+                    # Try to read file and convert to base64
+                    b64 = self._content_to_base64(image_data)
+                    
+                    if b64:
+                        if b64.startswith("data:"):
+                            url = b64  # Already data URL
+                        else:
+                            mime = self._get_mime_type(image_data) if isinstance(image_data, str) else "image/png"
+                            url = f"data:{mime};base64,{b64}"
+                    elif isinstance(image_data, bytes):
                         b64 = base64.b64encode(image_data).decode()
                         url = f"data:image/png;base64,{b64}"
                     else:
-                        url = str(image_data)
+                        url = str(image_data)  # Fallback
+                    
                     deepseek_content.append({
                         "type": "image_url",
                         "image_url": {"url": url}

@@ -5,6 +5,83 @@ from llm.client import llm_client_instance
 from tools import get_tool_runtime, ToolResult
 
 
+def _convert_multimodal_to_text(messages: List[Dict]) -> List[Dict]:
+    """
+    Convert multimodal messages: keep original array + merge text description
+    
+    Input:
+    [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "content": "Please analyze this image"},
+                {"type": "image", "content": "/images/2024/04/abc123.png"}
+            ]
+        }
+    ]
+    
+    Output:
+    [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "content": "Please analyze this image\n\n[Image Resource: /images/2024/04/abc123.png]"},
+                {"type": "image", "content": "/images/2024/04/abc123.png"}
+            ]
+        }
+    ]
+    """
+    converted = []
+    
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        
+        # If string, keep as is
+        if isinstance(content, str):
+            converted.append({"role": role, "content": content})
+            continue
+        
+        # If list (multimodal), merge text + keep original structure
+        if isinstance(content, list):
+            text_parts = []
+            resources = []
+            new_content = []
+            
+            for item in content:
+                item_type = item.get("type")
+                item_content = item.get("content", "")
+                
+                # Keep original item
+                new_content.append(item)
+                
+                if item_type == "text":
+                    text_parts.append(item_content)
+                elif item_type == "image":
+                    resources.append(f"[Image Resource: {item_content}]")
+                elif item_type == "audio":
+                    resources.append(f"[Audio Resource: {item_content}]")
+            
+            # Merge text description
+            merged_text = "\n".join(text_parts)
+            if resources:
+                merged_text += "\n\n" + "\n".join(resources)
+            
+            # Replace first text item with merged text
+            if text_parts and new_content:
+                for i, item in enumerate(new_content):
+                    if item.get("type") == "text":
+                        new_content[i] = {"type": "text", "content": merged_text}
+                        break
+            
+            converted.append({"role": role, "content": new_content})
+        
+        else:
+            converted.append({"role": role, "content": str(content)})
+    
+    return converted
+
+
 def _smart_truncate(data: Any, max_length: int = 3000) -> str:
     """
     格式化工具返回数据
@@ -173,6 +250,9 @@ class AgentExecutor:
     async def _thinking_node(self, state: AgentState):
 
         messages = state["messages"]
+        
+        # Convert multimodal messages to plain text description
+        text_messages = _convert_multimodal_to_text(messages)
 
         # 获取可用工具并传递给 LLM
         tools = get_available_tools()
@@ -180,7 +260,7 @@ class AgentExecutor:
         #print(f"[Agent Debug] Available Tools: {tools}")
 
         resp = await llm_client_instance.chat(
-            messages,
+            text_messages,  # Use converted plain text messages
             provider=self.provider,
             model=self.model,  # 传入动态模型
             tools=tools if tools else None,
@@ -243,13 +323,16 @@ class AgentExecutor:
 
     # ====== responding：最终输出准备 ======
     async def _responding_node(self, state: AgentState):
+        
+        # Convert messages to plain text for final response
+        text_messages = _convert_multimodal_to_text(state["messages"])
 
         final_prompt = [
             {
                 "role": "system",
                 "content": "请直接输出最终答案，不要调用工具"
             },
-            *state["messages"]
+            *text_messages
         ]
 
         state["final_messages"] = final_prompt

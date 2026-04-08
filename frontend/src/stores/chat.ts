@@ -9,6 +9,8 @@ interface WebSocketMessage {
   message?: string
 }
 
+export type MultimodalContent = Array<{ type: string; content: string }>
+
 export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string>('')
   const messages = ref<Message[]>([])
@@ -114,7 +116,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  async function sendMessage(content: string, msgProvider?: LLMProvider, msgModel?: string) {
+  async function sendMessage(content: string | MultimodalContent, msgProvider?: LLMProvider, msgModel?: string) {
     if (!sessionId.value) {
       await createSession()
     }

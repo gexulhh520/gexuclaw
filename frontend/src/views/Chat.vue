@@ -73,7 +73,7 @@
             </div>
             <div class="message-content">
               <div class="message-role">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
-              <div class="message-text">{{ msg.content }}</div>
+              <div class="message-text" v-html="formatMessageContent(msg.content)"></div>
             </div>
           </div>
 
@@ -88,27 +88,105 @@
           </div>
         </el-main>
 
-        <el-footer class="chat-input">
-          <el-input
-            v-model="inputMessage"
-            type="textarea"
-            :rows="2"
-            placeholder="输入你的消息..."
-            @keydown.enter.prevent="sendMessage"
-            :disabled="isLoading"
-          />
-          <el-button 
-            :type="isRecording ? 'danger' : 'default'" 
-            :class="isRecording ? 'recording-btn' : ''"
-            @click="toggleVoiceInput" 
-            :disabled="isLoading"
-            circle
-          >
-            <el-icon><Microphone /></el-icon>
-          </el-button>
-          <el-button type="primary" @click="sendMessage" :loading="isLoading">
-            发送
-          </el-button>
+        <el-footer class="chat-footer">
+          <!-- 已上传文件预览 -->
+          <div v-if="uploadedFiles.length > 0" class="uploaded-preview">
+            <div v-for="(file, index) in uploadedFiles" :key="index" class="preview-item">
+              <img v-if="file.type === 'image'" :src="file.url" class="preview-image" />
+              <div v-else-if="file.type === 'audio'" class="preview-audio">
+                <el-icon class="audio-icon"><Headset /></el-icon>
+                <audio :src="file.url" controls class="audio-player"></audio>
+              </div>
+              <el-icon class="remove-btn" @click="removeFile(index)"><Close /></el-icon>
+            </div>
+          </div>
+          
+          <div class="chat-input">
+            <el-input
+              v-model="inputMessage"
+              type="textarea"
+              :rows="2"
+              placeholder="输入你的消息..."
+              @keydown.enter.prevent="sendMessage"
+              :disabled="isLoading"
+            />
+            
+            <div class="input-buttons">
+              <!-- 图片上传按钮 -->
+              <el-upload
+                :show-file-list="false"
+                :before-upload="beforeImageUpload"
+                :http-request="handleImageUpload"
+                accept="image/*"
+              >
+                <el-button :disabled="isLoading" circle title="上传图片">
+                  <el-icon><Picture /></el-icon>
+                </el-button>
+              </el-upload>
+              
+              <!-- 录制中状态：显示停止按钮 -->
+              <el-button 
+                v-if="isRecordingAudio"
+                type="danger"
+                class="recording-btn"
+                @click="stopAudioRecording"
+                circle 
+                title="停止录制"
+              >
+                <el-icon><VideoPause /></el-icon>
+              </el-button>
+              
+              <!-- 非录制状态：显示下拉菜单 -->
+              <el-dropdown v-else @command="handleAudioCommand" :disabled="isLoading">
+                <el-button 
+                  :disabled="isLoading" 
+                  circle 
+                  title="音频功能"
+                >
+                  <el-icon><Headset /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="upload">
+                      <el-icon><Upload /></el-icon>
+                      上传音频文件
+                    </el-dropdown-item>
+                    <el-dropdown-item command="record">
+                      <el-icon><Microphone /></el-icon>
+                      录制音频
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              
+              <!-- 隐藏的文件上传输入 -->
+              <el-upload
+                ref="audioUploadRef"
+                :show-file-list="false"
+                :before-upload="beforeAudioUpload"
+                :http-request="handleAudioUpload"
+                accept="audio/*"
+                style="display: none;"
+              />
+              
+              <!-- 语音输入按钮 -->
+              <el-button 
+                :type="isRecording ? 'danger' : 'default'" 
+                :class="isRecording ? 'recording-btn' : ''"
+                @click="toggleVoiceInput" 
+                :disabled="isLoading"
+                circle
+                title="语音输入"
+              >
+                <el-icon><Microphone /></el-icon>
+              </el-button>
+              
+              <!-- 发送按钮 -->
+              <el-button type="primary" @click="sendMessage" :loading="isLoading">
+                发送
+              </el-button>
+            </div>
+          </div>
         </el-footer>
       </el-container>
     </el-container>
@@ -121,11 +199,17 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
 import { useUserStore } from '@/stores/user'
-import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone } from '@element-plus/icons-vue'
+import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone, Picture, Headset, Close, Upload, VideoPause } from '@element-plus/icons-vue'
 import type { LLMProvider } from '@/api/client'
 import axios from 'axios'
 
-// 创建 axios 实例，启用 keep-alive
+interface UploadedFile {
+  type: 'image' | 'audio'
+  path: string
+  url: string
+  filename: string
+}
+
 const httpClient = axios.create({
   baseURL: '/api',
   timeout: 30000,
@@ -134,7 +218,6 @@ const httpClient = axios.create({
   },
 })
 
-// 请求拦截器添加 token
 httpClient.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
@@ -152,9 +235,17 @@ const selectedProvider = ref<LLMProvider>('kimi')
 const selectedModel = ref('')
 const sessions = ref<any[]>([])
 const isRecording = ref(false)
+const uploadedFiles = ref<UploadedFile[]>([])
 let recognition: any = null
 
-// 使用 computed 来获取响应式 store 属性
+const isRecordingAudio = ref(false)
+const recordingTime = ref(0)
+const maxRecordingTime = 60
+let mediaRecorder: MediaRecorder | null = null
+let audioChunks: Blob[] = []
+let recordingTimer: number | null = null
+const audioUploadRef = ref()
+
 const sessionId = computed(() => chatStore.sessionId)
 const messages = computed(() => chatStore.messages)
 const isLoading = computed(() => chatStore.isLoading)
@@ -169,7 +260,6 @@ const currentSessionTitle = computed(() => {
   return session?.title || ''
 })
 
-// 同步选择到 store
 watch(selectedProvider, (newVal) => {
   setProvider(newVal)
 })
@@ -178,7 +268,6 @@ watch(selectedModel, (newVal) => {
   setModel(newVal)
 })
 
-// 获取历史会话列表
 async function fetchSessions() {
   try {
     const response = await httpClient.get('/sessions')
@@ -188,25 +277,19 @@ async function fetchSessions() {
   }
 }
 
-// 是否是临时新会话（未创建）
 const isTempSession = ref(false)
 
-// 创建新会话 - 现在只是切换到临时状态
 async function createNewSession() {
-  // 断开当前连接
   chatStore.disconnect()
-  // 清空当前会话ID和消息
   chatStore.sessionId = ''
   chatStore.messages = []
   isTempSession.value = true
-  // 聚焦输入框
   nextTick(() => {
     const inputEl = document.querySelector('.chat-input input') as HTMLInputElement
     inputEl?.focus()
   })
 }
 
-// 切换会话
 async function switchSession(newSessionId: string) {
   isTempSession.value = false
   chatStore.disconnect()
@@ -214,7 +297,6 @@ async function switchSession(newSessionId: string) {
   chatStore.messages = []
   await chatStore.connectWebSocket()
   
-  // 加载历史消息
   try {
     const response = await httpClient.get(`/sessions/${newSessionId}/messages`)
     chatStore.messages = response.data.map((msg: any) => ({
@@ -226,7 +308,6 @@ async function switchSession(newSessionId: string) {
   }
 }
 
-// 删除会话
 async function deleteSession(sessionIdToDelete: string) {
   try {
     await ElMessageBox.confirm('确定要删除这个会话吗？', '提示', {
@@ -237,10 +318,8 @@ async function deleteSession(sessionIdToDelete: string) {
     
     await httpClient.delete(`/sessions/${sessionIdToDelete}`)
     
-    // 直接在前端过滤掉已删除的会话，不用重新请求
     sessions.value = sessions.value.filter(s => s.session_id !== sessionIdToDelete)
     
-    // 如果删除的是当前会话，显示临时状态
     if (sessionIdToDelete === sessionId.value) {
       chatStore.disconnect()
       chatStore.sessionId = ''
@@ -256,14 +335,52 @@ async function deleteSession(sessionIdToDelete: string) {
   }
 }
 
-// 发送消息
-async function sendMessage() {
-  if (!inputMessage.value.trim() || chatStore.isLoading) return
-
-  const content = inputMessage.value
-  inputMessage.value = ''
+function formatMessageContent(content: any): string {
+  if (typeof content === 'string') {
+    return content
+  }
   
-  // 如果是临时会话，先创建会话
+  if (Array.isArray(content)) {
+    return content.map((item: any) => {
+      if (item.type === 'text') {
+        return item.content
+      } else if (item.type === 'image') {
+        return `[图片: ${item.content}]`
+      } else if (item.type === 'audio') {
+        return `[音频: ${item.content}]`
+      }
+      return ''
+    }).join('\n')
+  }
+  
+  return String(content)
+}
+
+function buildMultimodalContent(text: string, files: UploadedFile[]) {
+  const content: Array<{ type: string; content: string }> = []
+  
+  if (text) {
+    content.push({ type: 'text', content: text })
+  }
+  
+  for (const file of files) {
+    content.push({
+      type: file.type,
+      content: file.path
+    })
+  }
+  
+  return content
+}
+
+async function sendMessage() {
+  if ((!inputMessage.value.trim() && uploadedFiles.value.length === 0) || chatStore.isLoading) return
+
+  const textContent = inputMessage.value
+  const files = [...uploadedFiles.value]
+  inputMessage.value = ''
+  uploadedFiles.value = []
+  
   if (isTempSession.value || !chatStore.sessionId) {
     try {
       const response = await httpClient.post('/v1/sessions', { 
@@ -273,9 +390,7 @@ async function sendMessage() {
       const newSessionId = response.data.session_id
       chatStore.sessionId = newSessionId
       isTempSession.value = false
-      // 刷新会话列表
       await fetchSessions()
-      // 连接 WebSocket
       await chatStore.connectWebSocket()
     } catch (error: any) {
       ElMessage.error(error.response?.data?.detail || '创建会话失败')
@@ -283,10 +398,10 @@ async function sendMessage() {
     }
   }
   
-  await sendToAI(content, selectedProvider.value, selectedModel.value || undefined)
+  const multimodalContent = buildMultimodalContent(textContent, files)
+  await sendToAI(multimodalContent, selectedProvider.value, selectedModel.value || undefined)
 }
 
-// 用户菜单命令
 function handleCommand(command: string) {
   if (command === 'logout') {
     userStore.logout()
@@ -295,7 +410,257 @@ function handleCommand(command: string) {
   }
 }
 
-// 语音输入功能
+function beforeImageUpload(file: File) {
+  const isImage = file.type.startsWith('image/')
+  const isLt50M = file.size / 1024 / 1024 < 50
+  
+  if (!isImage) {
+    ElMessage.error('只能上传图片文件!')
+    return false
+  }
+  if (!isLt50M) {
+    ElMessage.error('图片大小不能超过 50MB!')
+    return false
+  }
+  return true
+}
+
+function beforeAudioUpload(file: File) {
+  const isAudio = file.type.startsWith('audio/')
+  const isLt50M = file.size / 1024 / 1024 < 50
+  
+  if (!isAudio) {
+    ElMessage.error('只能上传音频文件!')
+    return false
+  }
+  if (!isLt50M) {
+    ElMessage.error('音频大小不能超过 50MB!')
+    return false
+  }
+  return true
+}
+
+async function handleImageUpload(options: any) {
+  const formData = new FormData()
+  formData.append('file', options.file)
+  
+  try {
+    const response = await httpClient.post('/upload/image', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    uploadedFiles.value.push({
+      type: 'image',
+      path: response.data.path,
+      url: response.data.url,
+      filename: response.data.filename
+    })
+    ElMessage.success('图片上传成功')
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '图片上传失败')
+  }
+}
+
+async function handleAudioUpload(options: any) {
+  const formData = new FormData()
+  formData.append('file', options.file)
+  
+  try {
+    const response = await httpClient.post('/upload/audio', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    uploadedFiles.value.push({
+      type: 'audio',
+      path: response.data.path,
+      url: response.data.url,
+      filename: response.data.filename
+    })
+    ElMessage.success('音频上传成功')
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '音频上传失败')
+  }
+}
+
+function removeFile(index: number) {
+  uploadedFiles.value.splice(index, 1)
+}
+
+function handleAudioCommand(command: string) {
+  if (command === 'upload') {
+    audioUploadRef.value?.$el?.querySelector('input')?.click()
+  } else if (command === 'record') {
+    toggleAudioRecording()
+  }
+}
+
+async function toggleAudioRecording() {
+  if (isRecordingAudio.value) {
+    stopAudioRecording()
+  } else {
+    await startAudioRecording()
+  }
+}
+
+// 将 AudioBuffer 转换为 WAV 格式
+function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
+  const numChannels = buffer.numberOfChannels
+  const sampleRate = buffer.sampleRate
+  const format = 1 // PCM
+  const bitDepth = 16
+  
+  const bytesPerSample = bitDepth / 8
+  const blockAlign = numChannels * bytesPerSample
+  
+  const data = []
+  for (let i = 0; i < buffer.length; i++) {
+    for (let channel = 0; channel < numChannels; channel++) {
+      const sample = buffer.getChannelData(channel)[i]
+      const intSample = Math.max(-1, Math.min(1, sample))
+      data.push(intSample < 0 ? intSample * 0x8000 : intSample * 0x7FFF)
+    }
+  }
+  
+  const dataLength = data.length * bytesPerSample
+  const bufferLength = 44 + dataLength
+  
+  const arrayBuffer = new ArrayBuffer(bufferLength)
+  const view = new DataView(arrayBuffer)
+  
+  // RIFF chunk descriptor
+  writeString(view, 0, 'RIFF')
+  view.setUint32(4, 36 + dataLength, true)
+  writeString(view, 8, 'WAVE')
+  
+  // fmt sub-chunk
+  writeString(view, 12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, format, true)
+  view.setUint16(22, numChannels, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * blockAlign, true)
+  view.setUint16(32, blockAlign, true)
+  view.setUint16(34, bitDepth, true)
+  
+  // data sub-chunk
+  writeString(view, 36, 'data')
+  view.setUint32(40, dataLength, true)
+  
+  // Write PCM samples
+  let offset = 44
+  for (const sample of data) {
+    view.setInt16(offset, sample, true)
+    offset += 2
+  }
+  
+  return arrayBuffer
+}
+
+function writeString(view: DataView, offset: number, string: string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i))
+  }
+}
+
+async function startAudioRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    
+    // 使用 AudioContext 录制为 WAV 格式
+    const audioContext = new AudioContext()
+    const mediaStreamSource = audioContext.createMediaStreamSource(stream)
+    const destination = audioContext.createMediaStreamDestination()
+    mediaStreamSource.connect(destination)
+    
+    mediaRecorder = new MediaRecorder(stream)
+    audioChunks = []
+    
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        audioChunks.push(event.data)
+      }
+    }
+    
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(track => track.stop())
+      audioContext.close()
+      
+      // 将录制的音频转换为 WAV
+      const audioBlob = new Blob(audioChunks)
+      const arrayBuffer = await audioBlob.arrayBuffer()
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
+      const wavBuffer = audioBufferToWav(audioBuffer)
+      const wavBlob = new Blob([wavBuffer], { type: 'audio/wav' })
+      
+      const filename = `recording_${Date.now()}.wav`
+      const audioFile = new File([wavBlob], filename, { type: 'audio/wav' })
+      
+      console.log('[Audio Recording] WAV file info:', {
+        filename,
+        size: audioFile.size,
+        type: audioFile.type
+      })
+      
+      await uploadRecordedAudio(audioFile)
+    }
+    
+    mediaRecorder.start()
+    isRecordingAudio.value = true
+    recordingTime.value = 0
+    
+    recordingTimer = window.setInterval(() => {
+      recordingTime.value++
+      if (recordingTime.value >= maxRecordingTime) {
+        stopAudioRecording()
+        ElMessage.warning('已达到最大录制时长 60 秒')
+      }
+    }, 1000)
+    
+    ElMessage.success('开始录制音频...')
+  } catch (error: any) {
+    console.error('录制音频失败:', error)
+    if (error.name === 'NotAllowedError') {
+      ElMessage.error('请允许麦克风权限')
+    } else {
+      ElMessage.error('无法访问麦克风，请检查设备')
+    }
+  }
+}
+
+function stopAudioRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop()
+  }
+  
+  if (recordingTimer) {
+    clearInterval(recordingTimer)
+    recordingTimer = null
+  }
+  
+  isRecordingAudio.value = false
+}
+
+async function uploadRecordedAudio(file: File) {
+  const formData = new FormData()
+  formData.append('file', file)
+  
+  const currentRecordingTime = recordingTime.value
+  
+  try {
+    const response = await httpClient.post('/upload/audio', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    uploadedFiles.value.push({
+      type: 'audio',
+      path: response.data.path,
+      url: response.data.url,
+      filename: response.data.filename
+    })
+    ElMessage.success(`音频录制成功 (${currentRecordingTime}秒)`)
+    recordingTime.value = 0
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '音频上传失败')
+  }
+}
+
 function initSpeechRecognition() {
   const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
   if (!SpeechRecognition) {
@@ -348,26 +713,28 @@ function toggleVoiceInput() {
   }
 }
 
-// 页面加载
 onMounted(async () => {
   await fetchSessions()
   
-  // 如果没有会话，显示临时状态
   if (sessions.value.length === 0) {
     isTempSession.value = true
   } else if (!sessionId.value) {
-    // 切换到第一个会话
     await switchSession(sessions.value[0].session_id)
   } else {
     await chatStore.connectWebSocket()
   }
 })
 
-// 页面关闭时断开 WebSocket
 onUnmounted(() => {
   chatStore.disconnect()
   if (recognition && isRecording.value) {
     recognition.stop()
+  }
+  if (mediaRecorder && isRecordingAudio.value) {
+    mediaRecorder.stop()
+  }
+  if (recordingTimer) {
+    clearInterval(recordingTimer)
   }
 })
 </script>
@@ -495,7 +862,7 @@ onUnmounted(() => {
   padding: 20px;
   background: #ffffff;
   min-height: 0;
-  max-height: calc(100vh - 140px);
+  max-height: calc(100vh - 200px);
 }
 
 .welcome {
@@ -563,17 +930,97 @@ onUnmounted(() => {
   color: white;
 }
 
-.chat-input {
+.chat-footer {
   display: flex;
-  gap: 12px;
-  padding: 20px;
+  flex-direction: column;
+  padding: 0;
   background: #fff;
   border-top: 1px solid #e4e7ed;
   flex-shrink: 0;
+  height: auto;
+}
+
+.uploaded-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 20px;
+  border-bottom: 1px solid #e4e7ed;
+  background: #fafafa;
+}
+
+.preview-item {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #e4e7ed;
+}
+
+.preview-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.preview-audio {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #f0f2f5;
+  padding: 8px;
+}
+
+.audio-icon {
+  font-size: 20px;
+  color: #606266;
+  margin-bottom: 4px;
+}
+
+.audio-player {
+  width: 100%;
+  height: 28px;
+  font-size: 12px;
+}
+
+.remove-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 50%;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+}
+
+.remove-btn:hover {
+  background: rgba(245, 108, 108, 0.9);
+}
+
+.chat-input {
+  display: flex;
+  gap: 12px;
+  padding: 16px 20px;
 }
 
 .chat-input .el-input {
   flex: 1;
+}
+
+.input-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
 }
 
 .recording-btn {

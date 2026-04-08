@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import datetime
 from typing import List, Optional, Union, Any
 
@@ -7,7 +7,7 @@ class ContentItemBase(BaseModel):
     """内容项基础模型"""
     type: str  # text / image / audio / video
     content: str
-    id: Optional[str] = None  # 可选标识符（如 image1, audio_001）
+    id: Optional[Union[str, int]] = None  # 可选标识符（如 image1, audio_001 或数据库 ID）
 
 
 class ContentItemCreate(ContentItemBase):
@@ -22,8 +22,7 @@ class ContentItemResponse(ContentItemBase):
     sort_order: int = 0
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class ChatMessageResponse(BaseModel):
@@ -32,8 +31,7 @@ class ChatMessageResponse(BaseModel):
     content: List[ContentItemResponse]
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class ChatSessionBase(BaseModel):

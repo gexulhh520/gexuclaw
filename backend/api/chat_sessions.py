@@ -78,7 +78,18 @@ def get_session_messages(
             detail="Session not found"
         )
     
-    return chat_session_service.get_session_messages(db, session.id)
+    messages = chat_session_service.get_session_messages(db, session.id)
+    
+    # 手动转换为响应格式
+    return [
+        ChatMessageResponse(
+            id=msg.id,
+            role=msg.role,
+            content=msg.content_items,
+            created_at=msg.created_at
+        )
+        for msg in messages
+    ]
 
 
 @router.delete("/{session_id}")

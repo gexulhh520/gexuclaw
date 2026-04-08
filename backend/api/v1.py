@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from sqlalchemy.orm import Session
 from datetime import datetime
 
@@ -22,7 +22,7 @@ class SessionCreate(BaseModel):
 
 class MessageCreate(BaseModel):
     session_id: str
-    content: str
+    content: Union[str, List[Dict[str, Any]]]
     provider: Optional[str] = "openai"
     model: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None

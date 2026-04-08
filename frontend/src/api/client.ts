@@ -31,10 +31,12 @@ export interface Session {
 
 export interface Message {
   role: string
-  content: string
+  content: string | Array<{ type: string; content: string }>
   timestamp: string
   metadata?: any
 }
+
+export type MultimodalContent = Array<{ type: string; content: string }>
 
 export type LLMProvider = 'openai' | 'deepseek' | 'kimi' | 'gemma4'
 
@@ -62,7 +64,7 @@ export const api = {
 
   async sendMessage(
     sessionId: string,
-    content: string,
+    content: string | MultimodalContent,
     provider?: LLMProvider,
     model?: string
   ): Promise<{

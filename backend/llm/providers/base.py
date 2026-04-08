@@ -1,3 +1,5 @@
+import base64
+from pathlib import Path
 from typing import Optional, List, Dict, Any, AsyncGenerator, Protocol, Union
 
 
@@ -60,6 +62,103 @@ class BaseProvider(Protocol):
 
 class BaseProviderImpl:
     """Provider base implementation - provides message format conversion utilities"""
+    
+    def _read_file_content(self, file_path: str) -> Optional[bytes]:
+        """
+        Read file content from path
+        
+        Supports:
+        - Relative path: /images/2024/04/abc123.png
+        - Absolute path: D:/gexuclaw_uploads/images/2024/04/abc123.png
+        - URL: http://... (returns None, should be handled separately)
+        - Base64: already encoded (returns None)
+        """
+        if not file_path:
+            return None
+        
+        if not isinstance(file_path, str):
+            return None
+        
+        # URL or data URL - not a file path
+        if file_path.startswith(("http://", "https://", "data:")):
+            return None
+        
+        # Check if already base64
+        try:
+            base64.b64decode(file_path)
+            return None  # Already base64, no need to read
+        except:
+            pass
+        
+        # Build full path
+        from core.config import get_settings
+        settings = get_settings()
+        
+        # Remove leading slash if present
+        relative_path = file_path.lstrip("/")
+        full_path = Path(settings.UPLOAD_DIR) / relative_path
+        
+        if not full_path.exists():
+            print(f"[Provider] File not found: {full_path}")
+            return None
+        
+        with open(full_path, "rb") as f:
+            return f.read()
+    
+    def _content_to_base64(self, content: str, default_mime: str = "image/png") -> Optional[str]:
+        """
+        Convert content to base64 string
+        
+        Handles:
+        - File path -> read and encode
+        - URL -> return as is
+        - Base64 -> return as is
+        - Bytes -> encode
+        """
+        if not content:
+            return None
+        
+        # URL or data URL - return as is
+        if isinstance(content, str) and content.startswith(("http://", "https://", "data:")):
+            return content
+        
+        # Bytes - encode directly
+        if isinstance(content, bytes):
+            return base64.b64encode(content).decode()
+        
+        # Try to read as file path
+        file_content = self._read_file_content(content)
+        if file_content:
+            return base64.b64encode(file_content).decode()
+        
+        # Check if already base64
+        if isinstance(content, str):
+            try:
+                base64.b64decode(content)
+                return content
+            except:
+                pass
+        
+        return None
+    
+    def _get_mime_type(self, file_path: str) -> str:
+        """Get MIME type from file extension"""
+        ext = file_path.lower().split(".")[-1] if "." in file_path else ""
+        
+        mime_map = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "wav": "audio/wav",
+            "mp3": "audio/mpeg",
+            "m4a": "audio/mp4",
+            "ogg": "audio/ogg",
+            "webm": "audio/webm",
+        }
+        
+        return mime_map.get(ext, "application/octet-stream")
     
     def _normalize_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         """
