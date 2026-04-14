@@ -1,0 +1,137 @@
+# =====================================================
+# LangGraph 完整上下文管理策略示例（2026 最新推荐）
+# 演示：token-based trim + progressive summarization + 长消息预处理
+# 适用于网页操作 Agent（多轮 Tool 调用 + 用户长文）
+# =====================================================
+import os
+from typing import Annotated, Literal, TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langchain_core.messages import (
+    BaseMessage, HumanMessage, AIMessage, SystemMessage,
+    trim_messages, RemoveMessage
+)
+from langchain_core.prompts import ChatPromptTemplate
+import tiktoken # pip install tiktoken （精确计数）
+# ====================== 1. State 定义（核心） ======================
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages] # 短时对话历史
+    current_page: dict | None # 结构化当前页面状态（不塞进 messages）
+    completed_tasks: list[str] # 已完成任务（结构化，永不丢失）
+    summary_history: str # progressive summary（渐进总结）
+# ====================== 2. Token 计数器（token-based 核心） ======================
+def count_tokens(messages: list[BaseMessage], model: str = "gpt-4o") -> int:
+    """精确 token 计数（支持所有主流模型）"""
+    encoding = tiktoken.encoding_for_model(model)
+    text = "\n".join([msg.content for msg in messages if hasattr(msg, "content")])
+    return len(encoding.encode(text))
+# ====================== 3. 长消息预处理（解决“最新一条就超出”） ======================
+def preprocess_long_message(content: str, max_single_tokens: int = 15000) -> str | dict:
+    """单条超长消息（用户长文）立即结构化提取"""
+    tokens = count_tokens([HumanMessage(content=content)])
+    if tokens <= max_single_tokens:
+        return content
+   
+    # 用便宜模型总结成结构化 JSON（网页操作特别有效）
+    # 这里模拟 summarizer（实际替换成你的 cheap_llm）
+    print(f"⚠️ 检测到单条消息 {tokens} tokens，触发预处理...")
+    structured = {
+        "overall_goal": "操作网页完成指定任务",
+        "steps": ["步骤1：打开URL...", "步骤2：点击按钮...", "...（已提取）"],
+        "constraints": ["不要刷新页面", "只提取表格数据"],
+        "key_urls": ["https://example.com/pageA"],
+        "extracted_data_template": {"title": "", "data": []}
+    }
+    print("✅ 已将长消息结构化为 JSON（token 压缩 70%+）")
+    return structured # 后面注入 current_page，不放 messages
+# ====================== 4. Trim 节点（token-based 修剪，日常最常用） ======================
+def trim_node(state: AgentState, max_keep_tokens: int = 25000) -> AgentState:
+    """超过 70% 上下文时，只保留最近 N token"""
+    total_tokens = count_tokens(state["messages"])
+    model_context = 128000 # 假设你的模型是 128k（可改成 200k）
+   
+    if total_tokens <= model_context * 0.70:
+        return state # 未超阈值，不 trim
+   
+    print(f"🔥 总 token {total_tokens} 超过 70% ({model_context*0.70})，触发 trim...")
+   
+    trimmed_messages = trim_messages(
+        state["messages"],
+        strategy="last", # 保留最新的（最重要）
+        max_tokens=max_keep_tokens, # 保留最近 25k token 缓冲
+        token_counter=lambda msgs: count_tokens(msgs),
+        include_system=True,
+        start_on="human", # 保证 human + tool 完整
+        end_on=("human", "tool") # 避免孤立 tool result
+    )
+   
+    # 被 trim 掉的老消息后面会交给 summarization
+    state["messages"] = trimmed_messages
+    print(f"✅ trim 完成，当前 messages token: {count_tokens(trimmed_messages)}")
+    return state
+# ====================== 5. Progressive Summarization 节点（带上之前总结） ======================
+def summarize_node(state: AgentState, summarizer_llm) -> AgentState:
+    """渐进总结：老内容 + 之前 summary 一起总结（推荐！）"""
+    total_tokens = count_tokens(state["messages"])
+    if total_tokens <= 128000 * 0.70:
+        return state
+   
+    print("📋 触发 progressive summarization...")
+   
+    # 提取需要总结的老消息（trim 后剩下的部分）
+    recent = trim_messages(state["messages"], max_tokens=15000, strategy="last", token_counter=lambda m: count_tokens(m))
+    old_messages = [msg for msg in state["messages"] if msg not in recent]
+   
+    if not old_messages:
+        return state
+   
+    # 拼接之前 summary（progressive 关键！）
+    previous_summary = state.get("summary_history", "无历史总结")
+    old_content = "\n".join([f"{msg.type}: {msg.content[:500]}..." for msg in old_messages])
+   
+    summary_prompt = f"""
+你是一个对话历史总结助手。
+当前已有总结：
+{previous_summary}
+以下是需要新增的旧对话内容（从最早到较旧）：
+{old_content}
+请更新总结：
+
+保留用户核心目标、已完成任务、当前页面状态、重要约束
+融合新内容，删除冗余，控制在 500 token 以内
+用 bullet points 输出
+只输出最终总结文本，不要解释
+"""
+   
+    # 实际调用（替换成你的 cheap_llm）
+    new_summary = summarizer_llm.invoke(summary_prompt).content # 模拟
+   
+    state["summary_history"] = new_summary
+    # 把总结作为 SystemMessage 插入最前面（推荐位置）
+    summary_msg = SystemMessage(content=f"【历史对话总结】\n{new_summary}")
+    state["messages"] = [summary_msg] + recent # 替换旧消息
+   
+    print(f"✅ progressive summary 完成（长度 {len(new_summary)} chars）")
+    return state
+
+# ====================== 6. LLM 调用节点（网页操作 Agent 示例） ======================
+def call_model(state: AgentState, llm):
+    # 注入结构化状态（current_page）到 prompt
+    page_info = state.get("current_page") or {}
+    page_str = f"当前页面状态：{page_info}" if page_info else ""
+   
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "你是网页操作 Agent。{page_info} 严格按用户指令操作。"),
+        ("placeholder", "{messages}"),
+        ("system", "历史总结：{summary_history}"),
+    ])
+   
+    messages_for_llm = prompt.invoke({
+        "messages": state["messages"],
+        "page_info": page_str,
+        "summary_history": state.get("summary_history", "")
+    }).to_messages()
+   
+    response = llm.invoke(messages_for_llm) # 你的主 LLM
+    state["messages"].append(response)
+    return state

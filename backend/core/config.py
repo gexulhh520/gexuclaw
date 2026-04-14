@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # 示例: sqlite:///./gexuclaw.db
     # 示例: postgresql+pg8000://user:password@localhost:5432/gexuclaw
     DATABASE_URL: str = "postgresql+pg8000://gexuclaw:123456@localhost:5432/gexuclaw"
+    CHECKPOINT_DATABASE_URL: str = "postgresql://gexuclaw:123456@localhost:5432/gexuclaw"
     
     REDIS_URL: str = "redis://localhost:6379/0"
 

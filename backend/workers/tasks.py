@@ -1,7 +1,12 @@
 import asyncio
+import json
+from typing import List, Dict, Any
+
+from langchain_core.messages import message_chunk_to_message
 from workers.celery_app import celery_app
 from services.session_manager import SessionManager
 from services.chat_session_service import chat_session_service
+from services.agent_execution_service import save_execution_step
 from agents.executor import AgentExecutor
 from websocket.manager import connection_manager
 from models.database import SessionLocal
@@ -13,8 +18,8 @@ _tool_runtime = get_tool_runtime()
 
 
 @celery_app.task(bind=True)
-def execute_agent_task(self, session_id: str, user_input: str, provider: str = "openai", model: str = None, user_id: int = None):
-    return asyncio.run(_execute(self, session_id, user_input, provider, model, user_id))
+def execute_agent_task(self, session_id: str, user_messages: List[dict], provider: str = "openai", model: str = None, user_id: int = None):
+    return asyncio.run(_execute(session_id, user_messages, provider, model, user_id))
 
 
 async def _send_to_session(session_id: str, message: dict):
@@ -28,77 +33,92 @@ async def _send_to_session(session_id: str, message: dict):
         print(f"[WebSocket Debug] Failed to send message to session {session_id}: {e}")
 
 
-async def _execute(self, session_id: str, user_input: str, provider: str = "openai", model: str = None, user_id: int = None):
+async def _execute(session_id: str, user_messages: List[dict], provider: str = "openai", model: str = None, user_id: int = None):
 
     try:
-        # 1. 写入用户消息（Redis）- 已在 v1.py 中写入，这里不需要重复
-        # if not SessionManager.add_message(session_id, "user", user_input):
-        #     raise Exception("Session not found or failed to add message")
-
-        # 2. 获取上下文消息
-        messages = SessionManager.get_messages(session_id)
-        
-        # 3. 获取 system_prompt（不再在这里拼接！传递给 Executor/Provider 内部处理）
+        # 1. 获取 system_prompt
         system_prompt = get_system_prompt("default")
 
-        # 4. 生成 browser_session_id (与 chat session 关联)
+        # 2. 生成 browser_session_id (与 chat session 关联)
         browser_session_id = f"bs_{session_id[:12]}"
 
-        # 5. 创建新的 AgentExecutor 实例（避免全局单例问题）
-        # 传入 model、browser_session_id 和 system_prompt
+        # 3. 创建新的 AgentExecutor 实例
         executor = AgentExecutor(
             provider=provider, 
             model=model,
             browser_session_id=browser_session_id,
-            system_prompt=system_prompt  # 新增：传递给 Executor
+            system_prompt=system_prompt
         )
 
+        # 4. 临时收集所有中间步骤
+        collected_steps: List[Dict[str, Any]] = []
         result = ""
-        # 6. Agent执行（流式）
-        chunk_count = 0
-        async for chunk in executor.execute_stream(messages):  # 不再传入 messages_with_system
-            chunk_count += 1
-            #print(f"[Task Debug] Chunk {chunk_count}: {chunk}")
-            
-            result += chunk
+        step_count = 0
 
-            await _send_to_session(
-                session_id,
-                {
-                    "type": "chunk",
-                    "content": chunk,
-                }
-            )
-        
-        #print(f"[Task Debug] Total chunks: {chunk_count}")
-        #print(f"[Task Debug] Final result: {result}")
+        # 5. 真正流式执行 + 保存中间过程
+        async for event in executor.execute_stream(user_messages, thread_id=session_id):
+            step_count += 1
 
-        # 6. 写入AI回复到 Redis
-        if not SessionManager.add_message(session_id, "assistant", result):
-            print(f"Warning: Failed to add assistant message to Redis session {session_id}")
+            # 过滤 context_trimmed：不推送给前端，也不记录
+            if event.get("type") == "context_trimmed":
+                continue
 
-        # 7. 写入AI回复到 PostgreSQL
-        if user_id:
+            # === 实时推送给前端 WebSocket ===
+            await _send_to_session(session_id, event)
+
+            # === 实时收集中间执行步骤 ===
+            collected_steps.append({
+                "step_type": event["type"],
+                "content": event.get("content"),
+                "tool_name": event.get("tool_name"),
+                "tool_status": event.get("tool_status"),
+            })
+
+            # 累积最终结果（从 thinking_end 事件获取）
+            if event.get("type") == "thinking_end" and event.get("content"):
+                result = event["content"]
+
+        # 6. 执行结束：创建最终 assistant message 并关联所有 steps
+        if result:
+            db = SessionLocal()
             try:
-                db = SessionLocal()
                 # 获取会话
                 session = chat_session_service.get_session_by_id(db, session_id)
                 if session:
-                    # 添加 AI 回复
-                    chat_session_service.add_message(db, session.id, "assistant", result)
-                    print(f"[Task Debug] Saved assistant message to PostgreSQL")
+                    # 创建 assistant message
+                    assistant_message = chat_session_service.add_message(
+                        db, session.id, "assistant", result
+                    )
+                    final_message_id = assistant_message.id
+                    
+                    # 单条保存所有中间步骤
+                    for step in collected_steps:
+                        await save_execution_step(
+                            db=db,
+                            message_id=final_message_id,
+                            step_type=step["step_type"],
+                            content=step.get("content"),
+                            tool_name=step.get("tool_name"),
+                            tool_status=step.get("tool_status"),
+                        )
+                    
+                    print(f"[Task Debug] Saved {len(collected_steps)} execution steps for message {final_message_id}")
+                else:
+                    print(f"[Task Error] Session {session_id} not found in PostgreSQL")
+            finally:
                 db.close()
-            except Exception as e:
-                print(f"[Task Debug] Failed to save to PostgreSQL: {e}")
 
-        # 8. 结束通知
-        await _send_to_session(
-            session_id,
-            {
-                "type": "done",
-                "content": result,
-            }
-        )
+            # 保存到 Redis（保持原有逻辑）
+            SessionManager.add_message(session_id, "assistant", result)
+
+        # 7. 发送完成信号
+        await _send_to_session(session_id, {
+            "type": "done",
+            "content": result,
+            "total_steps": step_count,
+        })
+
+        print(f"[Task Success] Session {session_id} completed ({step_count} steps)")
 
         return {"success": True, "result": result, "provider": provider, "model": model}
 

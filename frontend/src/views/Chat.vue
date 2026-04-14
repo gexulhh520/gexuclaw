@@ -1,50 +1,14 @@
 <template>
   <div class="chat-container">
     <el-container>
-      <!-- 侧边栏：历史会话 -->
-      <el-aside width="260px" class="sidebar">
-        <div class="sidebar-header">
-          <el-button type="primary" @click="createNewSession" :icon="Plus">
-            新建会话
-          </el-button>
-        </div>
-        
-        <div class="session-list">
-          <div
-            v-for="session in sessions"
-            :key="session.session_id"
-            class="session-item"
-            :class="{ active: session.session_id === sessionId }"
-            @click="switchSession(session.session_id)"
-          >
-            <el-icon><ChatDotRound /></el-icon>
-            <span class="session-title">{{ session.title }}</span>
-            <el-icon class="delete-btn" @click.stop="deleteSession(session.session_id)">
-              <Delete />
-            </el-icon>
-          </div>
-        </div>
-        
-        <div class="sidebar-footer">
-          <el-dropdown @command="handleCommand">
-            <span class="user-info">
-              <el-icon><User /></el-icon>
-              {{ userStore.user?.username }}
-              <el-icon><ArrowDown /></el-icon>
-            </span>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="logout">退出登录</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-        </div>
-      </el-aside>
-
+      <!-- 主内容区 -->
       <el-container>
         <el-header class="chat-header">
-          <h2>{{ currentSessionTitle || 'GexuLaw Agent 智能体' }}</h2>
-          <div class="header-controls">
+          <div class="header-left">
+            <span class="logo-text">GexuClaw</span>
+          </div>
+          <h2 class="header-title">{{ currentSessionTitle || '新会话' }}</h2>
+          <div class="header-right">
             <el-select v-model="selectedProvider" placeholder="选择服务商" size="small" style="width: 120px; margin-right: 10px;">
               <el-option label="OpenAI" value="openai" />
               <el-option label="DeepSeek" value="deepseek" />
@@ -58,11 +22,40 @@
               style="width: 150px; margin-right: 10px;"
               clearable
             />
+            <el-button circle @click="showSessionList = true" title="历史会话">
+              <el-icon><Clock /></el-icon>
+            </el-button>
           </div>
         </el-header>
 
         <el-main class="chat-messages">
-          <div v-if="messages.length === 0" class="welcome">
+          <!-- 悬浮菜单按钮 -->
+          <div
+            ref="floatingMenuRef"
+            class="floating-menu"
+            :style="floatingMenuStyle"
+            @pointerdown="onDragStart"
+            @pointerup="onDragEnd"
+            @pointercancel="onDragEnd"
+            @click="toggleFloatingMenu"
+          >
+            <el-icon v-if="!showFloatingMenu"><MoreFilled /></el-icon>
+            <el-icon v-else><Close /></el-icon>
+          </div>
+
+          <!-- 悬浮菜单下拉 -->
+          <div v-if="showFloatingMenu" class="floating-dropdown" :style="floatingDropdownStyle">
+            <div class="floating-item" @click="handleMenuItem('new')">
+              <el-icon><Plus /></el-icon>
+              <span>新建会话</span>
+            </div>
+            <div class="floating-item" @click="handleMenuItem('tasks')">
+              <el-icon><List /></el-icon>
+              <span>我的任务</span>
+            </div>
+          </div>
+
+          <div v-if="messages.length === 0 && !isLoading && executionSteps.length === 0" class="welcome">
             <el-empty description="开始对话，发送你的消息" />
           </div>
 
@@ -73,6 +66,17 @@
             </div>
             <div class="message-content">
               <div class="message-role">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
+              <div class="thinking-badge" v-if="msg.thinkingSteps && msg.thinkingSteps.length > 0" @click="msg.thinkingExpanded = !msg.thinkingExpanded">
+                <el-icon><Clock /></el-icon>
+                <span>思维过程 ({{ msg.thinkingSteps.length }} 步)</span>
+                <el-icon class="expand-icon" :class="{ expanded: msg.thinkingExpanded }"><DArrowRight /></el-icon>
+              </div>
+              <div v-show="msg.thinkingExpanded" class="thinking-detail">
+                <div v-for="(step, idx) in msg.thinkingSteps" :key="idx" class="step-item">
+                  <span class="step-type">{{ getStepTypeLabel(step.type) }}</span>
+                  <span v-if="step.content">: {{ step.content }}</span>
+                </div>
+              </div>
               <div class="message-text" v-html="formatMessageContent(msg.content)"></div>
             </div>
           </div>
@@ -83,9 +87,68 @@
             </div>
             <div class="message-content">
               <div class="message-role">AI</div>
-              <div class="message-text">{{ currentResponse || '正在思考...' }}</div>
+              <div v-if="executionSteps.length > 0" class="execution-steps">
+                <div class="steps-header" @click="stepsExpanded = !stepsExpanded">
+                  <el-icon><Monitor /></el-icon>
+                  <span>执行过程 ({{ executionSteps.length }} 步)</span>
+                  <el-icon class="expand-icon" :class="{ expanded: stepsExpanded }"><DArrowRight /></el-icon>
+                </div>
+                <div v-show="stepsExpanded" class="steps-list">
+                  <div
+                    v-for="(step, idx) in executionSteps"
+                    :key="idx"
+                    class="step-item"
+                    :class="getStepClass(step.type)"
+                  >
+                    <div class="step-content">
+                      <span class="step-type">{{ getStepTypeLabel(step.type) }}</span>
+                      <span v-if="step.tool_name" class="step-tool">: {{ step.tool_name }}</span>
+                      <span v-if="step.content">: {{ step.content }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="message-text">{{ currentResponse || '正在思考...' }}</div>
             </div>
           </div>
+
+        <!-- 历史会话悬浮列表 -->
+        <el-drawer v-model="showSessionList" title="历史会话" direction="rtl" size="300px">
+          <div class="session-drawer">
+            <el-button type="primary" @click="createNewSession" :icon="Plus" style="width: 100%; margin-bottom: 15px;">
+              新建会话
+            </el-button>
+            <div class="session-list">
+              <div
+                v-for="session in sessions"
+                :key="session.session_id"
+                class="session-item"
+                :class="{ active: session.session_id === sessionId }"
+                @click="switchSession(session.session_id)"
+              >
+                <el-icon><ChatDotRound /></el-icon>
+                <span class="session-title">{{ session.title }}</span>
+                <el-icon class="delete-btn" @click.stop="deleteSession(session.session_id)">
+                  <Delete />
+                </el-icon>
+              </div>
+            </div>
+            <div class="session-footer">
+              <el-dropdown @command="handleCommand">
+                <span class="user-info">
+                  <el-icon><User /></el-icon>
+                  {{ userStore.user?.username }}
+                  <el-icon><ArrowDown /></el-icon>
+                </span>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </div>
+        </el-drawer>
         </el-main>
 
         <el-footer class="chat-footer">
@@ -199,7 +262,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
 import { useUserStore } from '@/stores/user'
-import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone, Picture, Headset, Close, Upload, VideoPause } from '@element-plus/icons-vue'
+import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone, Picture, Headset, Close, Upload, VideoPause, Monitor, Loading, CircleCheck, Message, Connection, DArrowRight, Clock, MoreFilled, List } from '@element-plus/icons-vue'
 import type { LLMProvider } from '@/api/client'
 import axios from 'axios'
 
@@ -250,7 +313,98 @@ const sessionId = computed(() => chatStore.sessionId)
 const messages = computed(() => chatStore.messages)
 const isLoading = computed(() => chatStore.isLoading)
 const currentResponse = computed(() => chatStore.currentResponse)
+const executionSteps = computed(() => chatStore.executionSteps)
+const isExecutingTools = computed(() => chatStore.isExecutingTools)
+const currentToolName = computed(() => chatStore.currentToolName)
+const stepsExpanded = ref(true)
+const showSessionList = ref(false)
+const showFloatingMenu = ref(false)
+const floatingMenuStyle = ref({ left: '20px', top: '50%', transform: 'translateY(-50%)' })
+const floatingDropdownStyle = computed(() => {
+  const left = parseInt(floatingMenuStyle.value.left) + 54
+  return {
+    left: left + 'px',
+    top: floatingMenuStyle.value.top,
+    transform: 'translateY(-50%)'
+  }
+})
 const { sendMessage: sendToAI, setProvider, setModel } = chatStore
+
+const floatingMenuRef = ref<HTMLElement | null>(null)
+let isDragging = false
+let hasDragged = false
+let dragOffsetX = 0
+let dragOffsetY = 0
+
+function toggleFloatingMenu() {
+  if (!hasDragged) {
+    showFloatingMenu.value = !showFloatingMenu.value
+  }
+}
+
+function onDragStart(e: PointerEvent) {
+  if (!floatingMenuRef.value) return
+  isDragging = true
+  hasDragged = false
+  floatingMenuRef.value.setPointerCapture(e.pointerId)
+  const rect = floatingMenuRef.value.getBoundingClientRect()
+  dragOffsetX = e.clientX - rect.left
+  dragOffsetY = e.clientY - rect.top
+  floatingMenuStyle.value = {
+    left: rect.left + 'px',
+    top: rect.top + 'px',
+    transform: 'none'
+  }
+}
+
+function onDragMove(e: PointerEvent) {
+  if (!isDragging || !floatingMenuRef.value) return
+  hasDragged = true
+  floatingMenuStyle.value = {
+    left: (e.clientX - dragOffsetX) + 'px',
+    top: (e.clientY - dragOffsetY) + 'px',
+    transform: 'none'
+  }
+}
+
+function onDragEnd(e: PointerEvent) {
+  if (!floatingMenuRef.value) return
+  isDragging = false
+  floatingMenuRef.value.releasePointerCapture(e.pointerId)
+  // 延迟重置 hasDragged，避免 click 事件触发
+  setTimeout(() => {
+    hasDragged = false
+  }, 100)
+}
+
+function handleMenuItem(action: string) {
+  showFloatingMenu.value = false
+  if (action === 'new') {
+    createNewSession()
+  } else if (action === 'tasks') {
+    // TODO: 跳转到我的任务页面
+  }
+}
+
+function getStepClass(type: string): string {
+  switch (type) {
+    case 'tool_start': return 'step-tool-start'
+    case 'tool_end': return 'step-tool-end'
+    case 'thinking_start': return 'step-thinking-start'
+    case 'thinking_end': return 'step-thinking-end'
+    default: return ''
+  }
+}
+
+function getStepTypeLabel(type: string): string {
+  switch (type) {
+    case 'tool_start': return '🔧 工具开始'
+    case 'tool_end': return '✅ 工具完成'
+    case 'thinking_start': return '🤔 思考中'
+    case 'thinking_end': return '💡 思考结果'
+    default: return type
+  }
+}
 
 const currentSessionTitle = computed(() => {
   if (isTempSession.value || !sessionId.value) {
@@ -715,7 +869,7 @@ function toggleVoiceInput() {
 
 onMounted(async () => {
   await fetchSessions()
-  
+
   if (sessions.value.length === 0) {
     isTempSession.value = true
   } else if (!sessionId.value) {
@@ -723,6 +877,8 @@ onMounted(async () => {
   } else {
     await chatStore.connectWebSocket()
   }
+
+  floatingMenuRef.value?.addEventListener('pointermove', onDragMove)
 })
 
 onUnmounted(() => {
@@ -736,6 +892,7 @@ onUnmounted(() => {
   if (recordingTimer) {
     clearInterval(recordingTimer)
   }
+  floatingMenuRef.value?.removeEventListener('pointermove', onDragMove)
 })
 </script>
 
@@ -836,18 +993,44 @@ onUnmounted(() => {
 }
 
 .chat-header {
-  background: #409eff;
-  color: white;
+  background: white;
+  color: #303133;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
   flex-shrink: 0;
+  border-bottom: 1px solid #e4e7ed;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
 }
 
-.chat-header h2 {
+.chat-header .header-left {
+  display: flex;
+  align-items: center;
+  min-width: 150px;
+}
+
+.logo-text {
+  font-size: 1.3rem;
+  font-weight: bold;
+  color: #409eff;
+}
+
+.chat-header .header-title {
+  flex: 1;
   margin: 0;
-  font-size: 1.2rem;
+  font-size: 1.1rem;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-header .header-right {
+  display: flex;
+  align-items: center;
+  min-width: 350px;
+  justify-content: flex-end;
 }
 
 .header-controls {
@@ -1037,5 +1220,245 @@ onUnmounted(() => {
   100% {
     box-shadow: 0 0 0 0 rgba(245, 108, 108, 0);
   }
+}
+
+.thinking-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #909399;
+  cursor: pointer;
+  padding: 4px 8px;
+  background: #f4f4f5;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+
+.thinking-badge .expand-icon {
+  transition: transform 0.3s;
+}
+
+.thinking-badge .expand-icon.expanded {
+  transform: rotate(90deg);
+}
+
+.thinking-detail {
+  background: #f8f9fa;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.thinking-detail .step-item {
+  padding: 4px 0;
+}
+
+.execution-steps {
+  margin-top: 16px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  padding: 12px;
+  border: 1px solid #e4e7ed;
+}
+
+.steps-collapsed {
+  font-size: 12px;
+  color: #909399;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #f4f4f5;
+  border-radius: 4px;
+  width: fit-content;
+  margin-top: 8px;
+}
+
+.steps-collapsed .expand-icon {
+  transition: transform 0.3s;
+}
+
+.steps-collapsed .expand-icon.expanded {
+  transform: rotate(90deg);
+}
+
+.steps-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: #606266;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.steps-header .expand-icon {
+  transition: transform 0.3s;
+  margin-left: auto;
+}
+
+.steps-header .expand-icon.expanded {
+  transform: rotate(90deg);
+}
+
+.thinking-result {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 12px;
+  color: #fff;
+}
+
+.thinking-result .result-label {
+  font-size: 12px;
+  opacity: 0.9;
+  margin-bottom: 8px;
+}
+
+.thinking-result .result-content {
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #fff;
+  border: 1px solid #ebeef5;
+}
+
+.step-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+}
+
+.step-content {
+  flex: 1;
+  color: #606266;
+}
+
+.step-type {
+  font-weight: 500;
+}
+
+.step-tool {
+  color: #409eff;
+  font-weight: 500;
+}
+
+.step-status {
+  font-size: 11px;
+  color: #909399;
+}
+
+.thinking-content {
+  display: block;
+  margin-top: 4px;
+  color: #303133;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.step-tool-start {
+  background: #ecf5ff;
+  border-color: #d9ecff;
+}
+
+.step-tool-end {
+  background: #f0f9ff;
+  border-color: #e1f3f8;
+}
+
+.step-thinking-start {
+  background: #fef0f0;
+  border-color: #fde2e2;
+}
+
+.step-thinking-end {
+  background: #f0f9eb;
+  border-color: #e1f3d8;
+}
+
+.session-drawer .session-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.session-drawer .session-footer {
+  padding-top: 15px;
+  border-top: 1px solid #e4e7ed;
+}
+
+.floating-menu {
+  position: fixed;
+  left: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #409eff;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.4);
+  z-index: 100;
+  transition: all 0.3s;
+}
+
+.floating-menu:hover {
+  transform: translateY(-50%) scale(1.1);
+  box-shadow: 0 6px 16px rgba(64, 158, 255, 0.5);
+}
+
+.floating-dropdown {
+  position: fixed;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  z-index: 100;
+  min-width: 140px;
+  overflow: hidden;
+}
+
+.floating-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.floating-item:hover {
+  background: #f5f7fa;
+}
+
+.floating-item .el-icon {
+  margin-right: 8px;
+  color: #409eff;
 }
 </style>

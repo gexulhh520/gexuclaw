@@ -1,85 +1,57 @@
 from typing import List, Dict, Any, AsyncGenerator
+from datetime import datetime
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver   # 测试用（支持异步）
 
 from llm.client import llm_client_instance
 from tools import get_tool_runtime, ToolResult
+from agents.state import AgentState
+from agents.context_manager import context_manager_node
+from core.config import get_settings
 
 
 def _convert_multimodal_to_text(messages: List[Dict]) -> List[Dict]:
     """
-    Convert multimodal messages: keep original array + merge text description
-    
-    Input:
-    [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "content": "Please analyze this image"},
-                {"type": "image", "content": "/images/2024/04/abc123.png"}
-            ]
-        }
-    ]
-    
-    Output:
-    [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "content": "Please analyze this image\n\n[Image Resource: /images/2024/04/abc123.png]"},
-                {"type": "image", "content": "/images/2024/04/abc123.png"}
-            ]
-        }
-    ]
+    只处理 role=user 且 content 为多模态数组的消息，合并文本描述
+    其他消息保持不变
     """
-    converted = []
-    
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content")
-        
-        # If string, keep as is
-        if isinstance(content, str):
-            converted.append({"role": role, "content": content})
+
+        # 只处理 user 角色的多模态内容
+        if role != "user" or not isinstance(content, list):
             continue
-        
-        # If list (multimodal), merge text + keep original structure
-        if isinstance(content, list):
-            text_parts = []
-            resources = []
-            new_content = []
-            
-            for item in content:
-                item_type = item.get("type")
-                item_content = item.get("content", "")
-                
-                # Keep original item
-                new_content.append(item)
-                
-                if item_type == "text":
-                    text_parts.append(item_content)
-                elif item_type == "image":
-                    resources.append(f"[Image Resource: {item_content}]")
-                elif item_type == "audio":
-                    resources.append(f"[Audio Resource: {item_content}]")
-            
-            # Merge text description
-            merged_text = "\n".join(text_parts)
-            if resources:
-                merged_text += "\n\n" + "\n".join(resources)
-            
-            # Replace first text item with merged text
-            if text_parts and new_content:
-                for i, item in enumerate(new_content):
-                    if item.get("type") == "text":
-                        new_content[i] = {"type": "text", "content": merged_text}
-                        break
-            
-            converted.append({"role": role, "content": new_content})
-        
-        else:
-            converted.append({"role": role, "content": str(content)})
-    
-    return converted
+
+        has_multimodal = any(item.get("type") in ["image", "audio"] for item in content)
+        if not has_multimodal:
+            continue
+
+        text_parts = []
+        resources = []
+
+        for item in content:
+            item_type = item.get("type")
+            item_content = item.get("content", "")
+
+            if item_type == "text":
+                text_parts.append(item_content)
+            elif item_type == "image":
+                resources.append(f"[Image Resource: {item_content}]")
+            elif item_type == "audio":
+                resources.append(f"[Audio Resource: {item_content}]")
+
+        merged_text = "\n".join(text_parts)
+        if resources:
+            merged_text += "\n\n" + "\n".join(resources)
+
+        if text_parts:
+            for i, item in enumerate(content):
+                if item.get("type") == "text":
+                    content[i] = {"type": "text", "content": merged_text}
+                    break
+
+    return messages
 
 
 def _smart_truncate(data: Any, max_length: int = 3000) -> str:
@@ -107,7 +79,8 @@ def _smart_truncate(data: Any, max_length: int = 3000) -> str:
 # ====== 工具系统 ======
 async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = None) -> List[Dict[str, Any]]:
     """
-    执行工具调用
+    执行工具调用（已优化，适配新 LangGraph + trim/summarize）
+    
     tool_calls 格式：
     [
         {
@@ -125,7 +98,9 @@ async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = N
         {
             "tool_call_id": "call_xxx",
             "role": "tool",
-            "content": "执行结果..."
+            "content": "执行结果...",
+            "name": "filesystem__write_file",
+            "tool_name": "filesystem__write_file"
         }
     ]
     
@@ -138,7 +113,13 @@ async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = N
 
     for call in tool_calls:
         try:
-            tool_call_id = call.get("id") or call.get("tool_call_id") or f"call_{id(call)}"
+            # 统一 tool_call_id 生成逻辑
+            tool_call_id = (
+                call.get("id")
+                or call.get("tool_call_id")
+                or f"call_{id(call)}_{hash(str(call)) % 10000}"
+            )
+
             function_info = call.get("function", {})
             name = function_info.get("name", "")
             arguments_str = function_info.get("arguments", "{}")
@@ -147,39 +128,39 @@ async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = N
             import json
             arguments = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
 
-            # 如果是浏览器操作且提供了 browser_session_id，自动注入
+            # 浏览器工具自动注入 session_id
             if browser_session_id and name.startswith("browser__"):
-                # launch_browser 时注入 session_id
-                if "launch_browser" in name and "browser_session_id" not in arguments:
-                    arguments["browser_session_id"] = browser_session_id
-                # 其他浏览器操作如果需要 session_id 也注入（navigate, click 等）
+                if "launch_browser" in name:
+                    arguments.setdefault("browser_session_id", browser_session_id)
                 elif any(op in name for op in ["navigate", "click", "fill", "type", "get_text"]):
-                    if "session_id" not in arguments:
-                        arguments["session_id"] = browser_session_id
+                    arguments.setdefault("session_id", browser_session_id)
 
-            # 执行工具（异步）
-            print(f"[Tool Debug] Executing tool: {name} with args: {arguments}")
+            print(f"[Tool Debug] Executing: {name} | Args: {arguments}")
+
             result = await tool_runtime.execute_by_name_async(name, arguments)
-            print(f"[Tool Debug] Tool result: {result}")
-            
-            # 格式化结果（智能截断，保留文本，省略 base64 等大内容）
-            if result.success:
-                content = f"工具 [{name}] 执行成功: {_smart_truncate(result.data)}"
-            else:
-                content = f"工具 [{name}] 执行失败: {_smart_truncate(result.error)}"
 
-            # 构建 tool 消息（包含 tool_call_id）
+            # 格式化内容（保留智能截断逻辑）
+            if result.success:
+                content = f"工具 [{name}] 执行成功：{_smart_truncate(result.data)}"
+            else:
+                content = f"工具 [{name}] 执行失败：{_smart_truncate(result.error)}"
+
+            # ==================== 关键优化点 ====================
             tool_messages.append({
-                "tool_call_id": tool_call_id,
-                "role": "tool",
-                "content": content
+                "tool_call_id": tool_call_id,      # LangGraph 推荐字段
+                "role": "tool",                    # 必须是 "tool"
+                "content": content,
+                "name": name,                      # 新增：工具名称，便于 trim/summarize 识别
+                "tool_name": name,                 # 额外字段，方便调试和前端展示
             })
 
         except Exception as e:
             tool_messages.append({
-                "tool_call_id": call.get("id", ""),
+                "tool_call_id": call.get("id") or f"call_error_{id(call)}",
                 "role": "tool",
-                "content": f"工具调用异常: {str(e)}"
+                "content": f"工具调用异常：{str(e)}",
+                "name": name if 'name' in locals() else "unknown",
+                "tool_name": name if 'name' in locals() else "unknown",
             })
 
     return tool_messages
@@ -194,10 +175,6 @@ def get_available_tools() -> List[Dict[str, Any]]:
     return tools
 
 
-# ====== 状态定义 ======
-AgentState = Dict[str, Any]
-
-
 # ====== Agent Executor ======
 class AgentExecutor:
     provider: str = "openai"
@@ -209,15 +186,20 @@ class AgentExecutor:
         self.model = model
         self.browser_session_id = browser_session_id
         self.system_prompt = system_prompt  # 新增：存储系统提示词
+
+        # ==================== Checkpointer（支持持久化 + thread_id） ====================
+        self.checkpointer = MemorySaver()
+        
         self.graph = self._build_graph()
 
-    # ====== Graph构建 ======
+    # ====== Graph 构建 ======
     def _build_graph(self):
 
         workflow = StateGraph(AgentState)
 
         workflow.add_node("thinking", self._thinking_node)
         workflow.add_node("acting", self._acting_node)
+        workflow.add_node("context_manager_node", context_manager_node)
         workflow.add_node("responding", self._responding_node)
 
         workflow.set_entry_point("thinking")
@@ -232,10 +214,11 @@ class AgentExecutor:
             }
         )
 
-        workflow.add_edge("acting", "thinking")
+        workflow.add_edge("acting", "context_manager_node")
+        workflow.add_edge("context_manager_node", "thinking")   # 循环继续
         workflow.add_edge("responding", END)
 
-        return workflow.compile()
+        return workflow.compile(checkpointer=self.checkpointer)
 
     # ====== 判断是否继续 ======
     def _should_continue(self, state: AgentState):
@@ -243,16 +226,77 @@ class AgentExecutor:
         resp = state.get("llm_response")
 
         if resp and resp.get("tool_calls"):
-            return "continue"
+           tool_calls = resp.get("tool_calls")
+            # 写回上下文：assistant 消息（包含 tool_calls）
+            # Kimi K2 需要 reasoning_content 字段
+            # 确保 tool_calls 格式正确（id 字段必须存在）
+           if tool_calls:
+                formatted_tool_calls = []
+                for i, tc in enumerate(tool_calls):
+                    formatted_tc = {
+                        "id": tc.get("id") or tc.get("tool_call_id") or f"call_{i}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("function", {}).get("name", ""),
+                            "arguments": tc.get("function", {}).get("arguments", "{}")
+                        }
+                    }
+                    formatted_tool_calls.append(formatted_tc)
+
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": resp.get("content", ""),
+                    "tool_calls": formatted_tool_calls
+                }
+                # 如果有 reasoning_content，也加上（Kimi K2 需要）
+                if resp.get("reasoning_content"):
+                    assistant_msg["reasoning_content"] = resp.get("reasoning_content")
+                print(f"[Agent Debug] assistant_msg = {assistant_msg}")
+                state["messages"].append(assistant_msg)
+                # 注入 thinking_ing 事件
+                state.setdefault("_node_events", [])
+                # 拼接思考内容和工具调用信息
+                tool_calls_info = "\n".join([
+                    f"调用工具: {tc['function']['name']}，参数: {tc['function']['arguments']}"
+                    for tc in formatted_tool_calls
+                ])
+                thinking_content = resp.get("content", "") + "\n" + resp.get("reasoning_content", "") + "\n" + tool_calls_info
+                state["_node_events"].append({
+                    "type": "thinking_ing",
+                    "content": thinking_content,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+
+
+           return "continue"
         return "end"
 
-    # ====== thinking：LLM决策 ======
+    # ====== thinking：LLM 决策 ======
     async def _thinking_node(self, state: AgentState):
 
+        # # 方案 B: 注入 thinking_start 事件
+        # state.setdefault("_node_events", [])
+        # state["_node_events"].append({
+        #     "type": "thinking_start",
+        #     "timestamp": datetime.utcnow().isoformat()
+        # })
+
         messages = state["messages"]
-        
+
         # Convert multimodal messages to plain text description
         text_messages = _convert_multimodal_to_text(messages)
+
+        # 调试日志：打印发送给 LLM 的消息
+        # print(f"[Agent Debug] === 发送给 LLM 的消息 ({len(text_messages)} 条) ===")
+        # for i, msg in enumerate(text_messages):
+        #     print(f"[Agent Debug] [{i}] role={msg.get('role')}")
+        #     print(f"[Agent Debug] [{i}] content={msg.get('content')}")
+        #     print(f"[Agent Debug] [{i}] reasoning_content={msg.get('reasoning_content')}")
+        #     if msg.get('tool_calls'):
+        #         print(f"[Agent Debug] [{i}] tool_calls={msg.get('tool_calls')}")
+        #     if msg.get('tool_call_id'):
+        #         print(f"[Agent Debug] [{i}] tool_call_id={msg.get('tool_call_id')}")
+        # print(f"[Agent Debug] === 消息打印结束 ===")
 
         # 获取可用工具并传递给 LLM
         tools = get_available_tools()
@@ -282,49 +326,67 @@ class AgentExecutor:
         resp = state["llm_response"]
 
         tool_calls = resp.get("tool_calls")
-        
+
         # 获取 browser_session_id
         browser_session_id = state.get("browser_session_id")
 
+
+        
+
+        # 方案 B: 初始化事件队列
+        state.setdefault("_node_events", [])
+
         if tool_calls:
+            # 方案 B: 注入 tool_start 事件
+            for tc in tool_calls:
+                tool_name = tc.get("function", {}).get("name", "")
+                state["_node_events"].append({
+                    "type": "tool_start",
+                    "tool_name": tool_name,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+
             # 执行真实工具，返回 tool 消息列表（注入 browser_session_id）
             tool_messages = await run_tool(tool_calls, browser_session_id=browser_session_id)
 
-            # 写回上下文：assistant 消息（包含 tool_calls）
-            # Kimi K2 需要 reasoning_content 字段
-            # 确保 tool_calls 格式正确（id 字段必须存在）
-            formatted_tool_calls = []
-            for i, tc in enumerate(tool_calls):
-                formatted_tc = {
-                    "id": tc.get("id") or tc.get("tool_call_id") or f"call_{i}",
-                    "type": "function",
-                    "function": {
-                        "name": tc.get("function", {}).get("name", ""),
-                        "arguments": tc.get("function", {}).get("arguments", "{}")
-                    }
-                }
-                formatted_tool_calls.append(formatted_tc)
-            
-            assistant_msg = {
-                "role": "assistant",
-                "content": resp.get("content", ""),
-                "tool_calls": formatted_tool_calls
-            }
-            # 如果有 reasoning_content，也加上（Kimi K2 需要）
-            if resp.get("reasoning_content"):
-                assistant_msg["reasoning_content"] = resp.get("reasoning_content")
-            state["messages"].append(assistant_msg)
 
             # 写回上下文：tool 消息（每个 tool_call 对应一条，包含 tool_call_id）
             for tool_message in tool_messages:
                 state["messages"].append(tool_message)
 
+            # 方案 B: 注入 tool_end 事件
+            for tool_message in tool_messages:
+                content = tool_message.get("content", "")
+                tool_status = "success" if "执行成功" in content else "error"
+                state["_node_events"].append({
+                    "type": "tool_end",
+                    "tool_name": tool_message.get("tool_name", ""),
+                    "tool_status": tool_status,
+                    "content": content,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+
         return state
 
     # ====== responding：最终输出准备 ======
     async def _responding_node(self, state: AgentState):
-        
-        # Convert messages to plain text for final response
+
+        state.setdefault("_node_events", [])
+
+        print(f"[Responding Node] state keys: {state.keys()}")
+        print(f"[Responding Node] llm_response: {state.get('llm_response')}")
+
+        resp = state.get("llm_response", {})
+        final_content = resp.get("content", "")
+
+        print(f"[Responding Node] final_content: {final_content}")
+
+        state["_node_events"].append({
+            "type": "thinking_end",
+            "content": final_content,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
         text_messages = _convert_multimodal_to_text(state["messages"])
 
         final_prompt = [
@@ -352,40 +414,62 @@ class AgentExecutor:
         llm_response = result.get("llm_response", {})
         return llm_response.get("content", "")
 
-    # ====== 流式输出（重点） ======
-    async def execute_stream(self, messages: List[Dict]) -> AsyncGenerator[str, None]:
+    # ====== 真正流式执行（核心） ======
+    async def execute_stream(self, messages: List[Dict], thread_id: str) -> AsyncGenerator[Dict, None]:
+        """
+        方案 B 实现：手动注入事件 + 状态队列消费
+        1. 从 Checkpoint 加载上一次已 trim/summarize 的历史
+        2. 只追加本次用户最新一条消息
+        3. 通过 _node_events 队列传递 thinking/tool 相关事件
+        """
+        if not messages:
+            yield {"type": "error", "content": "No messages provided", "timestamp": datetime.utcnow().isoformat()}
+            return
 
-        state = {
-            "messages": messages,
-            "browser_session_id": self.browser_session_id
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+
+        user_latest_message = messages[-1]
+
+        if self.checkpointer:
+            checkpoint_tuple = await self.checkpointer.aget_tuple(config)
+            if checkpoint_tuple and checkpoint_tuple.checkpoint:
+                history_messages = checkpoint_tuple.checkpoint.get("channel_values", {}).get("messages", [])
+                summary_history = checkpoint_tuple.checkpoint.get("channel_values", {}).get("summary_history", "")
+            else:
+                history_messages = messages[:-1] if len(messages) > 1 else []
+                summary_history = ""
+        else:
+            history_messages = messages[:-1] if len(messages) > 1 else []
+            summary_history = ""
+
+        current_messages = history_messages.copy()
+
+        if not current_messages or current_messages[-1] != user_latest_message:
+            current_messages.append(user_latest_message)
+
+        initial_state: Dict[str, Any] = {
+            "messages": current_messages,
+            "browser_session_id": self.browser_session_id,
+            "summary_history": summary_history,
+            "_node_events": [],  # 初始化事件队列
         }
 
-        result = await self.graph.ainvoke(state)
+        processed_event_ids = set()  # 已处理的事件 ID 集合
 
-        # 调试日志
-        #print(f"[Stream Debug] Full result: {result}")
-        print(f"[Stream Debug] llm_response: {result.get('llm_response')}")
-        print(f"[Stream Debug] final_messages: {result.get('final_messages')}")
+        async for event in self.graph.astream_events(initial_state, config=config, version="v2"):
+            # 方案 B: 从 on_chain_stream 事件中提取 _node_events
+            if event["event"] == "on_chain_stream":
+                state_chunk = event.get("data", {}).get("chunk", {})
+                if hasattr(state_chunk, "get"):
+                    node_events = state_chunk.get("_node_events", [])
+                    for ev in node_events:
+                        ev_id = id(ev)
+                        if ev_id not in processed_event_ids:
+                            processed_event_ids.add(ev_id)
+                            yield ev
+                            if ev.get("type") == "thinking_end":
+                                return
 
-        # 检查是否有工具调用，如果没有直接返回内容
-        llm_response = result.get("llm_response", {})
-        print(f"[Stream Debug] llm_response content: {llm_response.get('content')}")
-        
-        if not result.get("final_messages") and llm_response.get("content"):
-            print(f"[Stream Debug] Path 1: Direct content return")
-            yield llm_response["content"]
-            return
-
-        final_messages = result.get("final_messages")
-        if not final_messages:
-            print(f"[Stream Debug] Path 2: Error - no final_messages")
-            yield "抱歉，处理过程中出现错误。"
-            return
-        
-        print(f"[Stream Debug] Path 3: Streaming with final_messages")
-        async for chunk in llm_client_instance.stream(final_messages, provider=self.provider, model=self.model):
-            # print(f"[Stream Debug] Chunk received: {chunk}")
-            # 优先检查 content 字段（兼容不同 provider 格式）
-            content = chunk.get("content", "")
-            if content:
-                yield content
+            elif event["event"] == "on_chain_end":
+                if event["name"] == "context_manager_node":
+                    yield {"type": "context_trimmed", "timestamp": datetime.utcnow().isoformat()}

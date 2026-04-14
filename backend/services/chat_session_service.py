@@ -1,8 +1,9 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from typing import List, Optional, Union, Dict, Any
 from datetime import datetime
 from models.chat_session import ChatSession, ChatMessage, MessageContentItem
+from models.agent_execution_step import AgentExecutionStep
 from schemas.chat_session import ChatSessionCreate
 
 
@@ -112,7 +113,19 @@ class ChatSessionService:
                         "id": Optional[str],
                     }
                 ],
-                "created_at": datetime
+                "created_at": datetime,
+                "steps": [  # 新增：执行步骤
+                    {
+                        "id": int,
+                        "step_type": str,
+                        "content": str,
+                        "tool_name": str,
+                        "tool_status": str,
+                        "metadata": dict,
+                        "sort_order": int,
+                        "created_at": datetime
+                    }
+                ]
             }
             或 None
         """
@@ -123,6 +136,12 @@ class ChatSessionService:
         contents = db.query(MessageContentItem)\
             .filter(MessageContentItem.message_id == message_id)\
             .order_by(MessageContentItem.sort_order)\
+            .all()
+        
+        # 获取执行步骤
+        steps = db.query(AgentExecutionStep)\
+            .filter(AgentExecutionStep.message_id == message_id)\
+            .order_by(AgentExecutionStep.sort_order)\
             .all()
         
         return {
@@ -137,6 +156,19 @@ class ChatSessionService:
                 for c in contents
             ],
             "created_at": message.created_at.isoformat(),
+            "steps": [
+                {
+                    "id": s.id,
+                    "step_type": s.step_type,
+                    "content": s.content,
+                    "tool_name": s.tool_name,
+                    "tool_status": s.tool_status,
+                    "metadata": s.metadata,
+                    "sort_order": s.sort_order,
+                    "created_at": s.created_at.isoformat() if s.created_at else None
+                }
+                for s in steps
+            ]
         }
     
     @staticmethod

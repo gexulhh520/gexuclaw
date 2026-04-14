@@ -1,0 +1,269 @@
+#####
+agents/executor.py（完整最终版）
+Python
+from typing import List, Dict, Any, AsyncGenerator
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver   # 生产推荐
+# from langgraph.checkpoint.memory import MemorySaver             # 测试时可切换
+
+from llm.client import llm_client_instance
+from tools import get_tool_runtime
+from .context_manager import trim_node, summarize_node   # 你之前的上下文管理模块
+
+# ====================== 状态定义 ======================
+class AgentState(Dict[str, Any]):
+    messages: List[Dict]
+    llm_response: Dict | None = None
+    browser_session_id: str | None = None
+    summary_history: str = ""
+
+
+# ====================== AgentExecutor 主类 ======================
+class AgentExecutor:
+    def __init__(self, provider: str = "openai", model: str = None,
+                 browser_session_id: str = None, system_prompt: str = None):
+        self.provider = provider
+        self.model = model
+        self.browser_session_id = browser_session_id
+        self.system_prompt = system_prompt
+
+        # ==================== Checkpointer（支持持久化 + thread_id） ====================
+        self.checkpointer = AsyncPostgresSaver.from_conn_string(
+            "postgresql+psycopg://postgres:password@localhost:5432/your_db_name"  # ← 修改成你的数据库连接串
+        )
+        self.graph = self._build_graph()
+
+    def _build_graph(self):
+        workflow = StateGraph(AgentState)
+
+        workflow.add_node("thinking", self._thinking_node)
+        workflow.add_node("acting", self._acting_node)
+        workflow.add_node("trim", trim_node)
+        workflow.add_node("summarize", summarize_node)
+        workflow.add_node("responding", self._responding_node)
+
+        workflow.set_entry_point("thinking")
+
+        workflow.add_conditional_edges(
+            "thinking",
+            self._should_continue,
+            {"continue": "acting", "end": "responding"}
+        )
+
+        workflow.add_edge("acting", "trim")
+        workflow.add_edge("trim", "summarize")
+        workflow.add_edge("summarize", "thinking")   # 循环继续
+        workflow.add_edge("responding", END)
+
+        return workflow.compile(checkpointer=self.checkpointer)
+
+    # ====================== 你的原有辅助函数（已保留） ======================
+    def _convert_multimodal_to_text(self, messages: List[Dict]) -> List[Dict]:
+        """多模态消息转文本描述（你原来的逻辑）"""
+        converted = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content")
+
+            if isinstance(content, str):
+                converted.append({"role": role, "content": content})
+                continue
+
+            if isinstance(content, list):
+                text_parts = []
+                resources = []
+                new_content = []
+
+                for item in content:
+                    item_type = item.get("type")
+                    item_content = item.get("content", "")
+                    new_content.append(item)
+
+                    if item_type == "text":
+                        text_parts.append(item_content)
+                    elif item_type == "image":
+                        resources.append(f"[Image Resource: {item_content}]")
+                    elif item_type == "audio":
+                        resources.append(f"[Audio Resource: {item_content}]")
+
+                merged_text = "\n".join(text_parts)
+                if resources:
+                    merged_text += "\n\n" + "\n".join(resources)
+
+                if text_parts and new_content:
+                    for i, item in enumerate(new_content):
+                        if item.get("type") == "text":
+                            new_content[i] = {"type": "text", "content": merged_text}
+                            break
+
+                converted.append({"role": role, "content": new_content})
+            else:
+                converted.append({"role": role, "content": str(content)})
+        return converted
+
+    def _smart_truncate(self, data: Any, max_length: int = 3000) -> str:
+        if data is None:
+            return "None"
+        if isinstance(data, dict):
+            result = {k: v for k, v in data.items() if not k.startswith('_')}
+            return str(result)
+        return str(data)[:max_length]
+
+    # ====================== 节点实现（已补全） ======================
+    async def _thinking_node(self, state: AgentState):
+        messages = state["messages"]
+        text_messages = self._convert_multimodal_to_text(messages)
+
+        tools = get_tool_runtime().get_all_operations()   # 获取工具定义
+
+        resp = await llm_client_instance.chat(
+            messages=text_messages,
+            provider=self.provider,
+            model=self.model,
+            tools=tools if tools else None,
+            system_prompt=self.system_prompt
+        )
+
+        state["llm_response"] = resp
+        return state
+
+    async def _acting_node(self, state: AgentState):
+        resp = state["llm_response"]
+        tool_calls = resp.get("tool_calls")
+
+        if tool_calls:
+            browser_session_id = state.get("browser_session_id")
+            tool_messages = await run_tool(tool_calls, browser_session_id=browser_session_id)
+
+            # 构造 assistant message
+            assistant_msg = {
+                "role": "assistant",
+                "content": resp.get("content", ""),
+                "tool_calls": [
+                    {
+                        "id": tc.get("id") or tc.get("tool_call_id") or f"call_{i}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("function", {}).get("name", ""),
+                            "arguments": tc.get("function", {}).get("arguments", "{}")
+                        }
+                    } for i, tc in enumerate(tool_calls)
+                ]
+            }
+            if resp.get("reasoning_content"):
+                assistant_msg["reasoning_content"] = resp.get("reasoning_content")
+
+            state["messages"].append(assistant_msg)
+            state["messages"].extend(tool_messages)
+
+        return state
+
+    async def _responding_node(self, state: AgentState):
+        text_messages = self._convert_multimodal_to_text(state["messages"])
+        final_prompt = [
+            {"role": "system", "content": "请直接输出最终答案，不要再调用任何工具"},
+            *text_messages
+        ]
+        state["final_messages"] = final_prompt
+        return state
+
+    def _should_continue(self, state: AgentState):
+        resp = state.get("llm_response")
+        if resp and resp.get("tool_calls"):
+            return "continue"
+        return "end"
+
+    # ====================== 真正流式执行（核心） ======================
+    async def execute_stream(self, messages: List[Dict], thread_id: str) -> AsyncGenerator[Dict, None]:
+        """真正实时流式 + 支持 thread_id 持久化"""
+        config = {"configurable": {"thread_id": thread_id}}
+
+        initial_state = {
+            "messages": messages,
+            "browser_session_id": self.browser_session_id,
+            "summary_history": ""
+        }
+
+        async for event in self.graph.astream_events(initial_state, config=config, version="v2"):
+            if event["event"] == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                if chunk.content:
+                    yield {"type": "chunk", "content": chunk.content}
+
+            elif event["event"] == "on_tool_start":
+                yield {"type": "tool_start", "tool_name": event.get("name", "")}
+
+            elif event["event"] == "on_tool_end":
+                yield {
+                    "type": "tool_end",
+                    "tool_name": event.get("name", ""),
+                    "status": "success"
+                }
+
+            elif event["event"] == "on_chain_end":
+                if event["name"] == "thinking":
+                    yield {"type": "thinking_end"}
+                elif event["name"] == "trim":
+                    yield {"type": "context_trimmed"}
+
+        yield {"type": "done"}
+
+# ====== 工具系统 ======
+async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = None) -> List[Dict[str, Any]]:
+    """
+    执行工具调用（已优化，适配新 LangGraph + trim/summarize）
+    """
+    tool_runtime = get_tool_runtime()
+    tool_messages = []
+
+    for call in tool_calls:
+        try:
+            # 统一 tool_call_id 生成逻辑
+            tool_call_id = (
+                call.get("id")
+                or call.get("tool_call_id")
+                or f"call_{id(call)}_{hash(str(call)) % 10000}"
+            )
+
+            function_info = call.get("function", {})
+            name = function_info.get("name", "")
+            arguments_str = function_info.get("arguments", "{}")
+
+            import json
+            arguments = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
+
+            # 浏览器工具自动注入 session_id
+            if browser_session_id and name.startswith("browser__"):
+                if "launch_browser" in name:
+                    arguments.setdefault("browser_session_id", browser_session_id)
+                elif any(op in name for op in ["navigate", "click", "fill", "type", "get_text"]):
+                    arguments.setdefault("session_id", browser_session_id)
+
+            print(f"[Tool Debug] Executing: {name} | Args: {arguments}")
+
+            result = await tool_runtime.execute_by_name_async(name, arguments)
+
+            # 格式化内容（保留你原来的智能截断逻辑）
+            if result.success:
+                content = f"工具 [{name}] 执行成功: {_smart_truncate(result.data)}"
+            else:
+                content = f"工具 [{name}] 执行失败: {_smart_truncate(result.error)}"
+
+            # ==================== 关键优化点 ====================
+            tool_messages.append({
+                "tool_call_id": tool_call_id,      # LangGraph 推荐字段
+                "role": "tool",                    # 必须是 "tool"
+                "content": content,
+                "name": name,                      # 新增：工具名称，便于 trim/summarize 识别
+                "tool_name": name,                 # 额外字段，方便调试和前端展示
+            })
+
+        except Exception as e:
+            tool_messages.append({
+                "tool_call_id": call.get("id") or f"call_error_{id(call)}",
+                "role": "tool",
+                "content": f"工具调用异常: {str(e)}",
+                "name": name if 'name' in locals() else "unknown",
+            })
+
+    return tool_messages

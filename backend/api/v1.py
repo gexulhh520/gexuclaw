@@ -47,10 +47,10 @@ async def create_session(
     from schemas.chat_session import ChatSessionCreate
     
     session_id = str(uuid.uuid4())
-    
+
     # 同时在 PostgreSQL 创建会话记录
     session_data = ChatSessionCreate(
-        title="聊天会话",
+        title=datetime.now().strftime("%Y-%m-%d %H:%M") + " 会话",
         provider=data.provider or "openai",
         model=data.model
     )
@@ -166,10 +166,13 @@ async def send_message(
     
     # 添加用户消息到 Redis
     SessionManager.add_message(data.session_id, "user", data.content)
-
+    user_input = [{
+            "role": "user",
+            "content": data.content
+        }]
     task = execute_agent_task.delay(
         data.session_id,
-        data.content,
+        user_input,
         data.provider or "openai",
         data.model,
         current_user.id  # 传递 user_id 给 Worker

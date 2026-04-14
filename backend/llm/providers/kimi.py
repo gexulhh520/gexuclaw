@@ -117,7 +117,9 @@ class KimiProvider(BaseProviderImpl):
                 new_msg["tool_calls"] = msg["tool_calls"]
             if msg.get("tool_call_id"):
                 new_msg["tool_call_id"] = msg["tool_call_id"]
-            
+            if  msg.get("reasoning_content"):
+                new_msg["reasoning_content"] = msg["reasoning_content"]
+
             converted.append(new_msg)
         
         return converted

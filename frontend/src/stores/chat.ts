@@ -3,10 +3,21 @@ import { ref, computed } from 'vue'
 import { api, Message, LLMProvider } from '@/api/client'
 
 interface WebSocketMessage {
-  type: 'chunk' | 'done' | 'error' | 'ack'
+  type: 'chunk' | 'done' | 'error' | 'ack' | 'tool_start' | 'tool_end' | 'thinking_start' | 'thinking_ing' | 'thinking_end' | 'context_trimmed'
   content?: string
   received?: any
   message?: string
+  tool_name?: string
+  tool_status?: string
+  timestamp?: string
+}
+
+interface ExecutionStep {
+  type: string
+  content?: string
+  tool_name?: string
+  tool_status?: string
+  timestamp: string
 }
 
 export type MultimodalContent = Array<{ type: string; content: string }>
@@ -19,6 +30,9 @@ export const useChatStore = defineStore('chat', () => {
   const ws = ref<WebSocket | null>(null)
   const provider = ref<LLMProvider>('kimi')
   const model = ref<string>('')
+  const executionSteps = ref<ExecutionStep[]>([])
+  const isExecutingTools = ref(false)
+  const currentToolName = ref('')
 
   const hasSession = computed(() => !!sessionId.value)
 
@@ -86,6 +100,8 @@ export const useChatStore = defineStore('chat', () => {
 
   function handleWebSocketMessage(data: WebSocketMessage) {
     console.log('[WebSocket Debug] Handling message:', data)
+    const timestamp = new Date().toISOString()
+    
     switch (data.type) {
       case 'chunk':
         console.log('[WebSocket Debug] Chunk received, content:', data.content)
@@ -94,17 +110,26 @@ export const useChatStore = defineStore('chat', () => {
         break
       case 'done':
         console.log('[WebSocket Debug] Done received, content:', data.content)
-        messages.value.push({
-          role: 'assistant',
-          content: data.content || '',
-          timestamp: new Date().toISOString(),
-        })
+        const thinkingEndStep = executionSteps.value.find(s => s.type === 'thinking_end' && s.content)
+        const finalContent = thinkingEndStep?.content || data.content
+        const thinkingSteps = [...executionSteps.value]
+        if (finalContent) {
+          messages.value.push({
+            role: 'assistant',
+            content: finalContent,
+            timestamp: new Date().toISOString(),
+            thinkingSteps,
+            thinkingExpanded: false,
+          })
+        }
         currentResponse.value = ''
+        executionSteps.value = []
         isLoading.value = false
+        isExecutingTools.value = false
+        currentToolName.value = ''
         break
       case 'error':
         console.error('[WebSocket Debug] Error:', data.content)
-        // 添加错误消息到对话，让用户知道发生了什么
         messages.value.push({
           role: 'assistant',
           content: `❌ 服务出错：${data.content || '未知错误'}\n\n请稍后重试或联系管理员。`,
@@ -112,7 +137,52 @@ export const useChatStore = defineStore('chat', () => {
         })
         currentResponse.value = ''
         isLoading.value = false
+        isExecutingTools.value = false
+        currentToolName.value = ''
         break
+      case 'tool_start':
+        isExecutingTools.value = true
+        currentToolName.value = data.tool_name || ''
+        executionSteps.value.push({
+          type: 'tool_start',
+          tool_name: data.tool_name,
+          content: `开始执行工具: ${data.tool_name}`,
+          timestamp,
+        })
+        break
+      case 'tool_end':
+        executionSteps.value.push({
+          type: 'tool_end',
+          tool_name: data.tool_name,
+          tool_status: data.tool_status,
+          content: `工具执行完成: ${data.tool_name}`,
+          timestamp,
+        })
+        isExecutingTools.value = false
+        currentToolName.value = ''
+        break
+      case 'thinking_start':
+        executionSteps.value.push({
+          type: 'thinking_start',
+          content: '开始思考...',
+          timestamp,
+        })
+        break
+      case 'thinking_ing':
+        executionSteps.value.push({
+          type: 'thinking_ing',
+          content: data.content || '...',
+          timestamp,
+        })
+        break
+      case 'thinking_end':
+        executionSteps.value.push({
+          type: 'thinking_end',
+          content: data.content || '思考完成',
+          timestamp,
+        })
+        break
+      // context_trimmed 不显示也不记录
     }
   }
 
@@ -164,6 +234,7 @@ export const useChatStore = defineStore('chat', () => {
 
     isLoading.value = true
     currentResponse.value = ''
+    executionSteps.value = []
 
     // 使用传入的参数或 store 中的默认值
     const useProvider = msgProvider || provider.value
@@ -195,6 +266,9 @@ export const useChatStore = defineStore('chat', () => {
     hasSession,
     provider,
     model,
+    executionSteps,
+    isExecutingTools,
+    currentToolName,
     createSession,
     loadSession,
     sendMessage,
