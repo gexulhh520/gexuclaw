@@ -1,5 +1,8 @@
 import asyncio
 import json
+import sys
+import selectors
+import inspect
 from typing import List, Dict, Any
 
 from langchain_core.messages import message_chunk_to_message
@@ -17,9 +20,38 @@ from tools.tool_runtime import get_tool_runtime
 _tool_runtime = get_tool_runtime()
 
 
+def _run_async(coro):
+    """
+    Run an async coroutine in a way that's compatible with psycopg async on Windows.
+
+    Psycopg cannot run in async mode on the default ProactorEventLoop; it requires a
+    SelectorEventLoop (e.g. WindowsSelectorEventLoopPolicy).
+    """
+    if sys.platform == "win32":
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except Exception:
+            # If the policy isn't available for some reason, fall back to default.
+            pass
+
+    try:
+        run_params = inspect.signature(asyncio.run).parameters
+    except Exception:
+        run_params = {}
+
+    # Python 3.14 supports loop_factory in asyncio.run; use it when available for certainty.
+    if sys.platform == "win32" and "loop_factory" in run_params:
+        return asyncio.run(
+            coro,
+            loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+        )
+
+    return asyncio.run(coro)
+
+
 @celery_app.task(bind=True)
 def execute_agent_task(self, session_id: str, user_messages: List[dict], provider: str = "openai", model: str = None, user_id: int = None):
-    return asyncio.run(_execute(session_id, user_messages, provider, model, user_id))
+    return _run_async(_execute(session_id, user_messages, provider, model, user_id))
 
 
 async def _send_to_session(session_id: str, message: dict):
@@ -47,7 +79,8 @@ async def _execute(session_id: str, user_messages: List[dict], provider: str = "
             provider=provider, 
             model=model,
             browser_session_id=browser_session_id,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            user_id=user_id
         )
 
         # 4. 临时收集所有中间步骤

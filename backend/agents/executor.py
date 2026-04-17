@@ -1,7 +1,16 @@
 from typing import List, Dict, Any, AsyncGenerator
 from datetime import datetime
+import inspect
+import sys
+from urllib.parse import urlparse
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver   # 测试用（支持异步）
+from langgraph.checkpoint.memory import MemorySaver   # 测试/降级用（支持异步）
+
+try:
+    # Provided by langgraph-checkpoint-postgres
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore
+except Exception:
+    AsyncPostgresSaver = None
 
 from llm.client import llm_client_instance
 from tools import get_tool_runtime, ToolResult
@@ -23,7 +32,7 @@ def _convert_multimodal_to_text(messages: List[Dict]) -> List[Dict]:
         if role != "user" or not isinstance(content, list):
             continue
 
-        has_multimodal = any(item.get("type") in ["image", "audio"] for item in content)
+        has_multimodal = any(item.get("type") in ["image", "audio", "document"] for item in content)
         if not has_multimodal:
             continue
 
@@ -40,6 +49,8 @@ def _convert_multimodal_to_text(messages: List[Dict]) -> List[Dict]:
                 resources.append(f"[Image Resource: {item_content}]")
             elif item_type == "audio":
                 resources.append(f"[Audio Resource: {item_content}]")
+            elif item_type == "document":
+                resources.append(f"[knowledge Document : {item_content}]")
 
         merged_text = "\n".join(text_parts)
         if resources:
@@ -50,7 +61,11 @@ def _convert_multimodal_to_text(messages: List[Dict]) -> List[Dict]:
                 if item.get("type") == "text":
                     content[i] = {"type": "text", "content": merged_text}
                     break
-
+        try:
+            if bool(getattr(get_settings(), "DEBUG", False)):
+                print("[Agent Debug] merged multimodal text len=", len(merged_text))
+        except Exception:
+            pass
     return messages
 
 
@@ -77,7 +92,7 @@ def _smart_truncate(data: Any, max_length: int = 3000) -> str:
 
 
 # ====== 工具系统 ======
-async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = None) -> List[Dict[str, Any]]:
+async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = None, user_id: int = None) -> List[Dict[str, Any]]:
     """
     执行工具调用（已优化，适配新 LangGraph + trim/summarize）
     
@@ -107,9 +122,15 @@ async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = N
     Args:
         tool_calls: 工具调用列表
         browser_session_id: 可选，浏览器会话 ID（自动注入到浏览器操作）
+        user_id: 可选，当前登录用户 ID（自动注入到知识库工具）
     """
     tool_runtime = get_tool_runtime()
     tool_messages = []
+
+    try:
+        debug_enabled = bool(getattr(get_settings(), "DEBUG", False))
+    except Exception:
+        debug_enabled = False
 
     for call in tool_calls:
         try:
@@ -135,7 +156,12 @@ async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = N
                 elif any(op in name for op in ["navigate", "click", "fill", "type", "get_text"]):
                     arguments.setdefault("session_id", browser_session_id)
 
-            print(f"[Tool Debug] Executing: {name} | Args: {arguments}")
+            # 知识库工具自动注入 user_id
+            if user_id and name.startswith("knowledge__"):
+                arguments.setdefault("user_id", user_id)
+
+            if debug_enabled:
+                print(f"[Tool Debug] Executing: {name} | Args: {arguments}")
 
             result = await tool_runtime.execute_by_name_async(name, arguments)
 
@@ -170,8 +196,12 @@ def get_available_tools() -> List[Dict[str, Any]]:
     """获取所有可用的工具定义，用于 LLM function calling"""
     tool_runtime = get_tool_runtime()
     tools = tool_runtime.get_all_operations()
-    print(f"[Tool Debug] Tool runtime categories: {list(tool_runtime.tools.keys())}")
-    print(f"[Tool Debug] Available tools count: {len(tools)}")
+    try:
+        if bool(getattr(get_settings(), "DEBUG", False)):
+            print(f"[Tool Debug] Tool runtime categories: {list(tool_runtime.tools.keys())}")
+            print(f"[Tool Debug] Available tools count: {len(tools)}")
+    except Exception:
+        pass
     return tools
 
 
@@ -180,20 +210,61 @@ class AgentExecutor:
     provider: str = "openai"
     model: str = None
     browser_session_id: str = None
+    user_id: int = None
 
-    def __init__(self, provider: str = "openai", model: str = None, browser_session_id: str = None, system_prompt=None):
+    def __init__(self, provider: str = "openai", model: str = None, browser_session_id: str = None, system_prompt=None, user_id: int = None):
         self.provider = provider
         self.model = model
         self.browser_session_id = browser_session_id
         self.system_prompt = system_prompt  # 新增：存储系统提示词
+        self.user_id = user_id  # 当前登录用户 ID
 
-        # ==================== Checkpointer（支持持久化 + thread_id） ====================
+        # Default to in-memory so graph compilation always succeeds; execute_stream() may
+        # switch to a persistent Postgres checkpointer at runtime (AsyncPostgresSaver.from_conn_string
+        # is typically an async context manager).
         self.checkpointer = MemorySaver()
-        
-        self.graph = self._build_graph()
+        self.graph = self._build_graph(checkpointer=self.checkpointer)
+
+    def _get_checkpoint_conn_string(self) -> str | None:
+        settings = get_settings()
+        conn_string = getattr(settings, "CHECKPOINT_DATABASE_URL", None)
+        if not conn_string or not isinstance(conn_string, str):
+            return None
+
+        # AsyncPostgresSaver / psycopg expects either:
+        # - A PostgreSQL URI: postgresql://user:pass@host:port/dbname
+        # - Or a conninfo string: "host=... dbname=... user=... password=..."
+        #
+        # The "+driver" form (e.g. "postgresql+psycopg://") is a SQLAlchemy URL and will
+        # fail psycopg parsing with "missing '=' ...". Normalize those back to a URI.
+        if conn_string.startswith("postgresql+"):
+            # Keep everything after "postgresql+" and the driver name, replacing with "postgresql://"
+            # Example: postgresql+psycopg://u:p@h:5432/db -> postgresql://u:p@h:5432/db
+            try:
+                _, rest = conn_string.split("+", 1)
+                if "://" in rest:
+                    return "postgresql://" + rest.split("://", 1)[1]
+            except Exception:
+                return None
+
+        return conn_string
+
+    def _redact_conn_string(self, conn_string: str) -> str:
+        # Avoid leaking credentials into logs; show only scheme/host/port/dbname.
+        try:
+            parsed = urlparse(conn_string)
+            host = parsed.hostname or ""
+            port = f":{parsed.port}" if parsed.port else ""
+            dbname = (parsed.path or "").lstrip("/")
+            scheme = parsed.scheme or "postgresql"
+            if host or dbname:
+                return f"{scheme}://{host}{port}/{dbname}"
+        except Exception:
+            pass
+        return "<unparseable-conn-string>"
 
     # ====== Graph 构建 ======
-    def _build_graph(self):
+    def _build_graph(self, checkpointer=None):
 
         workflow = StateGraph(AgentState)
 
@@ -218,7 +289,7 @@ class AgentExecutor:
         workflow.add_edge("context_manager_node", "thinking")   # 循环继续
         workflow.add_edge("responding", END)
 
-        return workflow.compile(checkpointer=self.checkpointer)
+        return workflow.compile(checkpointer=checkpointer)
 
     # ====== 判断是否继续 ======
     def _should_continue(self, state: AgentState):
@@ -281,10 +352,10 @@ class AgentExecutor:
         #     "timestamp": datetime.utcnow().isoformat()
         # })
 
-        messages = state["messages"]
+        #messages = state["messages"]
 
         # Convert multimodal messages to plain text description
-        text_messages = _convert_multimodal_to_text(messages)
+        text_messages = state["messages"]
 
         # 调试日志：打印发送给 LLM 的消息
         # print(f"[Agent Debug] === 发送给 LLM 的消息 ({len(text_messages)} 条) ===")
@@ -312,9 +383,9 @@ class AgentExecutor:
         )
 
         # 调试日志
-        print(f"[Agent Debug] LLM Response: {resp}")
-        print(f"[Agent Debug] Content: {resp.get('content')}")
-        print(f"[Agent Debug] Tool Calls: {resp.get('tool_calls')}")
+        #print(f"[Agent Debug] LLM Response: {resp}")
+        #print(f"[Agent Debug] Content: {resp.get('content')}")
+        #print(f"[Agent Debug] Tool Calls: {resp.get('tool_calls')}")
 
         state["llm_response"] = resp
 
@@ -327,7 +398,7 @@ class AgentExecutor:
 
         tool_calls = resp.get("tool_calls")
 
-        # 获取 browser_session_id
+        # 获取 browser_session_id 和 user_id
         browser_session_id = state.get("browser_session_id")
 
 
@@ -346,8 +417,8 @@ class AgentExecutor:
                     "timestamp": datetime.utcnow().isoformat()
                 })
 
-            # 执行真实工具，返回 tool 消息列表（注入 browser_session_id）
-            tool_messages = await run_tool(tool_calls, browser_session_id=browser_session_id)
+            # 执行真实工具，返回 tool 消息列表（注入 browser_session_id 和 user_id）
+            tool_messages = await run_tool(tool_calls, browser_session_id=browser_session_id, user_id=self.user_id)
 
 
             # 写回上下文：tool 消息（每个 tool_call 对应一条，包含 tool_call_id）
@@ -387,7 +458,8 @@ class AgentExecutor:
             "timestamp": datetime.utcnow().isoformat()
         })
 
-        text_messages = _convert_multimodal_to_text(state["messages"])
+        #text_messages = _convert_multimodal_to_text(state["messages"])
+        text_messages = state["messages"]
 
         final_prompt = [
             {
@@ -428,48 +500,127 @@ class AgentExecutor:
 
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
 
-        user_latest_message = messages[-1]
+        text_messages = _convert_multimodal_to_text(messages)
+        user_latest_message = text_messages[-1]
+        #user_latest_message 需要打印对象内容
+        #print( "用户最新消息"+ str(user_latest_message))
 
-        if self.checkpointer:
-            checkpoint_tuple = await self.checkpointer.aget_tuple(config)
-            if checkpoint_tuple and checkpoint_tuple.checkpoint:
-                history_messages = checkpoint_tuple.checkpoint.get("channel_values", {}).get("messages", [])
-                summary_history = checkpoint_tuple.checkpoint.get("channel_values", {}).get("summary_history", "")
+        # Debug: print where history_messages came from (checkpoint hit/miss) without dumping full message content.
+        try:
+            settings = get_settings()
+            debug_enabled = bool(getattr(settings, "DEBUG", False))
+        except Exception:
+            debug_enabled = False
+
+        async def _run_with(graph, checkpointer):
+            checkpoint_tuple = None
+            if checkpointer:
+                checkpoint_tuple = await checkpointer.aget_tuple(config)
+                if checkpoint_tuple and checkpoint_tuple.checkpoint:
+                    history_messages = checkpoint_tuple.checkpoint.get("channel_values", {}).get("messages", [])
+                    summary_history = checkpoint_tuple.checkpoint.get("channel_values", {}).get("summary_history", "")
+                else:
+                    history_messages = messages[:-1] if len(messages) > 1 else []
+                    summary_history = ""
             else:
                 history_messages = messages[:-1] if len(messages) > 1 else []
                 summary_history = ""
-        else:
-            history_messages = messages[:-1] if len(messages) > 1 else []
-            summary_history = ""
 
-        current_messages = history_messages.copy()
+            if debug_enabled:
+                checkpoint_hit = bool(checkpointer and checkpoint_tuple and checkpoint_tuple.checkpoint)
+                roles = [m.get("role", "unknown") for m in (history_messages or []) if isinstance(m, dict)]
+                print(
+                    "[Agent Debug] execute_stream history | "
+                    f"thread_id={thread_id} "
+                    f"checkpointer={type(checkpointer).__name__ if checkpointer else None} "
+                    f"checkpoint_hit={checkpoint_hit} "
+                    f"history_count={len(history_messages) if history_messages else 0} "
+                    f"summary_chars={len(summary_history or '')} "
+                    f"history_tail_roles={roles[-5:]}"
+                )
 
-        if not current_messages or current_messages[-1] != user_latest_message:
-            current_messages.append(user_latest_message)
+            current_messages = history_messages.copy()
 
-        initial_state: Dict[str, Any] = {
-            "messages": current_messages,
-            "browser_session_id": self.browser_session_id,
-            "summary_history": summary_history,
-            "_node_events": [],  # 初始化事件队列
-        }
+            if not current_messages or current_messages[-1] != user_latest_message:
+                current_messages.append(user_latest_message)
+                if debug_enabled:
+                    print(
+                        "[Agent Debug] execute_stream append latest message | "
+                        f"user_role={user_latest_message.get('role', 'unknown')}"
+                    )
 
-        processed_event_ids = set()  # 已处理的事件 ID 集合
+            initial_state: Dict[str, Any] = {
+                "messages": current_messages,
+                "browser_session_id": self.browser_session_id,
+                "summary_history": summary_history,
+                "_node_events": [],  # 初始化事件队列
+            }
 
-        async for event in self.graph.astream_events(initial_state, config=config, version="v2"):
-            # 方案 B: 从 on_chain_stream 事件中提取 _node_events
-            if event["event"] == "on_chain_stream":
-                state_chunk = event.get("data", {}).get("chunk", {})
-                if hasattr(state_chunk, "get"):
-                    node_events = state_chunk.get("_node_events", [])
-                    for ev in node_events:
-                        ev_id = id(ev)
-                        if ev_id not in processed_event_ids:
-                            processed_event_ids.add(ev_id)
+            processed_event_ids = set()  # 已处理的事件 ID 集合
+
+            async for event in graph.astream_events(initial_state, config=config, version="v2"):
+                # 方案 B: 从 on_chain_stream 事件中提取 _node_events
+                if event["event"] == "on_chain_stream":
+                    state_chunk = event.get("data", {}).get("chunk", {})
+                    if hasattr(state_chunk, "get"):
+                        node_events = state_chunk.get("_node_events", [])
+                        for ev in node_events:
+                            ev_id = id(ev)
+                            if ev_id not in processed_event_ids:
+                                processed_event_ids.add(ev_id)
+                                yield ev
+                                if ev.get("type") == "thinking_end":
+                                    return
+
+                elif event["event"] == "on_chain_end":
+                    if event["name"] == "context_manager_node":
+                        yield {"type": "context_trimmed", "timestamp": datetime.utcnow().isoformat()}
+
+        # Prefer Postgres-backed checkpointer when available. If anything goes wrong,
+        # fall back to in-memory so the task still runs.
+        conn_string = self._get_checkpoint_conn_string()
+
+        if debug_enabled:
+            print(
+                "[Agent Debug] checkpointer config | "
+                f"python={sys.executable} "
+                f"has_pg_saver={bool(AsyncPostgresSaver)} "
+                f"conn={'set' if bool(conn_string) else 'missing'} "
+                f"conn_redacted={self._redact_conn_string(conn_string) if conn_string else None}"
+            )
+
+        if conn_string and AsyncPostgresSaver:
+            try:
+                pg_ctx_or_saver = AsyncPostgresSaver.from_conn_string(conn_string)
+                if hasattr(pg_ctx_or_saver, "__aenter__"):
+                    async with pg_ctx_or_saver as pg_checkpointer:
+                        setup_fn = getattr(pg_checkpointer, "setup", None)
+                        if callable(setup_fn):
+                            maybe_awaitable = setup_fn()
+                            if inspect.isawaitable(maybe_awaitable):
+                                await maybe_awaitable
+
+                        pg_graph = self._build_graph(checkpointer=pg_checkpointer)
+                        async for ev in _run_with(pg_graph, pg_checkpointer):
                             yield ev
-                            if ev.get("type") == "thinking_end":
-                                return
+                        return
+                else:
+                    pg_checkpointer = pg_ctx_or_saver
+                    setup_fn = getattr(pg_checkpointer, "setup", None)
+                    if callable(setup_fn):
+                        maybe_awaitable = setup_fn()
+                        if inspect.isawaitable(maybe_awaitable):
+                            await maybe_awaitable
 
-            elif event["event"] == "on_chain_end":
-                if event["name"] == "context_manager_node":
-                    yield {"type": "context_trimmed", "timestamp": datetime.utcnow().isoformat()}
+                    pg_graph = self._build_graph(checkpointer=pg_checkpointer)
+                    async for ev in _run_with(pg_graph, pg_checkpointer):
+                        yield ev
+                    return
+            except Exception as e:
+                print(f"[Agent Warn] Persistent checkpointer unavailable, falling back to MemorySaver: {e}")
+        elif debug_enabled:
+            reason = "missing_conn_string" if not conn_string else "missing_pg_saver"
+            print(f"[Agent Debug] persistent checkpointer skipped | reason={reason}")
+
+        async for ev in _run_with(self.graph, self.checkpointer):
+            yield ev

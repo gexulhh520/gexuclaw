@@ -154,11 +154,23 @@
         <el-footer class="chat-footer">
           <!-- 已上传文件预览 -->
           <div v-if="uploadedFiles.length > 0" class="uploaded-preview">
-            <div v-for="(file, index) in uploadedFiles" :key="index" class="preview-item">
+            <div v-for="(file, index) in uploadedFiles" :key="index" class="preview-item" :class="{ 'document-item': file.type === 'document' }">
               <img v-if="file.type === 'image'" :src="file.url" class="preview-image" />
               <div v-else-if="file.type === 'audio'" class="preview-audio">
                 <el-icon class="audio-icon"><Headset /></el-icon>
                 <audio :src="file.url" controls class="audio-player"></audio>
+              </div>
+              <div v-else-if="file.type === 'document'" class="preview-document">
+                <el-icon class="document-icon"><Document /></el-icon>
+                <div class="document-info">
+                  <span class="document-name">{{ file.filename }}</span>
+                  <span v-if="file.processed" class="document-status success">
+                    {{ file.message }}
+                  </span>
+                  <span v-else-if="file.message" class="document-status error">
+                    {{ file.message }}
+                  </span>
+                </div>
               </div>
               <el-icon class="remove-btn" @click="removeFile(index)"><Close /></el-icon>
             </div>
@@ -186,7 +198,19 @@
                   <el-icon><Picture /></el-icon>
                 </el-button>
               </el-upload>
-              
+
+              <!-- 文档上传按钮 -->
+              <el-upload
+                :show-file-list="false"
+                :before-upload="beforeDocumentUpload"
+                :http-request="handleDocumentUpload"
+                accept=".pdf,.doc,.docx,.zip"
+              >
+                <el-button :disabled="isLoading" circle title="上传文档 (PDF/Word/ZIP)">
+                  <el-icon><Document /></el-icon>
+                </el-button>
+              </el-upload>
+
               <!-- 录制中状态：显示停止按钮 -->
               <el-button 
                 v-if="isRecordingAudio"
@@ -262,15 +286,18 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
 import { useUserStore } from '@/stores/user'
-import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone, Picture, Headset, Close, Upload, VideoPause, Monitor, Loading, CircleCheck, Message, Connection, DArrowRight, Clock, MoreFilled, List } from '@element-plus/icons-vue'
+import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone, Picture, Headset, Close, Upload, VideoPause, Monitor, Loading, CircleCheck, Message, Connection, DArrowRight, Clock, MoreFilled, List, Document } from '@element-plus/icons-vue'
 import type { LLMProvider } from '@/api/client'
 import axios from 'axios'
 
 interface UploadedFile {
-  type: 'image' | 'audio'
+  type: 'image' | 'audio' | 'document'
   path: string
   url: string
   filename: string
+  processed?: boolean
+  chunks_count?: number
+  message?: string
 }
 
 const httpClient = axios.create({
@@ -493,7 +520,7 @@ function formatMessageContent(content: any): string {
   if (typeof content === 'string') {
     return content
   }
-  
+
   if (Array.isArray(content)) {
     return content.map((item: any) => {
       if (item.type === 'text') {
@@ -502,11 +529,16 @@ function formatMessageContent(content: any): string {
         return `[图片: ${item.content}]`
       } else if (item.type === 'audio') {
         return `[音频: ${item.content}]`
+      } else if (item.type === 'document') {
+        const fullname = item.content.split('/').pop() || item.content
+        // 从格式 "{UUID}_{original_name}.{ext}" 中提取原始文件名
+        const originalName = fullname.replace(/^\w{8}_/, '')
+        return `[文档: ${originalName}]`
       }
       return ''
     }).join('\n')
   }
-  
+
   return String(content)
 }
 
@@ -582,13 +614,35 @@ function beforeImageUpload(file: File) {
 function beforeAudioUpload(file: File) {
   const isAudio = file.type.startsWith('audio/')
   const isLt50M = file.size / 1024 / 1024 < 50
-  
+
   if (!isAudio) {
     ElMessage.error('只能上传音频文件!')
     return false
   }
   if (!isLt50M) {
     ElMessage.error('音频大小不能超过 50MB!')
+    return false
+  }
+  return true
+}
+
+function beforeDocumentUpload(file: File) {
+  const isDocument = file.type === 'application/pdf' ||
+                     file.type === 'application/msword' ||
+                     file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+                     file.type === 'application/zip' ||
+                     file.name.endsWith('.pdf') ||
+                     file.name.endsWith('.doc') ||
+                     file.name.endsWith('.docx') ||
+                     file.name.endsWith('.zip')
+  const isLt50M = file.size / 1024 / 1024 < 50
+
+  if (!isDocument) {
+    ElMessage.error('只能上传 PDF、Word 或 ZIP 文件!')
+    return false
+  }
+  if (!isLt50M) {
+    ElMessage.error('文档大小不能超过 50MB!')
     return false
   }
   return true
@@ -617,7 +671,7 @@ async function handleImageUpload(options: any) {
 async function handleAudioUpload(options: any) {
   const formData = new FormData()
   formData.append('file', options.file)
-  
+
   try {
     const response = await httpClient.post('/upload/audio', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
@@ -632,6 +686,88 @@ async function handleAudioUpload(options: any) {
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '音频上传失败')
   }
+}
+
+async function handleDocumentUpload(options: any) {
+  const formData = new FormData()
+  formData.append('file', options.file)
+
+  try {
+    const response = await httpClient.post('/upload/document', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000  // 1分钟超时，只等待上传完成
+    })
+    const data = response.data
+    const fileInfo = {
+      type: 'document',
+      path: data.path,
+      url: data.url,
+      filename: data.filename,
+      processed: data.processed,
+      chunks_count: data.chunks_count,
+      message: data.message,
+      task_id: data.task_id  // 保存任务ID用于轮询
+    }
+    uploadedFiles.value.push(fileInfo)
+
+    // 显示上传成功提示
+    ElMessage.success('文档上传成功，正在后台处理...')
+
+    // 如果有任务ID，开始轮询处理进度
+    if (data.task_id) {
+      pollDocumentTask(data.task_id, uploadedFiles.value.length - 1)
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '文档上传失败')
+  }
+}
+
+// 轮询文档处理任务状态
+async function pollDocumentTask(taskId: string, fileIndex: number) {
+  const maxRetries = 300  // 最多轮询300次（约5分钟）
+  let retries = 0
+
+  const checkStatus = async () => {
+    if (retries >= maxRetries) {
+      uploadedFiles.value[fileIndex].message = '处理超时，请稍后查询'
+      return
+    }
+
+    try {
+      const response = await httpClient.get(`/v1/tasks/${taskId}`)
+      const data = response.data
+
+      if (data.status === 'SUCCESS') {
+        // 处理完成
+        uploadedFiles.value[fileIndex].processed = true
+        uploadedFiles.value[fileIndex].chunks_count = data.result?.total_chunks || 0
+        uploadedFiles.value[fileIndex].message = data.result?.message || '文档处理完成'
+        ElMessage.success(`文档处理完成: ${uploadedFiles.value[fileIndex].filename}`)
+      } else if (data.status === 'FAILURE') {
+        // 处理失败
+        uploadedFiles.value[fileIndex].message = `处理失败: ${data.result?.message || '未知错误'}`
+        ElMessage.error(`文档处理失败: ${uploadedFiles.value[fileIndex].filename}`)
+      } else if (data.status === 'PENDING' || data.status === 'PROCESSING') {
+        // 仍在处理中，更新进度信息
+        const progress = data.result?.progress || 0
+        const message = data.result?.message || '处理中...'
+        uploadedFiles.value[fileIndex].message = `${message} (${progress}%)`
+        retries++
+        setTimeout(checkStatus, 2000)  // 2秒后再次查询
+      } else {
+        // 其他状态
+        retries++
+        setTimeout(checkStatus, 2000)
+      }
+    } catch (error: any) {
+      console.error('查询任务状态失败:', error)
+      retries++
+      setTimeout(checkStatus, 5000)  // 出错后5秒再试
+    }
+  }
+
+  // 开始轮询
+  checkStatus()
 }
 
 function removeFile(index: number) {
@@ -1188,6 +1324,57 @@ onUnmounted(() => {
 
 .remove-btn:hover {
   background: rgba(245, 108, 108, 0.9);
+}
+
+.preview-document {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #f0f9eb;
+  padding: 8px;
+  text-align: center;
+}
+
+.document-icon {
+  font-size: 24px;
+  color: #67c23a;
+  margin-bottom: 4px;
+}
+
+.document-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 100%;
+}
+
+.document-name {
+  font-size: 10px;
+  color: #606266;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-status {
+  font-size: 9px;
+  margin-top: 2px;
+}
+
+.document-status.success {
+  color: #67c23a;
+}
+
+.document-status.error {
+  color: #f56c6c;
+}
+
+.preview-item.document-item {
+  width: 120px;
 }
 
 .chat-input {

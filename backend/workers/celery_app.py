@@ -1,5 +1,6 @@
 from celery import Celery
 from celery.signals import worker_init, worker_shutdown
+from celery.schedules import crontab
 from core.config import get_settings
 from tools.tool_discovery import auto_discover_and_register
 
@@ -25,7 +26,24 @@ celery_app.conf.update(
     task_soft_time_limit=25 * 60,
 )
 
-celery_app.autodiscover_tasks(["workers.tasks"])
+celery_app.autodiscover_tasks(["workers.tasks", "workers.document_tasks"])
+celery_app.autodiscover_tasks(["workers.maintenance_tasks"])
+
+# 导入文档处理任务模块以确保任务被注册
+import workers.document_tasks
+import workers.maintenance_tasks
+
+
+if getattr(settings, "MAINTENANCE_CLEANUP_ENABLED", False):
+    celery_app.conf.beat_schedule = {
+        "maintenance-cleanup": {
+            "task": "workers.maintenance_tasks.cleanup_maintenance",
+            "schedule": crontab(
+                hour=getattr(settings, "MAINTENANCE_CLEANUP_HOUR", 3),
+                minute=getattr(settings, "MAINTENANCE_CLEANUP_MINUTE", 30),
+            ),
+        }
+    }
 
 
 # 注意：BrowserManager 改为延迟初始化
