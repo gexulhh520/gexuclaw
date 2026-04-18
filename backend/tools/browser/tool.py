@@ -10,6 +10,8 @@ from ..tool_result import ToolResult
 from ..tool_operation import ToolOperation
 from ..tool_registry import tool
 from ..base import BaseTool
+from core.config import get_settings
+from browser_service.client import BrowserServiceClient
 
 from .task_browser_manager import get_task_browser_manager
 
@@ -35,6 +37,17 @@ class BrowserTool(BaseTool):
     def __init__(self):
         super().__init__()
         self._task_browser_manager = get_task_browser_manager()
+        settings = get_settings()
+        self._browser_service_enabled = settings.BROWSER_SERVICE_ENABLED
+        self._browser_service_client = (
+            BrowserServiceClient(settings.BROWSER_SERVICE_URL)
+            if self._browser_service_enabled else None
+        )
+
+    async def execute_async(self, operation: str, args: Dict[str, Any]) -> ToolResult:
+        if self._browser_service_client is not None:
+            return await self._browser_service_client.execute(operation, args)
+        return await super().execute_async(operation, args)
 
     def _register_operations(self):
         """注册工具操作"""

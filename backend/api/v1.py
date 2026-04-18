@@ -6,6 +6,7 @@ from datetime import datetime
 
 from services.session_manager import SessionManager
 from services.chat_session_service import chat_session_service
+from services.knowledge_base_service import knowledge_base_service
 from workers.tasks import execute_agent_task
 from models.database import get_db
 from models.user import User
@@ -18,6 +19,7 @@ class SessionCreate(BaseModel):
     user_id: Optional[str] = None
     provider: Optional[str] = "openai"
     model: Optional[str] = None
+    knowledge_base_ids: List[int] = []
 
 
 class MessageCreate(BaseModel):
@@ -25,6 +27,7 @@ class MessageCreate(BaseModel):
     content: Union[str, List[Dict[str, Any]]]
     provider: Optional[str] = "openai"
     model: Optional[str] = None
+    knowledge_base_ids: List[int] = []
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -33,7 +36,15 @@ class SessionResponse(BaseModel):
     user_id: Optional[str]
     created_at: str
     updated_at: str
+    knowledge_base_ids: List[int] = []
     messages: List[Dict[str, Any]]
+
+
+def _validate_knowledge_base_ids(db: Session, user_id: int, knowledge_base_ids: List[int]) -> List[int]:
+    unique_ids = list(dict.fromkeys(knowledge_base_ids))
+    for knowledge_base_id in unique_ids:
+        knowledge_base_service.get_user_knowledge_base_or_404(db, user_id, knowledge_base_id)
+    return unique_ids
 
 
 @router.post("/sessions", response_model=dict)
@@ -52,7 +63,8 @@ async def create_session(
     session_data = ChatSessionCreate(
         title=datetime.now().strftime("%Y-%m-%d %H:%M") + " 会话",
         provider=data.provider or "openai",
-        model=data.model
+        model=data.model,
+        knowledge_base_ids=_validate_knowledge_base_ids(db, current_user.id, data.knowledge_base_ids),
     )
     chat_session_service.create_session(db, current_user.id, session_data, session_id)
     
@@ -65,6 +77,7 @@ async def create_session(
         "updated_at": datetime.now().isoformat(),
         "messages": [],
         "metadata": {},
+        "knowledge_base_ids": session_data.knowledge_base_ids,
     }
     redis_client.set(
         f"session:{session_id}",
@@ -141,6 +154,13 @@ async def send_message(
     session = chat_session_service.get_user_session(db, current_user.id, data.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    request_knowledge_base_ids = _validate_knowledge_base_ids(db, current_user.id, data.knowledge_base_ids)
+    if request_knowledge_base_ids:
+        chat_session_service.update_session_knowledge_bases(db, session.id, request_knowledge_base_ids)
+        knowledge_base_ids = request_knowledge_base_ids
+    else:
+        knowledge_base_ids = session.knowledge_base_ids or []
     
     # 确保 Redis 会话也存在
     redis_session = SessionManager.get_session(data.session_id)
@@ -154,14 +174,16 @@ async def send_message(
             "updated_at": datetime.now().isoformat(),
             "messages": [],
             "metadata": {},
+            "knowledge_base_ids": knowledge_base_ids,
         }
         redis_client.set(
             f"session:{data.session_id}",
             session_data,
             expire=86400 * 7
         )
+    else:
+        SessionManager.update_session(data.session_id, {"knowledge_base_ids": knowledge_base_ids})
     
-    # 添加用户消息到 PostgreSQL
     chat_session_service.add_message(db, session.id, "user", data.content)
     
     # 添加用户消息到 Redis
@@ -175,7 +197,8 @@ async def send_message(
         user_input,
         data.provider or "openai",
         data.model,
-        current_user.id  # 传递 user_id 给 Worker
+        current_user.id,
+        knowledge_base_ids,
     )
 
     return {
@@ -192,14 +215,32 @@ async def get_task_status(task_id: str):
     from workers.celery_app import celery_app
     task = celery_app.AsyncResult(task_id)
 
-    response = {
-        "task_id": task_id,
-        "status": task.status,
-    }
+    try:
+        task_state = task.state
+        response = {
+            "task_id": task_id,
+            "status": task_state,
+        }
 
-    if task.state == "SUCCESS":
-        response["result"] = task.result
-    elif task.state == "FAILURE":
-        response["error"] = str(task.info)
+        if task_state == "SUCCESS":
+            response["result"] = task.result
+        elif task_state == "FAILURE":
+            response["error"] = str(task.info)
+            response["result"] = {
+                "message": str(task.info),
+            }
+        elif task_state in {"PENDING", "STARTED", "RETRY", "PROCESSING"}:
+            if isinstance(task.info, dict):
+                response["result"] = task.info
 
-    return response
+        return response
+    except ValueError as exc:
+        # 兜底处理历史异常结果，避免轮询接口因 Celery 结果格式问题直接 500
+        return {
+            "task_id": task_id,
+            "status": "FAILURE",
+            "error": f"任务结果解析失败: {str(exc)}",
+            "result": {
+                "message": "任务执行失败，结果格式异常，请重新上传或查看后端日志",
+            },
+        }

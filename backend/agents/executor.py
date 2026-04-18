@@ -92,7 +92,12 @@ def _smart_truncate(data: Any, max_length: int = 3000) -> str:
 
 
 # ====== 工具系统 ======
-async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = None, user_id: int = None) -> List[Dict[str, Any]]:
+async def run_tool(
+    tool_calls: List[Dict[str, Any]],
+    browser_session_id: str = None,
+    user_id: int = None,
+    knowledge_base_ids: Optional[List[int]] = None,
+) -> List[Dict[str, Any]]:
     """
     执行工具调用（已优化，适配新 LangGraph + trim/summarize）
     
@@ -123,6 +128,7 @@ async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = N
         tool_calls: 工具调用列表
         browser_session_id: 可选，浏览器会话 ID（自动注入到浏览器操作）
         user_id: 可选，当前登录用户 ID（自动注入到知识库工具）
+        knowledge_base_ids: 可选，当前会话允许访问的知识库 ID 列表
     """
     tool_runtime = get_tool_runtime()
     tool_messages = []
@@ -159,6 +165,8 @@ async def run_tool(tool_calls: List[Dict[str, Any]], browser_session_id: str = N
             # 知识库工具自动注入 user_id
             if user_id and name.startswith("knowledge__"):
                 arguments.setdefault("user_id", user_id)
+                if knowledge_base_ids:
+                    arguments.setdefault("knowledge_base_ids", knowledge_base_ids)
 
             if debug_enabled:
                 print(f"[Tool Debug] Executing: {name} | Args: {arguments}")
@@ -211,13 +219,23 @@ class AgentExecutor:
     model: str = None
     browser_session_id: str = None
     user_id: int = None
+    knowledge_base_ids: List[int] = []
 
-    def __init__(self, provider: str = "openai", model: str = None, browser_session_id: str = None, system_prompt=None, user_id: int = None):
+    def __init__(
+        self,
+        provider: str = "openai",
+        model: str = None,
+        browser_session_id: str = None,
+        system_prompt=None,
+        user_id: int = None,
+        knowledge_base_ids: Optional[List[int]] = None,
+    ):
         self.provider = provider
         self.model = model
         self.browser_session_id = browser_session_id
         self.system_prompt = system_prompt  # 新增：存储系统提示词
         self.user_id = user_id  # 当前登录用户 ID
+        self.knowledge_base_ids = knowledge_base_ids or []
 
         # Default to in-memory so graph compilation always succeeds; execute_stream() may
         # switch to a persistent Postgres checkpointer at runtime (AsyncPostgresSaver.from_conn_string
@@ -418,7 +436,12 @@ class AgentExecutor:
                 })
 
             # 执行真实工具，返回 tool 消息列表（注入 browser_session_id 和 user_id）
-            tool_messages = await run_tool(tool_calls, browser_session_id=browser_session_id, user_id=self.user_id)
+            tool_messages = await run_tool(
+                tool_calls,
+                browser_session_id=browser_session_id,
+                user_id=self.user_id,
+                knowledge_base_ids=self.knowledge_base_ids,
+            )
 
 
             # 写回上下文：tool 消息（每个 tool_call 对应一条，包含 tool_call_id）

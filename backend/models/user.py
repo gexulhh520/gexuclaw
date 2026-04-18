@@ -17,3 +17,5 @@ class User(Base):
     
     # 关联会话
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
+    knowledge_bases = relationship("KnowledgeBase", back_populates="user", cascade="all, delete-orphan")
+    knowledge_documents = relationship("KnowledgeDocument", back_populates="user", cascade="all, delete-orphan")

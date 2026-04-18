@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator, ConfigDict
+from pydantic import BaseModel, field_validator, ConfigDict, Field
 from datetime import datetime
 from typing import List, Optional, Union, Any, Dict
 from schemas.agent_execution import ExecutionStepResponse
@@ -40,6 +40,7 @@ class ChatSessionBase(BaseModel):
     title: Optional[str] = "聊天会话"
     provider: str = "openai"
     model: Optional[str] = None
+    knowledge_base_ids: List[int] = Field(default_factory=list)
 
 
 class ChatSessionCreate(ChatSessionBase):
@@ -63,4 +64,9 @@ class MessageCreate(BaseModel):
     content: Union[str, List[ContentItemCreate]]  # 兼容旧格式（字符串）和新格式（列表）
     provider: Optional[str] = "openai"
     model: Optional[str] = None
+    knowledge_base_ids: List[int] = Field(default_factory=list)
     metadata: Optional[Dict[str, Any]] = None
+
+
+class SessionKnowledgeBasesUpdate(BaseModel):
+    knowledge_base_ids: List[int] = Field(default_factory=list)

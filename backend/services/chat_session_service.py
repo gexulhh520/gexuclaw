@@ -16,7 +16,8 @@ class ChatSessionService:
             user_id=user_id,
             title=session_data.title,
             provider=session_data.provider,
-            model=session_data.model
+            model=session_data.model,
+            knowledge_base_ids=session_data.knowledge_base_ids or [],
         )
         db.add(db_session)
         db.commit()
@@ -203,6 +204,17 @@ class ChatSessionService:
         """更新会话标题"""
         db.query(ChatSession).filter(ChatSession.id == session_id).update(
             {"title": title}
+        )
+        db.commit()
+
+    @staticmethod
+    def update_session_knowledge_bases(db: Session, session_id: int, knowledge_base_ids: List[int]) -> None:
+        """更新会话绑定的知识库列表"""
+        db.query(ChatSession).filter(ChatSession.id == session_id).update(
+            {
+                "knowledge_base_ids": knowledge_base_ids,
+                "updated_at": datetime.utcnow(),
+            }
         )
         db.commit()
     

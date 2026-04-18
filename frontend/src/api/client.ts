@@ -21,6 +21,7 @@ export interface Session {
   user_id?: string
   created_at: string
   updated_at: string
+  knowledge_base_ids?: number[]
   messages: Array<{
     role: string
     content: string
@@ -41,8 +42,16 @@ export type MultimodalContent = Array<{ type: string; content: string }>
 export type LLMProvider = 'openai' | 'deepseek' | 'kimi' | 'gemma4'
 
 export const api = {
-  async createSession(provider?: string, model?: string): Promise<{ session_id: string }> {
-    const response = await apiClient.post('/sessions', { provider, model })
+  async createSession(
+    provider?: string,
+    model?: string,
+    knowledgeBaseIds: number[] = []
+  ): Promise<{ session_id: string }> {
+    const response = await apiClient.post('/sessions', {
+      provider,
+      model,
+      knowledge_base_ids: knowledgeBaseIds,
+    })
     return response.data
   },
 
@@ -66,7 +75,8 @@ export const api = {
     sessionId: string,
     content: string | MultimodalContent,
     provider?: LLMProvider,
-    model?: string
+    model?: string,
+    knowledgeBaseIds: number[] = []
   ): Promise<{
     success: boolean
     task_id: string
@@ -79,6 +89,7 @@ export const api = {
       content,
       provider,
       model,
+      knowledge_base_ids: knowledgeBaseIds,
     })
     return response.data
   },

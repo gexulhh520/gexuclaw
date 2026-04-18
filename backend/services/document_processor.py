@@ -21,11 +21,19 @@ from core.config import get_settings
 settings = get_settings()
 
 
+class DocumentExtractionError(Exception):
+    """文档提取失败，包含可直接展示给用户的原因"""
+
+
 class DocumentChunk(LanceModel):
     """LanceDB Pydantic 模型 - 文档分块"""
     id: str
     user_id: int
     session_id: Optional[str]
+    knowledge_base_id: Optional[int]
+    knowledge_base_name: Optional[str]
+    category: Optional[str]
+    document_id: Optional[int]
     filename: str
     chunk_index: int
     content: str
@@ -60,7 +68,11 @@ class DocumentProcessor:
         self,
         files: List[UploadFile],
         user_id: int,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        knowledge_base_id: Optional[int] = None,
+        knowledge_base_name: Optional[str] = None,
+        category: Optional[str] = None,
+        document_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         处理文件列表，解析文档并存储到 LanceDB
@@ -74,6 +86,7 @@ class DocumentProcessor:
             处理结果，包含总块数和消息
         """
         all_chunks: List[DocumentChunk] = []
+        errors: List[str] = []
 
         for file in files:
             if not self._is_document(file.filename):
@@ -81,19 +94,36 @@ class DocumentProcessor:
 
             try:
                 if self._is_zip(file.filename):
-                    chunks = await self._process_zip(file, user_id, session_id)
+                    chunks = await self._process_zip(
+                        file,
+                        user_id,
+                        session_id,
+                        knowledge_base_id=knowledge_base_id,
+                        knowledge_base_name=knowledge_base_name,
+                        category=category,
+                        document_id=document_id,
+                    )
                     all_chunks.extend(chunks)
                 else:
-                    chunks = await self._process_single_document(file, user_id, session_id)
+                    chunks = await self._process_single_document(
+                        file,
+                        user_id,
+                        session_id,
+                        knowledge_base_id=knowledge_base_id,
+                        knowledge_base_name=knowledge_base_name,
+                        category=category,
+                        document_id=document_id,
+                    )
                     all_chunks.extend(chunks)
             except Exception as e:
                 print(f"[DocumentProcessor] 处理文件 {file.filename} 失败: {e}")
+                errors.append(f"{file.filename}: {str(e)}")
                 continue
 
         if not all_chunks:
             return {
                 "total_chunks": 0,
-                "message": "未解析到有效内容"
+                "message": errors[0] if errors else "未解析到有效内容"
             }
 
         # 生成 embeddings 并存储
@@ -108,7 +138,11 @@ class DocumentProcessor:
         self,
         file: UploadFile,
         user_id: int,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        knowledge_base_id: Optional[int] = None,
+        knowledge_base_name: Optional[str] = None,
+        category: Optional[str] = None,
+        document_id: Optional[int] = None,
     ) -> List[DocumentChunk]:
         """处理单个文档文件"""
         # 创建临时文件
@@ -125,7 +159,16 @@ class DocumentProcessor:
             text_content = self._extract_text(temp_path, file.filename)
 
             # 使用 RecursiveCharacterTextSplitter 分块
-            chunks = self._split_into_chunks(text_content, file.filename, user_id, session_id)
+            chunks = self._split_into_chunks(
+                text_content,
+                file.filename,
+                user_id,
+                session_id,
+                knowledge_base_id=knowledge_base_id,
+                knowledge_base_name=knowledge_base_name,
+                category=category,
+                document_id=document_id,
+            )
 
             return chunks
 
@@ -137,7 +180,11 @@ class DocumentProcessor:
         self,
         file: UploadFile,
         user_id: int,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        knowledge_base_id: Optional[int] = None,
+        knowledge_base_name: Optional[str] = None,
+        category: Optional[str] = None,
+        document_id: Optional[int] = None,
     ) -> List[DocumentChunk]:
         """处理 ZIP 压缩包"""
         all_chunks: List[DocumentChunk] = []
@@ -162,7 +209,16 @@ class DocumentProcessor:
                         file_path = os.path.join(root, filename)
                         try:
                             text_content = self._extract_text(file_path, filename)
-                            chunks = self._split_into_chunks(text_content, filename, user_id, session_id)
+                            chunks = self._split_into_chunks(
+                                text_content,
+                                filename,
+                                user_id,
+                                session_id,
+                                knowledge_base_id=knowledge_base_id,
+                                knowledge_base_name=knowledge_base_name,
+                                category=category,
+                                document_id=document_id,
+                            )
                             all_chunks.extend(chunks)
                         except Exception as e:
                             print(f"[DocumentProcessor] 处理 ZIP 内文件 {filename} 失败: {e}")
@@ -179,6 +235,7 @@ class DocumentProcessor:
 
         优先使用 unstructured，如果失败则使用备选方案
         """
+        unstructured_error: Optional[str] = None
         try:
             # 尝试使用 unstructured
             from unstructured.partition.auto import partition
@@ -191,12 +248,29 @@ class DocumentProcessor:
 
         except Exception as e:
             print(f"[DocumentProcessor] unstructured 解析失败，尝试备选方案: {e}")
+            unstructured_error = str(e)
 
         # 备选方案：根据文件类型使用不同方法
         if self._is_pdf(filename):
-            return self._extract_pdf_text(file_path)
+            pdf_text = self._extract_pdf_text(file_path)
+            if pdf_text.strip():
+                return pdf_text
+
+            lower_error = (unstructured_error or "").lower()
+            if "tesseract" in lower_error:
+                raise DocumentExtractionError(
+                    "该 PDF 可能是扫描版图片，当前服务器未安装 Tesseract OCR，无法提取文字。"
+                    "请安装 Tesseract 后重试，或上传可复制文本的 PDF。"
+                )
+
+            raise DocumentExtractionError(
+                "未从 PDF 中提取到有效文本，可能是扫描版图片或文档本身不含可识别文字。"
+            )
         elif self._is_word(filename):
-            return self._extract_word_text(file_path)
+            word_text = self._extract_word_text(file_path)
+            if word_text.strip():
+                return word_text
+            raise DocumentExtractionError("未从 Word 文档中提取到有效文本。")
 
         return ""
 
@@ -238,7 +312,11 @@ class DocumentProcessor:
         text: str,
         filename: str,
         user_id: int,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        knowledge_base_id: Optional[int] = None,
+        knowledge_base_name: Optional[str] = None,
+        category: Optional[str] = None,
+        document_id: Optional[int] = None,
     ) -> List[DocumentChunk]:
         """
         使用 RecursiveCharacterTextSplitter 智能分块
@@ -273,6 +351,10 @@ class DocumentProcessor:
                 id=str(uuid.uuid4()),
                 user_id=user_id,
                 session_id=session_id,
+                knowledge_base_id=knowledge_base_id,
+                knowledge_base_name=knowledge_base_name,
+                category=category,
+                document_id=document_id,
                 filename=filename,
                 chunk_index=i,
                 content=doc.page_content,
@@ -312,8 +394,12 @@ class DocumentProcessor:
 
     def _get_or_create_table(self, table_name: str):
         """获取或创建用户的 LanceDB 表"""
-        if table_name in self.db.table_names():
-            return self.db.open_table(table_name)
+        existing_tables = self.db.table_names()
+        if table_name in existing_tables:
+            table = self.db.open_table(table_name)
+            if self._needs_schema_migration(table):
+                return self._migrate_table_schema(table_name, table)
+            return table
 
         # 使用 Pydantic 模型创建表
         return self.db.create_table(
@@ -322,12 +408,46 @@ class DocumentProcessor:
             mode="create"
         )
 
+    def _needs_schema_migration(self, table) -> bool:
+        """检查现有表是否缺少知识库相关字段"""
+        expected_columns = set(DocumentChunk.model_fields.keys())
+        existing_columns = set(table.schema.names)
+        return not expected_columns.issubset(existing_columns)
+
+    def _migrate_table_schema(self, table_name: str, table):
+        """将旧版 LanceDB 表迁移到新版 schema，保留已有数据"""
+        print(f"[DocumentProcessor] 检测到表 {table_name} 使用旧 schema，开始自动迁移")
+
+        expected_columns = list(DocumentChunk.model_fields.keys())
+        df = table.to_pandas()
+
+        for column in expected_columns:
+            if column not in df.columns:
+                df[column] = None
+
+        # 仅保留新 schema 需要的字段，并保持字段顺序稳定
+        df = df[expected_columns]
+
+        migrated_table = self.db.create_table(
+            table_name,
+            data=df if len(df) > 0 else None,
+            schema=DocumentChunk,
+            mode="overwrite",
+        )
+
+        print(f"[DocumentProcessor] 表 {table_name} schema 迁移完成")
+        return migrated_table
+
 
 # 便捷函数：处理上传的文档
 async def process_uploaded_documents(
     files: List[UploadFile],
     user_id: int,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    knowledge_base_id: Optional[int] = None,
+    knowledge_base_name: Optional[str] = None,
+    category: Optional[str] = None,
+    document_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     处理上传的文档文件
@@ -341,4 +461,12 @@ async def process_uploaded_documents(
         处理结果
     """
     processor = DocumentProcessor()
-    return await processor.process_files(files, user_id, session_id)
+    return await processor.process_files(
+        files,
+        user_id,
+        session_id,
+        knowledge_base_id=knowledge_base_id,
+        knowledge_base_name=knowledge_base_name,
+        category=category,
+        document_id=document_id,
+    )

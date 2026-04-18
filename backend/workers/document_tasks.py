@@ -7,7 +7,9 @@ from typing import Optional
 
 from workers.celery_app import celery_app
 from services.document_processor import DocumentProcessor
+from services.knowledge_base_service import knowledge_base_service
 from core.config import get_settings
+from models.database import SessionLocal
 
 settings = get_settings()
 
@@ -18,7 +20,12 @@ def process_document_task(
     file_path: str,
     filename: str,
     user_id: int,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    knowledge_base_id: Optional[int] = None,
+    knowledge_base_name: Optional[str] = None,
+    category: Optional[str] = None,
+    document_id: Optional[int] = None,
+    keep_original_file: bool = False,
 ):
     """
     异步处理文档任务
@@ -43,7 +50,16 @@ def process_document_task(
         dict: 处理结果
     """
     return asyncio.run(_process_document_async(
-        self, file_path, filename, user_id, session_id
+        self,
+        file_path,
+        filename,
+        user_id,
+        session_id,
+        knowledge_base_id,
+        knowledge_base_name,
+        category,
+        document_id,
+        keep_original_file,
     ))
 
 
@@ -52,13 +68,20 @@ async def _process_document_async(
     file_path: str,
     filename: str,
     user_id: int,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    knowledge_base_id: Optional[int] = None,
+    knowledge_base_name: Optional[str] = None,
+    category: Optional[str] = None,
+    document_id: Optional[int] = None,
+    keep_original_file: bool = False,
 ):
     """异步处理文档"""
     processor = DocumentProcessor()
     temp_dir = None
 
     try:
+        _update_document_status(user_id, document_id, "processing")
+
         # 阶段 1: 开始处理 (10%)
         _update_progress(task, 10, '正在解析文档...', session_id)
 
@@ -72,20 +95,33 @@ async def _process_document_async(
         # 根据文件类型处理
         if processor._is_zip(filename):
             chunks = await _process_zip_with_progress(
-                processor, file_path, filename, user_id, session_id, task
+                processor,
+                file_path,
+                filename,
+                user_id,
+                session_id,
+                task,
+                knowledge_base_id=knowledge_base_id,
+                knowledge_base_name=knowledge_base_name,
+                category=category,
+                document_id=document_id,
             )
         else:
             chunks = await _process_single_document_with_progress(
-                processor, file_path, filename, user_id, session_id, task
+                processor,
+                file_path,
+                filename,
+                user_id,
+                session_id,
+                task,
+                knowledge_base_id=knowledge_base_id,
+                knowledge_base_name=knowledge_base_name,
+                category=category,
+                document_id=document_id,
             )
 
         if not chunks:
-            return {
-                "success": True,
-                "total_chunks": 0,
-                "message": "未解析到有效内容",
-                "filename": filename
-            }
+            raise RuntimeError("未解析到有效内容")
 
         # 阶段 5: 生成 embedding 和存储 (70% -> 100%)
         _update_progress(task, 70, f'正在生成向量 ({len(chunks)} 个片段)...', session_id)
@@ -95,14 +131,17 @@ async def _process_document_async(
             processor, chunks, user_id, session_id, task
         )
 
+        _update_document_status(user_id, document_id, "success", chunks_count=len(chunks), error_message=None)
+
         # 完成
         _update_progress(task, 100, '文档处理完成', session_id)
 
         # 清理文件
-        try:
-            os.remove(file_path)
-        except Exception as e:
-            print(f"[DocumentTask] 清理文件失败: {e}")
+        if not keep_original_file:
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                print(f"[DocumentTask] 清理文件失败: {e}")
 
         return {
             "success": True,
@@ -113,31 +152,17 @@ async def _process_document_async(
 
     except Exception as e:
         print(f"[DocumentTask] 处理文档失败: {e}")
-
-        # 更新任务状态为失败
-        task.update_state(
-            state='FAILURE',
-            meta={
-                'progress': 0,
-                'message': f'处理失败: {str(e)}',
-                'filename': filename
-            }
-        )
-
-        # 尝试重试
-        try:
-            task.retry(countdown=60)
-        except:
-            pass
+        _update_document_status(user_id, document_id, "failed", chunks_count=0, error_message=str(e))
 
         # 清理文件
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except:
-            pass
+        if not keep_original_file:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except:
+                pass
 
-        raise
+        raise RuntimeError(f"文档处理失败: {str(e)}") from e
 
 
 async def _process_single_document_with_progress(
@@ -146,7 +171,11 @@ async def _process_single_document_with_progress(
     filename: str,
     user_id: int,
     session_id: Optional[str],
-    task
+    task,
+    knowledge_base_id: Optional[int] = None,
+    knowledge_base_name: Optional[str] = None,
+    category: Optional[str] = None,
+    document_id: Optional[int] = None,
 ):
     """处理单个文档，带进度更新"""
     # 阶段 3: 提取文本 (30% -> 50%)
@@ -160,7 +189,16 @@ async def _process_single_document_with_progress(
     # 阶段 4: 分块 (50% -> 70%)
     _update_progress(task, 60, '正在分块处理...', session_id)
 
-    chunks = processor._split_into_chunks(text_content, filename, user_id, session_id)
+    chunks = processor._split_into_chunks(
+        text_content,
+        filename,
+        user_id,
+        session_id,
+        knowledge_base_id=knowledge_base_id,
+        knowledge_base_name=knowledge_base_name,
+        category=category,
+        document_id=document_id,
+    )
 
     return chunks
 
@@ -171,7 +209,11 @@ async def _process_zip_with_progress(
     filename: str,
     user_id: int,
     session_id: Optional[str],
-    task
+    task,
+    knowledge_base_id: Optional[int] = None,
+    knowledge_base_name: Optional[str] = None,
+    category: Optional[str] = None,
+    document_id: Optional[int] = None,
 ):
     """处理 ZIP 文件，带进度更新"""
     import zipfile
@@ -213,7 +255,11 @@ async def _process_zip_with_progress(
                         text_content,
                         os.path.basename(file_path),
                         user_id,
-                        session_id
+                        session_id,
+                        knowledge_base_id=knowledge_base_id,
+                        knowledge_base_name=knowledge_base_name,
+                        category=category,
+                        document_id=document_id,
                     )
                     all_chunks.extend(chunks)
             except Exception as e:
@@ -303,3 +349,30 @@ def _update_progress(
             })
         except Exception as e:
             print(f"[DocumentTask] WebSocket 通知失败: {e}")
+
+
+def _update_document_status(
+    user_id: int,
+    document_id: Optional[int],
+    status_value: str,
+    chunks_count: Optional[int] = None,
+    error_message: Optional[str] = None,
+):
+    """回写知识库文档状态"""
+    if not document_id:
+        return
+
+    db = SessionLocal()
+    try:
+        knowledge_base_service.update_document_status(
+            db,
+            user_id=user_id,
+            document_id=document_id,
+            status_value=status_value,
+            chunks_count=chunks_count,
+            error_message=error_message,
+        )
+    except Exception as e:
+        print(f"[DocumentTask] 文档状态回写失败: {e}")
+    finally:
+        db.close()

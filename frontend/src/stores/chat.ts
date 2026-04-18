@@ -36,8 +36,8 @@ export const useChatStore = defineStore('chat', () => {
 
   const hasSession = computed(() => !!sessionId.value)
 
-  async function createSession() {
-    const result = await api.createSession(provider.value, model.value)
+  async function createSession(knowledgeBaseIds: number[] = []) {
+    const result = await api.createSession(provider.value, model.value, knowledgeBaseIds)
     sessionId.value = result.session_id
     connectWebSocket()
     return result.session_id
@@ -186,9 +186,14 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  async function sendMessage(content: string | MultimodalContent, msgProvider?: LLMProvider, msgModel?: string) {
+  async function sendMessage(
+    content: string | MultimodalContent,
+    msgProvider?: LLMProvider,
+    msgModel?: string,
+    knowledgeBaseIds: number[] = []
+  ) {
     if (!sessionId.value) {
-      await createSession()
+      await createSession(knowledgeBaseIds)
     }
 
     // 检查 WebSocket 连接状态
@@ -240,7 +245,7 @@ export const useChatStore = defineStore('chat', () => {
     const useProvider = msgProvider || provider.value
     const useModel = msgModel || model.value || undefined
 
-    await api.sendMessage(sessionId.value, content, useProvider, useModel)
+    await api.sendMessage(sessionId.value, content, useProvider, useModel, knowledgeBaseIds)
   }
 
   function setProvider(newProvider: LLMProvider) {

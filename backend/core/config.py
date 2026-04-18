@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
+    # Browser service configuration
+    BROWSER_SERVICE_ENABLED: bool = False
+    BROWSER_SERVICE_URL: str = "http://127.0.0.1:8001"
+    BROWSER_SERVICE_HOST: str = "127.0.0.1"
+    BROWSER_SERVICE_PORT: int = 8001
+
     # Maintenance / retention (safe defaults; enable scheduling explicitly)
     MAINTENANCE_CLEANUP_ENABLED: bool = False
     MAINTENANCE_CLEANUP_HOUR: int = 3

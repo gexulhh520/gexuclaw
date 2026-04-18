@@ -33,10 +33,9 @@
           <div
             ref="floatingMenuRef"
             class="floating-menu"
+            :class="{ dragging: isFloatingDragging }"
             :style="floatingMenuStyle"
             @pointerdown="onDragStart"
-            @pointerup="onDragEnd"
-            @pointercancel="onDragEnd"
             @click="toggleFloatingMenu"
           >
             <el-icon v-if="!showFloatingMenu"><MoreFilled /></el-icon>
@@ -48,6 +47,10 @@
             <div class="floating-item" @click="handleMenuItem('new')">
               <el-icon><Plus /></el-icon>
               <span>新建会话</span>
+            </div>
+            <div class="floating-item" @click="handleMenuItem('knowledge-base')">
+              <el-icon><Document /></el-icon>
+              <span>我的知识库</span>
             </div>
             <div class="floating-item" @click="handleMenuItem('tasks')">
               <el-icon><List /></el-icon>
@@ -149,9 +152,176 @@
             </div>
           </div>
         </el-drawer>
+
+        <el-drawer
+          v-model="showKnowledgeBaseDrawer"
+          title="我的知识库"
+          direction="rtl"
+          size="720px"
+        >
+          <div class="knowledge-drawer">
+            <div class="knowledge-sidebar">
+              <div class="knowledge-sidebar-header">
+                <el-form :model="knowledgeBaseForm" label-position="top" class="knowledge-form">
+                  <el-form-item label="知识库名称">
+                    <el-input v-model="knowledgeBaseForm.name" placeholder="例如：合同审查库" />
+                  </el-form-item>
+                  <el-form-item label="分类">
+                    <el-input v-model="knowledgeBaseForm.category" placeholder="例如：法律业务" />
+                  </el-form-item>
+                  <el-form-item label="描述">
+                    <el-input
+                      v-model="knowledgeBaseForm.description"
+                      type="textarea"
+                      :rows="2"
+                      placeholder="可选，简要说明知识库用途"
+                    />
+                  </el-form-item>
+                  <el-button type="primary" :loading="creatingKnowledgeBase" @click="createKnowledgeBase">
+                    新建知识库
+                  </el-button>
+                </el-form>
+              </div>
+
+              <div class="knowledge-list">
+                <div
+                  v-for="kb in knowledgeBases"
+                  :key="kb.id"
+                  class="knowledge-item"
+                  :class="{ active: kb.id === selectedKnowledgeBaseId }"
+                  @click="selectKnowledgeBase(kb.id)"
+                >
+                  <div class="knowledge-item-main">
+                    <div class="knowledge-item-title">
+                      <span>{{ kb.name }}</span>
+                      <el-tag v-if="kb.category" size="small" type="info">{{ kb.category }}</el-tag>
+                    </div>
+                    <div class="knowledge-item-desc">{{ kb.description || '暂无描述' }}</div>
+                    <div class="knowledge-item-meta">
+                      <span>{{ kb.document_count || 0 }} 个文档</span>
+                      <span>{{ kb.chunk_count || 0 }} 个分块</span>
+                    </div>
+                  </div>
+                  <div class="knowledge-item-actions">
+                    <el-checkbox
+                      :model-value="currentSessionKnowledgeBaseIds.includes(kb.id)"
+                      @change="toggleSessionKnowledgeBase(kb.id)"
+                      @click.stop
+                    >
+                      引入
+                    </el-checkbox>
+                    <el-button text type="danger" @click.stop="deleteKnowledgeBase(kb)">
+                      删除
+                    </el-button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="knowledge-content">
+              <template v-if="selectedKnowledgeBase">
+                <div class="knowledge-content-header">
+                  <div>
+                    <h3>{{ selectedKnowledgeBase.name }}</h3>
+                    <p>{{ selectedKnowledgeBase.description || '暂无描述' }}</p>
+                  </div>
+                  <div class="knowledge-content-actions">
+                    <el-button :icon="RefreshRight" @click="refreshSelectedKnowledgeBase">
+                      刷新
+                    </el-button>
+                    <el-upload
+                      :show-file-list="false"
+                      :before-upload="beforeDocumentUpload"
+                      :http-request="handleKnowledgeBaseDocumentUpload"
+                      accept=".pdf,.doc,.docx,.zip"
+                    >
+                      <el-button type="primary" :icon="Upload">
+                        上传文档
+                      </el-button>
+                    </el-upload>
+                  </div>
+                </div>
+
+                <div class="knowledge-section">
+                  <div class="knowledge-section-title">文档列表</div>
+                  <el-empty
+                    v-if="knowledgeDocuments.length === 0 && !knowledgeDocumentsLoading"
+                    description="当前知识库暂无文档"
+                  />
+                  <div v-else class="knowledge-document-list">
+                    <div v-for="doc in knowledgeDocuments" :key="doc.id" class="knowledge-document-item">
+                      <div class="knowledge-document-main">
+                        <div class="knowledge-document-name">{{ doc.original_filename }}</div>
+                        <div class="knowledge-document-meta">
+                          <el-tag size="small" :type="getDocumentStatusTagType(doc.status)">
+                            {{ getDocumentStatusLabel(doc.status) }}
+                          </el-tag>
+                          <span>{{ doc.chunks_count || 0 }} 个分块</span>
+                        </div>
+                        <div v-if="doc.error_message" class="knowledge-document-error">
+                          {{ doc.error_message }}
+                        </div>
+                      </div>
+                      <el-button text type="danger" @click="deleteKnowledgeDocument(doc.id)">
+                        删除
+                      </el-button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="knowledge-section">
+                  <div class="knowledge-section-title">检索测试</div>
+                  <div class="knowledge-search-box">
+                    <el-input
+                      v-model="knowledgeSearchQuery"
+                      type="textarea"
+                      :rows="3"
+                      placeholder="输入问题，测试当前知识库能否命中"
+                    />
+                    <el-button type="primary" :icon="Search" :loading="knowledgeSearching" @click="runKnowledgeSearch">
+                      开始检索
+                    </el-button>
+                  </div>
+                  <div v-if="knowledgeSearchResults.length > 0" class="knowledge-search-results">
+                    <div v-for="(result, idx) in knowledgeSearchResults" :key="idx" class="knowledge-search-item">
+                      <div class="knowledge-search-source">
+                        {{ result.knowledge_base_name || selectedKnowledgeBase.name }} / {{ result.filename }}
+                      </div>
+                      <div class="knowledge-search-content">{{ result.content }}</div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <el-empty v-else description="请先创建或选择一个知识库" />
+            </div>
+          </div>
+        </el-drawer>
         </el-main>
 
         <el-footer class="chat-footer">
+          <div class="knowledge-session-bar">
+            <div class="knowledge-session-info">
+              <span class="knowledge-session-label">当前引入知识库</span>
+              <template v-if="selectedKnowledgeBaseObjects.length > 0">
+                <el-tag
+                  v-for="kb in selectedKnowledgeBaseObjects"
+                  :key="kb.id"
+                  closable
+                  size="small"
+                  class="knowledge-session-tag"
+                  @close="toggleSessionKnowledgeBase(kb.id)"
+                >
+                  {{ kb.name }}
+                </el-tag>
+              </template>
+              <span v-else class="knowledge-session-empty">当前未引入知识库</span>
+            </div>
+            <el-button size="small" @click="openKnowledgeBaseDrawer">
+              管理知识库
+            </el-button>
+          </div>
+
           <!-- 已上传文件预览 -->
           <div v-if="uploadedFiles.length > 0" class="uploaded-preview">
             <div v-for="(file, index) in uploadedFiles" :key="index" class="preview-item" :class="{ 'document-item': file.type === 'document' }">
@@ -286,7 +456,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
 import { useUserStore } from '@/stores/user'
-import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone, Picture, Headset, Close, Upload, VideoPause, Monitor, Loading, CircleCheck, Message, Connection, DArrowRight, Clock, MoreFilled, List, Document } from '@element-plus/icons-vue'
+import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone, Picture, Headset, Close, Upload, VideoPause, Monitor, Loading, CircleCheck, Message, Connection, DArrowRight, Clock, MoreFilled, List, Document, Search, RefreshRight } from '@element-plus/icons-vue'
 import type { LLMProvider } from '@/api/client'
 import axios from 'axios'
 
@@ -298,6 +468,46 @@ interface UploadedFile {
   processed?: boolean
   chunks_count?: number
   message?: string
+  task_id?: string
+}
+
+interface KnowledgeBaseItem {
+  id: number
+  user_id: number
+  name: string
+  category?: string | null
+  description?: string | null
+  is_default: boolean
+  document_count: number
+  chunk_count: number
+  created_at: string
+  updated_at?: string | null
+}
+
+interface KnowledgeDocumentItem {
+  id: number
+  knowledge_base_id: number
+  user_id: number
+  original_filename: string
+  stored_filename: string
+  file_path: string
+  file_type: string
+  status: string
+  chunks_count: number
+  error_message?: string | null
+  created_at: string
+  updated_at?: string | null
+}
+
+interface KnowledgeSearchResultItem {
+  content: string
+  knowledge_base_id?: number
+  knowledge_base_name?: string
+  category?: string
+  document_id?: number
+  filename: string
+  chunk_index: number
+  score?: number
 }
 
 const httpClient = axios.create({
@@ -345,23 +555,59 @@ const isExecutingTools = computed(() => chatStore.isExecutingTools)
 const currentToolName = computed(() => chatStore.currentToolName)
 const stepsExpanded = ref(true)
 const showSessionList = ref(false)
+const showKnowledgeBaseDrawer = ref(false)
 const showFloatingMenu = ref(false)
-const floatingMenuStyle = ref({ left: '20px', top: '50%', transform: 'translateY(-50%)' })
+const floatingButtonSize = 44
+const floatingMenuX = ref(20)
+const floatingMenuY = ref(0)
+const isFloatingDragging = ref(false)
+const floatingMenuStyle = computed(() => ({
+  transform: `translate3d(${floatingMenuX.value}px, ${floatingMenuY.value}px, 0)`,
+}))
 const floatingDropdownStyle = computed(() => {
-  const left = parseInt(floatingMenuStyle.value.left) + 54
+  const left = floatingMenuX.value + floatingButtonSize + 10
   return {
     left: left + 'px',
-    top: floatingMenuStyle.value.top,
-    transform: 'translateY(-50%)'
+    top: `${floatingMenuY.value}px`,
   }
 })
 const { sendMessage: sendToAI, setProvider, setModel } = chatStore
 
+const knowledgeBases = ref<KnowledgeBaseItem[]>([])
+const selectedKnowledgeBaseId = ref<number | null>(null)
+const knowledgeDocuments = ref<KnowledgeDocumentItem[]>([])
+const knowledgeSearchResults = ref<KnowledgeSearchResultItem[]>([])
+const knowledgeSearchQuery = ref('')
+const currentSessionKnowledgeBaseIds = ref<number[]>([])
+const creatingKnowledgeBase = ref(false)
+const knowledgeDocumentsLoading = ref(false)
+const knowledgeSearching = ref(false)
+const knowledgeBaseForm = ref({
+  name: '',
+  category: '',
+  description: '',
+})
+
 const floatingMenuRef = ref<HTMLElement | null>(null)
 let isDragging = false
 let hasDragged = false
+let activePointerId: number | null = null
 let dragOffsetX = 0
 let dragOffsetY = 0
+let dragStartX = 0
+let dragStartY = 0
+let dragFrame = 0
+let pendingDragX = 0
+let pendingDragY = 0
+const dragThreshold = 6
+
+const selectedKnowledgeBase = computed(() =>
+  knowledgeBases.value.find(kb => kb.id === selectedKnowledgeBaseId.value) || null
+)
+
+const selectedKnowledgeBaseObjects = computed(() =>
+  knowledgeBases.value.filter(kb => currentSessionKnowledgeBaseIds.value.includes(kb.id))
+)
 
 function toggleFloatingMenu() {
   if (!hasDragged) {
@@ -369,35 +615,87 @@ function toggleFloatingMenu() {
   }
 }
 
-function onDragStart(e: PointerEvent) {
-  if (!floatingMenuRef.value) return
-  isDragging = true
-  hasDragged = false
-  floatingMenuRef.value.setPointerCapture(e.pointerId)
-  const rect = floatingMenuRef.value.getBoundingClientRect()
-  dragOffsetX = e.clientX - rect.left
-  dragOffsetY = e.clientY - rect.top
-  floatingMenuStyle.value = {
-    left: rect.left + 'px',
-    top: rect.top + 'px',
-    transform: 'none'
+function clampFloatingMenuPosition(x: number, y: number) {
+  const maxX = Math.max(window.innerWidth - floatingButtonSize - 12, 12)
+  const maxY = Math.max(window.innerHeight - floatingButtonSize - 12, 12)
+  return {
+    x: Math.min(Math.max(12, x), maxX),
+    y: Math.min(Math.max(12, y), maxY),
   }
 }
 
+function applyFloatingMenuPosition(x: number, y: number) {
+  const clamped = clampFloatingMenuPosition(x, y)
+  floatingMenuX.value = clamped.x
+  floatingMenuY.value = clamped.y
+}
+
+function flushDragPosition() {
+  dragFrame = 0
+  applyFloatingMenuPosition(pendingDragX, pendingDragY)
+}
+
+function initializeFloatingMenuPosition() {
+  const initialY = window.innerHeight / 2 - floatingButtonSize / 2
+  applyFloatingMenuPosition(20, initialY)
+}
+
+function onDragStart(e: PointerEvent) {
+  if (!floatingMenuRef.value) return
+  isDragging = true
+  isFloatingDragging.value = false
+  hasDragged = false
+  activePointerId = e.pointerId
+  floatingMenuRef.value.setPointerCapture(e.pointerId)
+  const rect = floatingMenuRef.value.getBoundingClientRect()
+  dragStartX = e.clientX
+  dragStartY = e.clientY
+  dragOffsetX = e.clientX - rect.left
+  dragOffsetY = e.clientY - rect.top
+  pendingDragX = rect.left
+  pendingDragY = rect.top
+  window.addEventListener('pointermove', onDragMove)
+  window.addEventListener('pointerup', onDragEnd)
+  window.addEventListener('pointercancel', onDragEnd)
+}
+
 function onDragMove(e: PointerEvent) {
-  if (!isDragging || !floatingMenuRef.value) return
+  if (!isDragging || !floatingMenuRef.value || e.pointerId !== activePointerId) return
+
+  const distanceX = e.clientX - dragStartX
+  const distanceY = e.clientY - dragStartY
+  const distance = Math.hypot(distanceX, distanceY)
+
+  if (!hasDragged && distance < dragThreshold) {
+    return
+  }
+
   hasDragged = true
-  floatingMenuStyle.value = {
-    left: (e.clientX - dragOffsetX) + 'px',
-    top: (e.clientY - dragOffsetY) + 'px',
-    transform: 'none'
+  isFloatingDragging.value = true
+  pendingDragX = e.clientX - dragOffsetX
+  pendingDragY = e.clientY - dragOffsetY
+
+  if (!dragFrame) {
+    dragFrame = requestAnimationFrame(flushDragPosition)
   }
 }
 
 function onDragEnd(e: PointerEvent) {
-  if (!floatingMenuRef.value) return
+  if (!floatingMenuRef.value || e.pointerId !== activePointerId) return
   isDragging = false
-  floatingMenuRef.value.releasePointerCapture(e.pointerId)
+  isFloatingDragging.value = false
+  activePointerId = null
+  if (floatingMenuRef.value.hasPointerCapture(e.pointerId)) {
+    floatingMenuRef.value.releasePointerCapture(e.pointerId)
+  }
+  window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointerup', onDragEnd)
+  window.removeEventListener('pointercancel', onDragEnd)
+  if (dragFrame) {
+    cancelAnimationFrame(dragFrame)
+    dragFrame = 0
+  }
+  applyFloatingMenuPosition(pendingDragX, pendingDragY)
   // 延迟重置 hasDragged，避免 click 事件触发
   setTimeout(() => {
     hasDragged = false
@@ -408,6 +706,8 @@ function handleMenuItem(action: string) {
   showFloatingMenu.value = false
   if (action === 'new') {
     createNewSession()
+  } else if (action === 'knowledge-base') {
+    openKnowledgeBaseDrawer()
   } else if (action === 'tasks') {
     // TODO: 跳转到我的任务页面
   }
@@ -453,6 +753,10 @@ async function fetchSessions() {
   try {
     const response = await httpClient.get('/sessions')
     sessions.value = response.data
+    const currentSession = sessions.value.find((s: any) => s.session_id === chatStore.sessionId)
+    if (currentSession) {
+      currentSessionKnowledgeBaseIds.value = currentSession.knowledge_base_ids || []
+    }
   } catch (error) {
     console.error('获取会话列表失败:', error)
   }
@@ -464,6 +768,7 @@ async function createNewSession() {
   chatStore.disconnect()
   chatStore.sessionId = ''
   chatStore.messages = []
+  currentSessionKnowledgeBaseIds.value = []
   isTempSession.value = true
   nextTick(() => {
     const inputEl = document.querySelector('.chat-input input') as HTMLInputElement
@@ -476,6 +781,8 @@ async function switchSession(newSessionId: string) {
   chatStore.disconnect()
   chatStore.sessionId = newSessionId
   chatStore.messages = []
+  const session = sessions.value.find((item: any) => item.session_id === newSessionId)
+  currentSessionKnowledgeBaseIds.value = session?.knowledge_base_ids || []
   await chatStore.connectWebSocket()
   
   try {
@@ -505,6 +812,7 @@ async function deleteSession(sessionIdToDelete: string) {
       chatStore.disconnect()
       chatStore.sessionId = ''
       chatStore.messages = []
+      currentSessionKnowledgeBaseIds.value = []
       isTempSession.value = true
     }
     
@@ -571,7 +879,8 @@ async function sendMessage() {
     try {
       const response = await httpClient.post('/v1/sessions', { 
         provider: selectedProvider.value, 
-        model: selectedModel.value 
+        model: selectedModel.value,
+        knowledge_base_ids: currentSessionKnowledgeBaseIds.value,
       })
       const newSessionId = response.data.session_id
       chatStore.sessionId = newSessionId
@@ -585,7 +894,278 @@ async function sendMessage() {
   }
   
   const multimodalContent = buildMultimodalContent(textContent, files)
-  await sendToAI(multimodalContent, selectedProvider.value, selectedModel.value || undefined)
+  await sendToAI(
+    multimodalContent,
+    selectedProvider.value,
+    selectedModel.value || undefined,
+    currentSessionKnowledgeBaseIds.value,
+  )
+}
+
+async function openKnowledgeBaseDrawer() {
+  showKnowledgeBaseDrawer.value = true
+  await loadKnowledgeBases()
+}
+
+async function loadKnowledgeBases() {
+  try {
+    const response = await httpClient.get('/knowledge-bases')
+    knowledgeBases.value = response.data
+    if (!selectedKnowledgeBaseId.value && knowledgeBases.value.length > 0) {
+      selectedKnowledgeBaseId.value = knowledgeBases.value[0].id
+    }
+    if (
+      selectedKnowledgeBaseId.value &&
+      !knowledgeBases.value.some(kb => kb.id === selectedKnowledgeBaseId.value)
+    ) {
+      selectedKnowledgeBaseId.value = knowledgeBases.value[0]?.id ?? null
+    }
+    if (selectedKnowledgeBaseId.value) {
+      await loadKnowledgeDocuments(selectedKnowledgeBaseId.value)
+    } else {
+      knowledgeDocuments.value = []
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '获取知识库列表失败')
+  }
+}
+
+async function createKnowledgeBase() {
+  if (!knowledgeBaseForm.value.name.trim()) {
+    ElMessage.warning('请输入知识库名称')
+    return
+  }
+
+  creatingKnowledgeBase.value = true
+  try {
+    const response = await httpClient.post('/knowledge-bases', {
+      name: knowledgeBaseForm.value.name.trim(),
+      category: knowledgeBaseForm.value.category.trim() || null,
+      description: knowledgeBaseForm.value.description.trim() || null,
+    })
+    knowledgeBaseForm.value = { name: '', category: '', description: '' }
+    await loadKnowledgeBases()
+    selectedKnowledgeBaseId.value = response.data.id
+    await loadKnowledgeDocuments(response.data.id)
+    ElMessage.success('知识库创建成功')
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '创建知识库失败')
+  } finally {
+    creatingKnowledgeBase.value = false
+  }
+}
+
+async function deleteKnowledgeBase(kb: KnowledgeBaseItem) {
+  try {
+    await ElMessageBox.confirm(`确定删除知识库“${kb.name}”吗？`, '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+
+    await httpClient.delete(`/knowledge-bases/${kb.id}`)
+    currentSessionKnowledgeBaseIds.value = currentSessionKnowledgeBaseIds.value.filter(id => id !== kb.id)
+    if (chatStore.sessionId) {
+      await syncSessionKnowledgeBases()
+    }
+    if (selectedKnowledgeBaseId.value === kb.id) {
+      selectedKnowledgeBaseId.value = null
+    }
+    await loadKnowledgeBases()
+    ElMessage.success('知识库已删除')
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.detail || '删除知识库失败')
+    }
+  }
+}
+
+async function selectKnowledgeBase(knowledgeBaseId: number) {
+  selectedKnowledgeBaseId.value = knowledgeBaseId
+  knowledgeSearchResults.value = []
+  await loadKnowledgeDocuments(knowledgeBaseId)
+}
+
+async function loadKnowledgeDocuments(knowledgeBaseId: number) {
+  knowledgeDocumentsLoading.value = true
+  try {
+    const response = await httpClient.get(`/knowledge-bases/${knowledgeBaseId}/documents`)
+    knowledgeDocuments.value = response.data
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '获取知识库文档失败')
+  } finally {
+    knowledgeDocumentsLoading.value = false
+  }
+}
+
+async function refreshSelectedKnowledgeBase() {
+  await loadKnowledgeBases()
+}
+
+async function syncSessionKnowledgeBases() {
+  if (!chatStore.sessionId) {
+    return
+  }
+
+  try {
+    await httpClient.put(`/sessions/${chatStore.sessionId}/knowledge-bases`, {
+      knowledge_base_ids: currentSessionKnowledgeBaseIds.value,
+    })
+
+    const targetSession = sessions.value.find((session: any) => session.session_id === chatStore.sessionId)
+    if (targetSession) {
+      targetSession.knowledge_base_ids = [...currentSessionKnowledgeBaseIds.value]
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '更新会话知识库失败')
+  }
+}
+
+async function toggleSessionKnowledgeBase(knowledgeBaseId: number) {
+  if (currentSessionKnowledgeBaseIds.value.includes(knowledgeBaseId)) {
+    currentSessionKnowledgeBaseIds.value = currentSessionKnowledgeBaseIds.value.filter(id => id !== knowledgeBaseId)
+  } else {
+    currentSessionKnowledgeBaseIds.value = [...currentSessionKnowledgeBaseIds.value, knowledgeBaseId]
+  }
+
+  if (chatStore.sessionId) {
+    await syncSessionKnowledgeBases()
+  }
+}
+
+async function handleKnowledgeBaseDocumentUpload(options: any) {
+  if (!selectedKnowledgeBaseId.value) {
+    ElMessage.warning('请先选择知识库')
+    return
+  }
+
+  const formData = new FormData()
+  formData.append('file', options.file)
+
+  try {
+    const response = await httpClient.post(
+      `/knowledge-bases/${selectedKnowledgeBaseId.value}/documents`,
+      formData,
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 60000,
+      }
+    )
+    await loadKnowledgeDocuments(selectedKnowledgeBaseId.value)
+    await loadKnowledgeBases()
+    ElMessage.success(response.data.message || '文档已上传，正在后台处理中...')
+    if (response.data.task_id) {
+      pollKnowledgeBaseTask(response.data.task_id, selectedKnowledgeBaseId.value)
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '知识库文档上传失败')
+  }
+}
+
+async function pollKnowledgeBaseTask(taskId: string, knowledgeBaseId: number) {
+  const maxRetries = 300
+  let retries = 0
+
+  const checkStatus = async () => {
+    if (retries >= maxRetries) {
+      return
+    }
+
+    try {
+      const response = await httpClient.get(`/v1/tasks/${taskId}`)
+      const data = response.data
+      if (data.status === 'SUCCESS' || data.status === 'FAILURE') {
+        if (selectedKnowledgeBaseId.value === knowledgeBaseId) {
+          await loadKnowledgeDocuments(knowledgeBaseId)
+        }
+        await loadKnowledgeBases()
+        if (data.status === 'SUCCESS') {
+          ElMessage.success('知识库文档处理完成')
+        } else {
+          ElMessage.error(data.result?.message || '知识库文档处理失败')
+        }
+        return
+      }
+
+      retries++
+      setTimeout(checkStatus, 2000)
+    } catch (error) {
+      retries++
+      setTimeout(checkStatus, 3000)
+    }
+  }
+
+  checkStatus()
+}
+
+async function deleteKnowledgeDocument(documentId: number) {
+  if (!selectedKnowledgeBaseId.value) {
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm('确定删除这个文档吗？', '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await httpClient.delete(`/knowledge-bases/${selectedKnowledgeBaseId.value}/documents/${documentId}`)
+    await loadKnowledgeDocuments(selectedKnowledgeBaseId.value)
+    await loadKnowledgeBases()
+    ElMessage.success('文档已删除')
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.detail || '删除文档失败')
+    }
+  }
+}
+
+async function runKnowledgeSearch() {
+  if (!selectedKnowledgeBaseId.value) {
+    ElMessage.warning('请先选择知识库')
+    return
+  }
+  if (!knowledgeSearchQuery.value.trim()) {
+    ElMessage.warning('请输入检索问题')
+    return
+  }
+
+  knowledgeSearching.value = true
+  try {
+    const response = await httpClient.post('/knowledge-bases/search', {
+      query: knowledgeSearchQuery.value.trim(),
+      knowledge_base_ids: [selectedKnowledgeBaseId.value],
+      top_k: 8,
+    })
+    knowledgeSearchResults.value = response.data.results || []
+    if (knowledgeSearchResults.value.length === 0) {
+      ElMessage.info('未找到相关内容')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '知识库检索失败')
+  } finally {
+    knowledgeSearching.value = false
+  }
+}
+
+function getDocumentStatusLabel(status: string) {
+  switch (status) {
+    case 'pending': return '待处理'
+    case 'processing': return '处理中'
+    case 'success': return '成功'
+    case 'failed': return '失败'
+    default: return status
+  }
+}
+
+function getDocumentStatusTagType(status: string): 'info' | 'warning' | 'success' | 'danger' {
+  switch (status) {
+    case 'pending': return 'info'
+    case 'processing': return 'warning'
+    case 'success': return 'success'
+    case 'failed': return 'danger'
+    default: return 'info'
+  }
 }
 
 function handleCommand(command: string) {
@@ -1005,6 +1585,8 @@ function toggleVoiceInput() {
 
 onMounted(async () => {
   await fetchSessions()
+  await loadKnowledgeBases()
+  initializeFloatingMenuPosition()
 
   if (sessions.value.length === 0) {
     isTempSession.value = true
@@ -1014,7 +1596,7 @@ onMounted(async () => {
     await chatStore.connectWebSocket()
   }
 
-  floatingMenuRef.value?.addEventListener('pointermove', onDragMove)
+  window.addEventListener('resize', handleWindowResize)
 })
 
 onUnmounted(() => {
@@ -1028,8 +1610,19 @@ onUnmounted(() => {
   if (recordingTimer) {
     clearInterval(recordingTimer)
   }
-  floatingMenuRef.value?.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointerup', onDragEnd)
+  window.removeEventListener('pointercancel', onDragEnd)
+  window.removeEventListener('resize', handleWindowResize)
+  if (dragFrame) {
+    cancelAnimationFrame(dragFrame)
+    dragFrame = 0
+  }
 })
+
+function handleWindowResize() {
+  applyFloatingMenuPosition(floatingMenuX.value, floatingMenuY.value)
+}
 </script>
 
 <style scoped>
@@ -1257,6 +1850,38 @@ onUnmounted(() => {
   border-top: 1px solid #e4e7ed;
   flex-shrink: 0;
   height: auto;
+}
+
+.knowledge-session-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px;
+  border-bottom: 1px solid #ebeef5;
+  background: #fafcff;
+}
+
+.knowledge-session-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.knowledge-session-label {
+  font-size: 13px;
+  color: #606266;
+  font-weight: 600;
+}
+
+.knowledge-session-empty {
+  font-size: 13px;
+  color: #909399;
+}
+
+.knowledge-session-tag {
+  margin-right: 4px;
 }
 
 .uploaded-preview {
@@ -1598,11 +2223,200 @@ onUnmounted(() => {
   border-top: 1px solid #e4e7ed;
 }
 
+.knowledge-drawer {
+  display: flex;
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+
+.knowledge-sidebar {
+  width: 290px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #ebeef5;
+  padding-right: 16px;
+}
+
+.knowledge-sidebar-header {
+  padding-bottom: 12px;
+  border-bottom: 1px solid #ebeef5;
+}
+
+.knowledge-form :deep(.el-form-item) {
+  margin-bottom: 12px;
+}
+
+.knowledge-list {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: 12px;
+}
+
+.knowledge-item {
+  padding: 12px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.knowledge-item:hover,
+.knowledge-item.active {
+  border-color: #409eff;
+  background: #f5faff;
+}
+
+.knowledge-item-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 6px;
+}
+
+.knowledge-item-desc {
+  font-size: 12px;
+  color: #606266;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.knowledge-item-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.knowledge-item-actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.knowledge-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.knowledge-content-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.knowledge-content-header h3 {
+  margin: 0 0 6px;
+}
+
+.knowledge-content-header p {
+  margin: 0;
+  color: #606266;
+  font-size: 13px;
+}
+
+.knowledge-content-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.knowledge-section {
+  margin-bottom: 20px;
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.knowledge-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 12px;
+}
+
+.knowledge-document-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.knowledge-document-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.knowledge-document-name {
+  font-weight: 500;
+  color: #303133;
+  margin-bottom: 6px;
+}
+
+.knowledge-document-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.knowledge-document-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #f56c6c;
+}
+
+.knowledge-search-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.knowledge-search-results {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.knowledge-search-item {
+  padding: 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #ebeef5;
+}
+
+.knowledge-search-source {
+  font-size: 12px;
+  color: #409eff;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.knowledge-search-content {
+  font-size: 13px;
+  color: #303133;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
 .floating-menu {
   position: fixed;
-  left: 20px;
-  top: 50%;
-  transform: translateY(-50%);
+  left: 0;
+  top: 0;
   width: 44px;
   height: 44px;
   border-radius: 50%;
@@ -1614,12 +2428,19 @@ onUnmounted(() => {
   cursor: pointer;
   box-shadow: 0 4px 12px rgba(64, 158, 255, 0.4);
   z-index: 100;
-  transition: all 0.3s;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+  touch-action: none;
+  user-select: none;
+  will-change: transform;
 }
 
 .floating-menu:hover {
-  transform: translateY(-50%) scale(1.1);
   box-shadow: 0 6px 16px rgba(64, 158, 255, 0.5);
+}
+
+.floating-menu.dragging {
+  transition: none;
+  box-shadow: 0 8px 20px rgba(64, 158, 255, 0.35);
 }
 
 .floating-dropdown {

@@ -3,7 +3,7 @@ import json
 import sys
 import selectors
 import inspect
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from langchain_core.messages import message_chunk_to_message
 from workers.celery_app import celery_app
@@ -50,8 +50,16 @@ def _run_async(coro):
 
 
 @celery_app.task(bind=True)
-def execute_agent_task(self, session_id: str, user_messages: List[dict], provider: str = "openai", model: str = None, user_id: int = None):
-    return _run_async(_execute(session_id, user_messages, provider, model, user_id))
+def execute_agent_task(
+    self,
+    session_id: str,
+    user_messages: List[dict],
+    provider: str = "openai",
+    model: str = None,
+    user_id: int = None,
+    knowledge_base_ids: Optional[List[int]] = None,
+):
+    return _run_async(_execute(session_id, user_messages, provider, model, user_id, knowledge_base_ids))
 
 
 async def _send_to_session(session_id: str, message: dict):
@@ -65,7 +73,14 @@ async def _send_to_session(session_id: str, message: dict):
         print(f"[WebSocket Debug] Failed to send message to session {session_id}: {e}")
 
 
-async def _execute(session_id: str, user_messages: List[dict], provider: str = "openai", model: str = None, user_id: int = None):
+async def _execute(
+    session_id: str,
+    user_messages: List[dict],
+    provider: str = "openai",
+    model: str = None,
+    user_id: int = None,
+    knowledge_base_ids: Optional[List[int]] = None,
+):
 
     try:
         # 1. 获取 system_prompt
@@ -80,7 +95,8 @@ async def _execute(session_id: str, user_messages: List[dict], provider: str = "
             model=model,
             browser_session_id=browser_session_id,
             system_prompt=system_prompt,
-            user_id=user_id
+            user_id=user_id,
+            knowledge_base_ids=knowledge_base_ids or [],
         )
 
         # 4. 临时收集所有中间步骤

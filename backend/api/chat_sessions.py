@@ -5,11 +5,25 @@ from datetime import datetime
 
 from models.database import get_db
 from models.user import User
-from schemas.chat_session import ChatSessionCreate, ChatSessionResponse, ChatMessageResponse
+from schemas.chat_session import (
+    ChatSessionCreate,
+    ChatSessionResponse,
+    ChatMessageResponse,
+    SessionKnowledgeBasesUpdate,
+)
 from services.chat_session_service import chat_session_service
+from services.knowledge_base_service import knowledge_base_service
+from services.session_manager import SessionManager
 from core.auth import get_current_active_user
 
 router = APIRouter(tags=["会话管理"])
+
+
+def _validate_knowledge_base_ids(db: Session, user_id: int, knowledge_base_ids: List[int]) -> List[int]:
+    unique_ids = list(dict.fromkeys(knowledge_base_ids))
+    for knowledge_base_id in unique_ids:
+        knowledge_base_service.get_user_knowledge_base_or_404(db, user_id, knowledge_base_id)
+    return unique_ids
 
 
 @router.post("", response_model=ChatSessionResponse)
@@ -21,6 +35,11 @@ def create_session(
     """创建新会话"""
     import uuid
     session_id = str(uuid.uuid4())
+    session_data.knowledge_base_ids = _validate_knowledge_base_ids(
+        db,
+        current_user.id,
+        session_data.knowledge_base_ids,
+    )
     return chat_session_service.create_session(db, current_user.id, session_data, session_id)
 
 
@@ -128,3 +147,29 @@ def delete_session(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete session"
         )
+
+
+@router.put("/{session_id}/knowledge-bases")
+def update_session_knowledge_bases(
+    session_id: str,
+    update_data: SessionKnowledgeBasesUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """更新会话绑定的知识库"""
+    session = chat_session_service.get_user_session(db, current_user.id, session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+
+    knowledge_base_ids = _validate_knowledge_base_ids(db, current_user.id, update_data.knowledge_base_ids)
+    chat_session_service.update_session_knowledge_bases(db, session.id, knowledge_base_ids)
+    SessionManager.update_session(session_id, {"knowledge_base_ids": knowledge_base_ids})
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "knowledge_base_ids": knowledge_base_ids,
+    }
