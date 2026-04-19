@@ -322,6 +322,15 @@
             </el-button>
           </div>
 
+          <TaskIntentCard
+            v-if="scheduledTaskSuggestion"
+            :suggestion="scheduledTaskSuggestion"
+            :loading="scheduledTaskAnalyzing"
+            @open-draft="openScheduledTaskDraft"
+            @ignore="ignoreScheduledTaskSuggestion"
+            @open-settings="router.push('/settings')"
+          />
+
           <!-- 已上传文件预览 -->
           <div v-if="uploadedFiles.length > 0" class="uploaded-preview">
             <div v-for="(file, index) in uploadedFiles" :key="index" class="preview-item" :class="{ 'document-item': file.type === 'document' }">
@@ -447,6 +456,18 @@
         </el-footer>
       </el-container>
     </el-container>
+
+    <TaskConfirmDialog
+      v-model="scheduledTaskDialogVisible"
+      :draft="scheduledTaskDraft"
+      :form="scheduledTaskForm"
+      :preview="scheduledTaskPreview"
+      :preview-loading="scheduledTaskPreviewLoading"
+      :submit-loading="scheduledTaskSubmitting"
+      @update:form="scheduledTaskForm = $event"
+      @preview="previewScheduledTaskDraft"
+      @confirm="confirmScheduledTaskDraft"
+    />
   </div>
 </template>
 
@@ -456,6 +477,10 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
 import { useUserStore } from '@/stores/user'
+import { scheduledTaskApi } from '@/api/scheduledTasks'
+import { userSettingsApi } from '@/api/userSettings'
+import TaskIntentCard from '@/components/scheduled-task/TaskIntentCard.vue'
+import TaskConfirmDialog from '@/components/scheduled-task/TaskConfirmDialog.vue'
 import { User, Avatar, Plus, ChatDotRound, Delete, ArrowDown, Microphone, Picture, Headset, Close, Upload, VideoPause, Monitor, Loading, CircleCheck, Message, Connection, DArrowRight, Clock, MoreFilled, List, Document, Search, RefreshRight } from '@element-plus/icons-vue'
 import type { LLMProvider } from '@/api/client'
 import axios from 'axios'
@@ -553,6 +578,7 @@ const currentResponse = computed(() => chatStore.currentResponse)
 const executionSteps = computed(() => chatStore.executionSteps)
 const isExecutingTools = computed(() => chatStore.isExecutingTools)
 const currentToolName = computed(() => chatStore.currentToolName)
+const scheduledTaskSuggestion = computed(() => chatStore.pendingScheduledTaskSuggestion)
 const stepsExpanded = ref(true)
 const showSessionList = ref(false)
 const showKnowledgeBaseDrawer = ref(false)
@@ -586,6 +612,36 @@ const knowledgeBaseForm = ref({
   name: '',
   category: '',
   description: '',
+})
+const userTaskSettings = ref({
+  timezone: 'Asia/Shanghai',
+  notification_email: '',
+  email_notifications_enabled: false,
+  wechat_notifications_enabled: false,
+  wechat_channel_type: 'clawbot',
+  wechat_config_json: {
+    base_url: '',
+    conversation_id: '',
+    token: '',
+    send_endpoint: '/message/send',
+  },
+})
+const scheduledTaskAnalyzing = ref(false)
+const scheduledTaskDialogVisible = ref(false)
+const scheduledTaskDraft = ref<any | null>(null)
+const scheduledTaskPreview = ref<any | null>(null)
+const scheduledTaskPreviewLoading = ref(false)
+const scheduledTaskSubmitting = ref(false)
+const scheduledTaskIntentText = ref('')
+const scheduledTaskSourceMessageId = ref<number | undefined>(undefined)
+const scheduledTaskForm = ref<Record<string, any>>({
+  title: '',
+  description: '',
+  schedule_text: '',
+  cron_expression: '',
+  timezone: 'Asia/Shanghai',
+  delivery_channels: ['in_app'],
+  notification_targets_json: {},
 })
 
 const floatingMenuRef = ref<HTMLElement | null>(null)
@@ -709,7 +765,132 @@ function handleMenuItem(action: string) {
   } else if (action === 'knowledge-base') {
     openKnowledgeBaseDrawer()
   } else if (action === 'tasks') {
-    // TODO: 跳转到我的任务页面
+    router.push('/tasks')
+  }
+}
+
+function buildNotificationTargets() {
+  return {
+    in_app: { enabled: true },
+    email: {
+      enabled: scheduledTaskForm.value.delivery_channels.includes('email'),
+      target: userTaskSettings.value.notification_email || userStore.user?.email || '',
+    },
+    wechat: {
+      enabled: scheduledTaskForm.value.delivery_channels.includes('wechat'),
+      config: userTaskSettings.value.wechat_config_json || {},
+    },
+  }
+}
+
+async function loadUserTaskSettings() {
+  try {
+    const settings = await userSettingsApi.getSettings()
+    userTaskSettings.value = {
+      ...userTaskSettings.value,
+      ...settings,
+      wechat_config_json: {
+        ...userTaskSettings.value.wechat_config_json,
+        ...(settings.wechat_config_json || {}),
+      },
+    }
+  } catch (error) {
+    console.warn('加载任务设置失败', error)
+  }
+}
+
+function ignoreScheduledTaskSuggestion() {
+  chatStore.clearScheduledTaskSuggestion()
+}
+
+async function startScheduledTaskAnalysis() {
+  if (!scheduledTaskSuggestion.value || !chatStore.sessionId) {
+    return
+  }
+
+  scheduledTaskAnalyzing.value = true
+  scheduledTaskPreview.value = null
+  try {
+    scheduledTaskIntentText.value = scheduledTaskSuggestion.value.intentText
+    scheduledTaskSourceMessageId.value = scheduledTaskSuggestion.value.sourceMessageId
+    const draftId = scheduledTaskSuggestion.value.draftId
+    if (!draftId) {
+      ElMessage.warning('当前草案尚未生成完成，请稍后再试')
+      return
+    }
+    const draft = await scheduledTaskApi.getDraft(draftId)
+    scheduledTaskDraft.value = draft
+    scheduledTaskForm.value = {
+      title: draft.title,
+      description: draft.description || '',
+      schedule_text: draft.schedule_text,
+      cron_expression: draft.cron_expression,
+      timezone: draft.timezone,
+      delivery_channels: draft.content?.delivery_channels || ['in_app'],
+      notification_targets_json: buildNotificationTargets(),
+    }
+    scheduledTaskDialogVisible.value = true
+    ElMessage.success('已加载子图生成的任务草案')
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '加载任务草案失败')
+  } finally {
+    scheduledTaskAnalyzing.value = false
+  }
+}
+
+async function openScheduledTaskDraft() {
+  await startScheduledTaskAnalysis()
+}
+
+async function previewScheduledTaskDraft() {
+  if (!scheduledTaskDraft.value) {
+    return
+  }
+  scheduledTaskPreviewLoading.value = true
+  try {
+    scheduledTaskPreview.value = await scheduledTaskApi.previewDraft(scheduledTaskDraft.value.id)
+    if (scheduledTaskPreview.value.success) {
+      ElMessage.success('预检查通过')
+    } else {
+      ElMessage.warning(scheduledTaskPreview.value.message || '预检查未通过')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '预览执行失败')
+  } finally {
+    scheduledTaskPreviewLoading.value = false
+  }
+}
+
+async function confirmScheduledTaskDraft() {
+  if (!scheduledTaskDraft.value) {
+    return
+  }
+  scheduledTaskSubmitting.value = true
+  try {
+    const created = await scheduledTaskApi.createTask({
+      draft_id: scheduledTaskDraft.value.id,
+      title: scheduledTaskForm.value.title,
+      description: scheduledTaskForm.value.description,
+      schedule_text: scheduledTaskForm.value.schedule_text,
+      cron_expression: scheduledTaskForm.value.cron_expression,
+      timezone: scheduledTaskForm.value.timezone,
+      delivery_channels: scheduledTaskForm.value.delivery_channels,
+      notification_targets_json: buildNotificationTargets(),
+      source_session_id: chatStore.sessionId,
+      source_message_id: scheduledTaskSourceMessageId.value,
+      intent_text: scheduledTaskIntentText.value || scheduledTaskDraft.value.title,
+    })
+    scheduledTaskDialogVisible.value = false
+    scheduledTaskDraft.value = null
+    scheduledTaskPreview.value = null
+    scheduledTaskIntentText.value = ''
+    scheduledTaskSourceMessageId.value = undefined
+    ElMessage.success(`任务已创建：${created.title}`)
+    router.push('/tasks')
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '创建任务失败')
+  } finally {
+    scheduledTaskSubmitting.value = false
   }
 }
 
@@ -1586,6 +1767,7 @@ function toggleVoiceInput() {
 onMounted(async () => {
   await fetchSessions()
   await loadKnowledgeBases()
+  await loadUserTaskSettings()
   initializeFloatingMenuPosition()
 
   if (sessions.value.length === 0) {

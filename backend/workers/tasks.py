@@ -58,8 +58,10 @@ def execute_agent_task(
     model: str = None,
     user_id: int = None,
     knowledge_base_ids: Optional[List[int]] = None,
+    turn_id: Optional[int] = None,
+    user_message_id: Optional[int] = None,
 ):
-    return _run_async(_execute(session_id, user_messages, provider, model, user_id, knowledge_base_ids))
+    return _run_async(_execute(session_id, user_messages, provider, model, user_id, knowledge_base_ids, turn_id, user_message_id))
 
 
 async def _send_to_session(session_id: str, message: dict):
@@ -80,6 +82,8 @@ async def _execute(
     model: str = None,
     user_id: int = None,
     knowledge_base_ids: Optional[List[int]] = None,
+    turn_id: Optional[int] = None,
+    user_message_id: Optional[int] = None,
 ):
 
     try:
@@ -97,6 +101,7 @@ async def _execute(
             system_prompt=system_prompt,
             user_id=user_id,
             knowledge_base_ids=knowledge_base_ids or [],
+            session_id=session_id,
         )
 
         # 4. 临时收集所有中间步骤
@@ -121,6 +126,15 @@ async def _execute(
                 "content": event.get("content"),
                 "tool_name": event.get("tool_name"),
                 "tool_status": event.get("tool_status"),
+                "metadata": {
+                    "tool_call_id": event.get("tool_call_id"),
+                    "metadata": event.get("metadata"),
+                    "timestamp": event.get("timestamp"),
+                    "draft_id": event.get("draft_id"),
+                    "draft_title": event.get("draft_title"),
+                    "analysis_status": event.get("analysis_status"),
+                    "intent_text": event.get("intent_text"),
+                },
             })
 
             # 累积最终结果（从 thinking_end 事件获取）
@@ -130,13 +144,14 @@ async def _execute(
         # 6. 执行结束：创建最终 assistant message 并关联所有 steps
         if result:
             db = SessionLocal()
+            final_message_id = None
             try:
                 # 获取会话
                 session = chat_session_service.get_session_by_id(db, session_id)
                 if session:
                     # 创建 assistant message
                     assistant_message = chat_session_service.add_message(
-                        db, session.id, "assistant", result
+                        db, session.id, "assistant", result, turn_id=turn_id
                     )
                     final_message_id = assistant_message.id
                     
@@ -145,13 +160,24 @@ async def _execute(
                         await save_execution_step(
                             db=db,
                             message_id=final_message_id,
+                            turn_id=turn_id,
                             step_type=step["step_type"],
                             content=step.get("content"),
                             tool_name=step.get("tool_name"),
                             tool_status=step.get("tool_status"),
+                            metadata=step.get("metadata"),
                         )
                     
                     print(f"[Task Debug] Saved {len(collected_steps)} execution steps for message {final_message_id}")
+                    if turn_id is not None:
+                        chat_session_service.complete_turn(
+                            db,
+                            turn_id,
+                            assistant_message_id=final_message_id,
+                            source_user_message_id=user_message_id,
+                        )
+                        from workers.turn_memory_tasks import build_turn_memory_task
+                        build_turn_memory_task.delay(turn_id)
                 else:
                     print(f"[Task Error] Session {session_id} not found in PostgreSQL")
             finally:
@@ -177,6 +203,13 @@ async def _execute(
         error_detail = traceback.format_exc()
         print(f"[Task Error] Agent execution failed: {error_msg}")
         print(f"[Task Error] Traceback: {error_detail}")
+
+        if turn_id is not None:
+            db = SessionLocal()
+            try:
+                chat_session_service.fail_turn(db, turn_id)
+            finally:
+                db.close()
 
         await _send_to_session(
             session_id,

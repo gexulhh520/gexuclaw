@@ -9,6 +9,7 @@ class AgentExecutionStep(Base):
     __tablename__ = "agent_execution_steps"
 
     id = Column(Integer, primary_key=True, index=True)
+    turn_id = Column(Integer, ForeignKey("chat_turns.id"), nullable=True, index=True)
     message_id = Column(Integer, ForeignKey("chat_messages.id"), nullable=False)  # 关联的 assistant message
     step_type = Column(String(50), nullable=False)  # thinking/acting/responding/tool_start/tool_end/chunk
     content = Column(Text, nullable=True)  # 步骤内容
@@ -20,3 +21,4 @@ class AgentExecutionStep(Base):
     
     # 关联消息
     message = relationship("ChatMessage", backref="execution_steps")
+    turn = relationship("ChatTurn", back_populates="execution_steps", foreign_keys=[turn_id])

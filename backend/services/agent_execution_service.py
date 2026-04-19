@@ -9,6 +9,7 @@ async def save_execution_step(
     db: Session,
     message_id: int,
     step_type: str,
+    turn_id: Optional[int] = None,
     content: Optional[str] = None,
     tool_name: Optional[str] = None,
     tool_status: Optional[str] = None,
@@ -32,12 +33,13 @@ async def save_execution_step(
         AgentExecutionStep: 创建的执行步骤对象
     """
     step = AgentExecutionStep(
+        turn_id=turn_id,
         message_id=message_id,
         step_type=step_type,
         content=content,
         tool_name=tool_name,
         tool_status=tool_status,
-        metadata=metadata or {},
+        extra_data=metadata or {},
         sort_order=sort_order or 0,
         created_at=datetime.utcnow(),
     )
@@ -50,7 +52,8 @@ async def save_execution_step(
 async def save_execution_steps_batch(
     db: Session,
     message_id: int,
-    steps: List[dict]
+    steps: List[dict],
+    turn_id: Optional[int] = None,
 ) -> None:
     """
     批量保存多个步骤（性能更好）
@@ -62,12 +65,13 @@ async def save_execution_steps_batch(
     """
     for i, step_data in enumerate(steps):
         step = AgentExecutionStep(
+            turn_id=turn_id,
             message_id=message_id,
             step_type=step_data.get("step_type") or step_data.get("type"),
             content=step_data.get("content"),
             tool_name=step_data.get("tool_name"),
             tool_status=step_data.get("tool_status") or step_data.get("status"),
-            metadata=step_data,
+            extra_data=step_data,
             sort_order=i,
         )
         db.add(step)

@@ -2,6 +2,8 @@ import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import Chat from '../views/Chat.vue'
 import Login from '../views/Login.vue'
+import ScheduledTasks from '../views/ScheduledTasks.vue'
+import UserSettings from '../views/UserSettings.vue'
 
 const routes: Array<RouteRecordRaw> = [
   {
@@ -18,6 +20,18 @@ const routes: Array<RouteRecordRaw> = [
     path: '/chat',
     name: 'Chat',
     component: Chat,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/tasks',
+    name: 'ScheduledTasks',
+    component: ScheduledTasks,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/settings',
+    name: 'UserSettings',
+    component: UserSettings,
     meta: { requiresAuth: true }
   },
 ]

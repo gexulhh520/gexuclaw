@@ -1,6 +1,8 @@
-from typing import List, Dict, Any, AsyncGenerator
+from typing import List, Dict, Any, AsyncGenerator, Optional
 from datetime import datetime
 import inspect
+import json
+import re
 import sys
 from urllib.parse import urlparse
 from langgraph.graph import StateGraph, END
@@ -16,7 +18,10 @@ from llm.client import llm_client_instance
 from tools import get_tool_runtime, ToolResult
 from agents.state import AgentState
 from agents.context_manager import context_manager_node
+from agents.scheduled_task_planner_subgraph import scheduled_task_planner_subgraph
 from core.config import get_settings
+
+SCHEDULED_TASK_TOOL_NAME = "scheduled_task__plan_draft"
 
 
 def _convert_multimodal_to_text(messages: List[Dict]) -> List[Dict]:
@@ -149,24 +154,12 @@ async def run_tool(
 
             function_info = call.get("function", {})
             name = function_info.get("name", "")
-            arguments_str = function_info.get("arguments", "{}")
-
-            # 解析参数
-            import json
-            arguments = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
-
-            # 浏览器工具自动注入 session_id
-            if browser_session_id and name.startswith("browser__"):
-                if "launch_browser" in name:
-                    arguments.setdefault("browser_session_id", browser_session_id)
-                elif any(op in name for op in ["navigate", "click", "fill", "type", "get_text"]):
-                    arguments.setdefault("session_id", browser_session_id)
-
-            # 知识库工具自动注入 user_id
-            if user_id and name.startswith("knowledge__"):
-                arguments.setdefault("user_id", user_id)
-                if knowledge_base_ids:
-                    arguments.setdefault("knowledge_base_ids", knowledge_base_ids)
+            _, arguments = prepare_tool_call_arguments(
+                call,
+                browser_session_id=browser_session_id,
+                user_id=user_id,
+                knowledge_base_ids=knowledge_base_ids,
+            )
 
             if debug_enabled:
                 print(f"[Tool Debug] Executing: {name} | Args: {arguments}")
@@ -200,6 +193,44 @@ async def run_tool(
     return tool_messages
 
 
+def prepare_tool_call_arguments(
+    call: Dict[str, Any],
+    browser_session_id: Optional[str] = None,
+    user_id: Optional[int] = None,
+    knowledge_base_ids: Optional[List[int]] = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    function_info = call.get("function", {}) or {}
+    name = function_info.get("name", "")
+    arguments_raw = function_info.get("arguments", "{}")
+
+    if isinstance(arguments_raw, str):
+        try:
+            raw_arguments = json.loads(arguments_raw)
+        except Exception:
+            raw_arguments = {}
+    elif isinstance(arguments_raw, dict):
+        raw_arguments = dict(arguments_raw)
+    else:
+        raw_arguments = {}
+
+    executed_arguments = dict(raw_arguments)
+
+    # 浏览器工具自动注入运行时参数
+    if browser_session_id and name.startswith("browser__"):
+        if "launch_browser" in name:
+            executed_arguments.setdefault("browser_session_id", browser_session_id)
+        elif any(op in name for op in ["navigate", "click", "fill", "type", "get_text"]):
+            executed_arguments.setdefault("session_id", browser_session_id)
+
+    # 知识库工具自动注入上下文
+    if user_id and name.startswith("knowledge__"):
+        executed_arguments.setdefault("user_id", user_id)
+        if knowledge_base_ids:
+            executed_arguments.setdefault("knowledge_base_ids", knowledge_base_ids)
+
+    return raw_arguments, executed_arguments
+
+
 def get_available_tools() -> List[Dict[str, Any]]:
     """获取所有可用的工具定义，用于 LLM function calling"""
     tool_runtime = get_tool_runtime()
@@ -229,6 +260,7 @@ class AgentExecutor:
         system_prompt=None,
         user_id: int = None,
         knowledge_base_ids: Optional[List[int]] = None,
+        session_id: Optional[str] = None,
     ):
         self.provider = provider
         self.model = model
@@ -236,6 +268,7 @@ class AgentExecutor:
         self.system_prompt = system_prompt  # 新增：存储系统提示词
         self.user_id = user_id  # 当前登录用户 ID
         self.knowledge_base_ids = knowledge_base_ids or []
+        self.session_id = session_id
 
         # Default to in-memory so graph compilation always succeeds; execute_stream() may
         # switch to a persistent Postgres checkpointer at runtime (AsyncPostgresSaver.from_conn_string
@@ -287,6 +320,7 @@ class AgentExecutor:
         workflow = StateGraph(AgentState)
 
         workflow.add_node("thinking", self._thinking_node)
+        workflow.add_node("scheduled_task_subgraph", self._scheduled_task_subgraph_node)
         workflow.add_node("acting", self._acting_node)
         workflow.add_node("context_manager_node", context_manager_node)
         workflow.add_node("responding", self._responding_node)
@@ -299,12 +333,14 @@ class AgentExecutor:
             self._should_continue,
             {
                 "continue": "acting",
-                "end": "responding"
+                "scheduled_task_subgraph": "scheduled_task_subgraph",
+                "end": "responding",
             }
         )
 
         workflow.add_edge("acting", "context_manager_node")
         workflow.add_edge("context_manager_node", "thinking")   # 循环继续
+        workflow.add_edge("scheduled_task_subgraph", "responding")
         workflow.add_edge("responding", END)
 
         return workflow.compile(checkpointer=checkpointer)
@@ -356,8 +392,17 @@ class AgentExecutor:
                     "timestamp": datetime.utcnow().isoformat()
                 })
 
-
+                scheduled_task_route = self._extract_scheduled_task_route(formatted_tool_calls)
+                if scheduled_task_route:
+                    state["scheduled_task_route"] = scheduled_task_route
+                    has_normal_tool_calls = any(
+                        not self._is_scheduled_task_tool_call(tc) for tc in formatted_tool_calls
+                    )
+                    if not has_normal_tool_calls:
+                        return "scheduled_task_subgraph"
            return "continue"
+        if state.get("scheduled_task_route"):
+            return "scheduled_task_subgraph"
         return "end"
 
     # ====== thinking：LLM 决策 ======
@@ -409,6 +454,72 @@ class AgentExecutor:
 
         return state
 
+    async def _scheduled_task_subgraph_node(self, state: AgentState):
+        route_decision = state.get("scheduled_task_route") or {}
+        result = await scheduled_task_planner_subgraph.ainvoke(
+            {
+                "session_id": state.get("session_id") or self.session_id or "",
+                "user_id": self.user_id,
+                "provider": self.provider,
+                "model": self.model,
+                "route_decision": route_decision,
+                "task_id": None,
+                "draft_payload": None,
+            }
+        )
+        draft_payload = result.get("draft_payload") or {}
+        state["scheduled_task_draft"] = draft_payload
+        state.setdefault("_node_events", [])
+        tool_call_id = route_decision.get("tool_call_id") or self._resolve_scheduled_tool_call_id(state)
+        if tool_call_id:
+            tool_message = {
+                "tool_call_id": tool_call_id,
+                "role": "tool",
+                "name": SCHEDULED_TASK_TOOL_NAME,
+                "tool_name": SCHEDULED_TASK_TOOL_NAME,
+                "content": json.dumps(
+                    {
+                        "status": "success",
+                        "draft_id": draft_payload.get("id"),
+                        "draft_title": draft_payload.get("title"),
+                        "analysis_status": draft_payload.get("analysis_status") or "draft",
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+            # 用新列表回写，确保 LangGraph/Checkpoint 识别到 messages 状态更新。
+            state["messages"] = list(state.get("messages", [])) + [tool_message]
+            print(
+                "[Agent Debug] scheduled_task_subgraph append tool message | "
+                f"tool_call_id={tool_call_id} "
+                f"session_id={state.get('session_id') or self.session_id}"
+            )
+        else:
+            print(
+                "[Agent Warn] scheduled_task_subgraph missing tool_call_id, "
+                f"session_id={state.get('session_id') or self.session_id}"
+            )
+        state["_node_events"].append({
+            "type": "scheduled_task_suggestion",
+            "content": f"已根据当前对话生成定时任务草案：{draft_payload.get('title') or '未命名任务'}",
+            "intent_text": draft_payload.get("intent_text") or route_decision.get("intent_text") or "",
+            "draft_id": draft_payload.get("id"),
+            "draft_title": draft_payload.get("title"),
+            "summary_markdown": draft_payload.get("summary_markdown") or "",
+            "analysis_status": draft_payload.get("analysis_status") or "draft",
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        resp = state.get("llm_response") or {}
+        final_hint = "我已经根据当前对话生成了一个定时任务草案，你可以查看、预览并确认创建。"
+        current_content = (resp.get("content") or "").strip()
+        if not current_content:
+            resp["content"] = final_hint
+        elif "定时任务草案" not in current_content:
+            resp["content"] = f"{current_content}\n\n{final_hint}"
+        state["llm_response"] = resp
+        state["scheduled_task_route"] = None
+        return state
+
     # ====== acting：执行工具 ======
     async def _acting_node(self, state: AgentState):
 
@@ -426,18 +537,34 @@ class AgentExecutor:
         state.setdefault("_node_events", [])
 
         if tool_calls:
+            executable_tool_calls = [
+                tc for tc in tool_calls if not self._is_scheduled_task_tool_call(tc)
+            ]
+            if not executable_tool_calls:
+                return state
             # 方案 B: 注入 tool_start 事件
-            for tc in tool_calls:
+            for tc in executable_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "")
+                raw_arguments, executed_arguments = prepare_tool_call_arguments(
+                    tc,
+                    browser_session_id=browser_session_id,
+                    user_id=self.user_id,
+                    knowledge_base_ids=self.knowledge_base_ids,
+                )
                 state["_node_events"].append({
                     "type": "tool_start",
                     "tool_name": tool_name,
+                    "tool_call_id": tc.get("id"),
+                    "metadata": {
+                        "raw_arguments": raw_arguments,
+                        "executed_arguments": executed_arguments,
+                    },
                     "timestamp": datetime.utcnow().isoformat()
                 })
 
             # 执行真实工具，返回 tool 消息列表（注入 browser_session_id 和 user_id）
             tool_messages = await run_tool(
-                tool_calls,
+                executable_tool_calls,
                 browser_session_id=browser_session_id,
                 user_id=self.user_id,
                 knowledge_base_ids=self.knowledge_base_ids,
@@ -455,6 +582,7 @@ class AgentExecutor:
                 state["_node_events"].append({
                     "type": "tool_end",
                     "tool_name": tool_message.get("tool_name", ""),
+                    "tool_call_id": tool_message.get("tool_call_id"),
                     "tool_status": tool_status,
                     "content": content,
                     "timestamp": datetime.utcnow().isoformat()
@@ -561,6 +689,7 @@ class AgentExecutor:
                     f"summary_chars={len(summary_history or '')} "
                     f"history_tail_roles={roles[-5:]}"
                 )
+            self._log_scheduled_task_tool_history(history_messages or [], thread_id)
 
             current_messages = history_messages.copy()
 
@@ -574,12 +703,14 @@ class AgentExecutor:
 
             initial_state: Dict[str, Any] = {
                 "messages": current_messages,
+                "session_id": self.session_id,
                 "browser_session_id": self.browser_session_id,
                 "summary_history": summary_history,
                 "_node_events": [],  # 初始化事件队列
             }
 
             processed_event_ids = set()  # 已处理的事件 ID 集合
+            seen_thinking_end = False
 
             async for event in graph.astream_events(initial_state, config=config, version="v2"):
                 # 方案 B: 从 on_chain_stream 事件中提取 _node_events
@@ -593,7 +724,8 @@ class AgentExecutor:
                                 processed_event_ids.add(ev_id)
                                 yield ev
                                 if ev.get("type") == "thinking_end":
-                                    return
+                                    # 不要提前 return，确保 graph 能完整收尾并写入 checkpoint。
+                                    seen_thinking_end = True
 
                 elif event["event"] == "on_chain_end":
                     if event["name"] == "context_manager_node":
@@ -647,3 +779,122 @@ class AgentExecutor:
 
         async for ev in _run_with(self.graph, self.checkpointer):
             yield ev
+
+    def _extract_latest_user_text(self, messages: List[Dict[str, Any]]) -> str:
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text" and item.get("content"):
+                        text_parts.append(item.get("content"))
+                if text_parts:
+                    return "\n".join(text_parts)
+        return ""
+
+    def _log_scheduled_task_tool_history(self, messages: List[Dict[str, Any]], thread_id: str) -> None:
+        related_items = []
+        for idx, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+
+            if role == "assistant":
+                tool_calls = message.get("tool_calls") or []
+                for tool_call in tool_calls:
+                    function_info = (tool_call.get("function", {}) or {})
+                    if function_info.get("name") != SCHEDULED_TASK_TOOL_NAME:
+                        continue
+                    related_items.append(
+                        {
+                            "index": idx,
+                            "role": "assistant",
+                            "tool_call_id": tool_call.get("id"),
+                            "arguments": function_info.get("arguments"),
+                            "content_preview": str(message.get("content", ""))[:160],
+                        }
+                    )
+                continue
+
+            if role == "tool":
+                tool_name = message.get("name") or message.get("tool_name")
+                tool_call_id = message.get("tool_call_id")
+                if tool_name != SCHEDULED_TASK_TOOL_NAME and not str(tool_call_id).startswith(f"{SCHEDULED_TASK_TOOL_NAME}:"):
+                    continue
+                content = message.get("content", "")
+                content_preview = str(content)
+                if len(content_preview) > 200:
+                    content_preview = content_preview[:200] + "..."
+                related_items.append(
+                    {
+                        "index": idx,
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content_preview": content_preview,
+                    }
+                )
+
+        if related_items:
+            print(
+                "[Agent Debug] scheduled_task__plan_draft history | "
+                f"thread_id={thread_id} "
+                f"count={len(related_items)} "
+                f"items={related_items}"
+            )
+
+    def _is_scheduled_task_tool_call(self, tool_call: Dict[str, Any]) -> bool:
+        return (tool_call.get("function", {}) or {}).get("name") == SCHEDULED_TASK_TOOL_NAME
+
+    def _resolve_scheduled_tool_call_id(self, state: AgentState) -> Optional[str]:
+        for message in reversed(state.get("messages", [])):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            tool_calls = message.get("tool_calls") or []
+            for tool_call in reversed(tool_calls):
+                if self._is_scheduled_task_tool_call(tool_call):
+                    tool_call_id = tool_call.get("id")
+                    if tool_call_id:
+                        return tool_call_id
+        return None
+
+    def _extract_scheduled_task_route(self, tool_calls: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        latest_user_text = ""
+        for tool_call in tool_calls:
+            if not self._is_scheduled_task_tool_call(tool_call):
+                continue
+            arguments_text = (tool_call.get("function", {}) or {}).get("arguments", "{}")
+            arguments = self._parse_json_response(arguments_text)
+            latest_user_text = arguments.get("intent_text") or latest_user_text
+            return {
+                "should_enter_subgraph": True,
+                "tool_call_id": tool_call.get("id"),
+                "intent_text": arguments.get("intent_text") or "",
+                "schedule_text": arguments.get("schedule_text") or "",
+                "timezone": arguments.get("timezone"),
+                "goal": arguments.get("goal") or "",
+                "reason": "主 agent 调用了 scheduled_task__plan_draft",
+            }
+        return None
+
+    def _parse_json_response(self, text: str) -> Dict[str, Any]:
+        if not text:
+            return {}
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+            cleaned = re.sub(r"```$", "", cleaned).strip()
+        try:
+            return json.loads(cleaned)
+        except Exception:
+            match = re.search(r"\{[\s\S]*\}", cleaned)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except Exception:
+                    return {}
+        return {}

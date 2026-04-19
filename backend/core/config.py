@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
+    # Notification providers
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_USE_TLS: bool = True
+    SMTP_SENDER: str = ""
+    CLAWBOT_TIMEOUT_SECONDS: int = 30
+
     # Browser service configuration
     BROWSER_SERVICE_ENABLED: bool = False
     BROWSER_SERVICE_URL: str = "http://127.0.0.1:8001"

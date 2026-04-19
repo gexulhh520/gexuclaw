@@ -184,7 +184,8 @@ async def send_message(
     else:
         SessionManager.update_session(data.session_id, {"knowledge_base_ids": knowledge_base_ids})
     
-    chat_session_service.add_message(db, session.id, "user", data.content)
+    turn = chat_session_service.create_turn(db, session.id, current_user.id, trigger_type="normal")
+    user_message = chat_session_service.add_message(db, session.id, "user", data.content, turn_id=turn.id)
     
     # 添加用户消息到 Redis
     SessionManager.add_message(data.session_id, "user", data.content)
@@ -199,6 +200,8 @@ async def send_message(
         data.model,
         current_user.id,
         knowledge_base_ids,
+        turn.id,
+        user_message.id,
     )
 
     return {

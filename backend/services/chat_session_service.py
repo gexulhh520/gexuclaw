@@ -3,6 +3,7 @@ from sqlalchemy import desc
 from typing import List, Optional, Union, Dict, Any
 from datetime import datetime
 from models.chat_session import ChatSession, ChatMessage, MessageContentItem
+from models.chat_turn import ChatTurn
 from models.agent_execution_step import AgentExecutionStep
 from schemas.chat_session import ChatSessionCreate
 
@@ -43,10 +44,69 @@ class ChatSessionService:
             ChatSession.user_id == user_id,
             ChatSession.session_id == session_id
         ).first()
+
+    @staticmethod
+    def create_turn(
+        db: Session,
+        session_db_id: int,
+        user_id: int,
+        trigger_type: str = "normal",
+    ) -> ChatTurn:
+        last_turn = db.query(ChatTurn).filter(
+            ChatTurn.session_id == session_db_id
+        ).order_by(desc(ChatTurn.turn_index), desc(ChatTurn.id)).first()
+        next_turn_index = (last_turn.turn_index + 1) if last_turn else 1
+        turn = ChatTurn(
+            session_id=session_db_id,
+            user_id=user_id,
+            turn_index=next_turn_index,
+            status="running",
+            trigger_type=trigger_type,
+            started_at=datetime.utcnow(),
+        )
+        db.add(turn)
+        db.commit()
+        db.refresh(turn)
+        return turn
+
+    @staticmethod
+    def complete_turn(
+        db: Session,
+        turn_id: int,
+        assistant_message_id: Optional[int] = None,
+        source_user_message_id: Optional[int] = None,
+    ) -> Optional[ChatTurn]:
+        turn = db.query(ChatTurn).filter(ChatTurn.id == turn_id).first()
+        if not turn:
+            return None
+        if assistant_message_id is not None:
+            turn.assistant_message_id = assistant_message_id
+        if source_user_message_id is not None:
+            turn.source_user_message_id = source_user_message_id
+        turn.status = "completed"
+        turn.finished_at = datetime.utcnow()
+        turn.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(turn)
+        return turn
+
+    @staticmethod
+    def fail_turn(db: Session, turn_id: int) -> Optional[ChatTurn]:
+        turn = db.query(ChatTurn).filter(ChatTurn.id == turn_id).first()
+        if not turn:
+            return None
+        turn.status = "failed"
+        turn.finished_at = datetime.utcnow()
+        turn.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(turn)
+        return turn
     
     @staticmethod
-    def add_message(db: Session, session_id: int, role: str, 
-                   content: Union[str, List[Dict[str, Any]]]) -> ChatMessage:
+    def add_message(db: Session, session_id: int, role: str,
+                   content: Union[str, List[Dict[str, Any]]],
+                   turn_id: Optional[int] = None,
+                   ) -> ChatMessage:
         """
         添加消息到会话（支持多模态）
         
@@ -63,6 +123,7 @@ class ChatSessionService:
         """
         db_message = ChatMessage(
             session_id=session_id,
+            turn_id=turn_id,
             role=role,
         )
         db.add(db_message)
@@ -147,6 +208,7 @@ class ChatSessionService:
         
         return {
             "id": message.id,
+            "turn_id": message.turn_id,
             "role": message.role,
             "content": [
                 {
@@ -164,7 +226,8 @@ class ChatSessionService:
                     "content": s.content,
                     "tool_name": s.tool_name,
                     "tool_status": s.tool_status,
-                    "metadata": s.metadata,
+                    "metadata": s.extra_data,
+                    "turn_id": s.turn_id,
                     "sort_order": s.sort_order,
                     "created_at": s.created_at.isoformat() if s.created_at else None
                 }

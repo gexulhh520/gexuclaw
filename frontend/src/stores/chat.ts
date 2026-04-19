@@ -3,13 +3,19 @@ import { ref, computed } from 'vue'
 import { api, Message, LLMProvider } from '@/api/client'
 
 interface WebSocketMessage {
-  type: 'chunk' | 'done' | 'error' | 'ack' | 'tool_start' | 'tool_end' | 'thinking_start' | 'thinking_ing' | 'thinking_end' | 'context_trimmed'
+  type: 'chunk' | 'done' | 'error' | 'ack' | 'tool_start' | 'tool_end' | 'thinking_start' | 'thinking_ing' | 'thinking_end' | 'context_trimmed' | 'scheduled_task_suggestion'
   content?: string
   received?: any
   message?: string
   tool_name?: string
   tool_status?: string
   timestamp?: string
+  intent_text?: string
+  source_message_id?: number
+  draft_id?: number
+  draft_title?: string
+  summary_markdown?: string
+  analysis_status?: string
 }
 
 interface ExecutionStep {
@@ -33,6 +39,15 @@ export const useChatStore = defineStore('chat', () => {
   const executionSteps = ref<ExecutionStep[]>([])
   const isExecutingTools = ref(false)
   const currentToolName = ref('')
+  const pendingScheduledTaskSuggestion = ref<{
+    content: string
+    intentText: string
+    sourceMessageId?: number
+    draftId?: number
+    draftTitle?: string
+    summaryMarkdown?: string
+    analysisStatus?: string
+  } | null>(null)
 
   const hasSession = computed(() => !!sessionId.value)
 
@@ -182,6 +197,17 @@ export const useChatStore = defineStore('chat', () => {
           timestamp,
         })
         break
+      case 'scheduled_task_suggestion':
+        pendingScheduledTaskSuggestion.value = {
+          content: data.content || '检测到可能的定时任务意图',
+          intentText: data.intent_text || '',
+          sourceMessageId: data.source_message_id,
+          draftId: data.draft_id,
+          draftTitle: data.draft_title,
+          summaryMarkdown: data.summary_markdown,
+          analysisStatus: data.analysis_status,
+        }
+        break
       // context_trimmed 不显示也不记录
     }
   }
@@ -263,6 +289,10 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function clearScheduledTaskSuggestion() {
+    pendingScheduledTaskSuggestion.value = null
+  }
+
   return {
     sessionId,
     messages,
@@ -274,6 +304,7 @@ export const useChatStore = defineStore('chat', () => {
     executionSteps,
     isExecutingTools,
     currentToolName,
+    pendingScheduledTaskSuggestion,
     createSession,
     loadSession,
     sendMessage,
@@ -281,5 +312,6 @@ export const useChatStore = defineStore('chat', () => {
     setProvider,
     setModel,
     connectWebSocket,
+    clearScheduledTaskSuggestion,
   }
 })

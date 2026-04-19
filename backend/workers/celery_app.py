@@ -26,16 +26,27 @@ celery_app.conf.update(
     task_soft_time_limit=25 * 60,
 )
 
-celery_app.autodiscover_tasks(["workers.tasks", "workers.document_tasks"])
-celery_app.autodiscover_tasks(["workers.maintenance_tasks"])
+celery_app.autodiscover_tasks([
+    "workers.tasks",
+    "workers.document_tasks",
+    "workers.maintenance_tasks",
+    "workers.scheduled_task_dispatcher",
+    "workers.scheduled_task_executor",
+    "workers.turn_memory_tasks",
+])
 
 # 导入文档处理任务模块以确保任务被注册
 import workers.document_tasks
 import workers.maintenance_tasks
+import workers.scheduled_task_dispatcher
+import workers.scheduled_task_executor
+import workers.turn_memory_tasks
 
+
+beat_schedule = {}
 
 if getattr(settings, "MAINTENANCE_CLEANUP_ENABLED", False):
-    celery_app.conf.beat_schedule = {
+    beat_schedule.update({
         "maintenance-cleanup": {
             "task": "workers.maintenance_tasks.cleanup_maintenance",
             "schedule": crontab(
@@ -43,7 +54,14 @@ if getattr(settings, "MAINTENANCE_CLEANUP_ENABLED", False):
                 minute=getattr(settings, "MAINTENANCE_CLEANUP_MINUTE", 30),
             ),
         }
-    }
+    })
+
+beat_schedule["dispatch-due-scheduled-tasks"] = {
+    "task": "workers.scheduled_task_dispatcher.dispatch_due_scheduled_tasks",
+    "schedule": 60.0,
+}
+
+celery_app.conf.beat_schedule = beat_schedule
 
 
 # 注意：BrowserManager 改为延迟初始化
