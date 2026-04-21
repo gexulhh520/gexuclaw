@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import { api, Message, LLMProvider } from '@/api/client'
 
 interface WebSocketMessage {
-  type: 'chunk' | 'done' | 'error' | 'ack' | 'tool_start' | 'tool_end' | 'thinking_start' | 'thinking_ing' | 'thinking_end' | 'context_trimmed' | 'scheduled_task_suggestion'
+  type: 'chunk' | 'done' | 'error' | 'ack' | 'tool_start' | 'tool_end' | 'thinking_start' | 'thinking_ing' | 'thinking_end' | 'context_trimmed' | 'scheduled_task_suggestion' | 'planner_draft_queued' | 'planner_draft_ready' | 'planner_draft_failed' | 'scheduled_task_preview_queued'
   content?: string
   received?: any
   message?: string
@@ -16,6 +16,9 @@ interface WebSocketMessage {
   draft_title?: string
   summary_markdown?: string
   analysis_status?: string
+  request_id?: string
+  job_id?: string
+  error_message?: string
 }
 
 interface ExecutionStep {
@@ -206,6 +209,41 @@ export const useChatStore = defineStore('chat', () => {
           draftTitle: data.draft_title,
           summaryMarkdown: data.summary_markdown,
           analysisStatus: data.analysis_status,
+        }
+        break
+      case 'planner_draft_queued':
+        pendingScheduledTaskSuggestion.value = {
+          content: '我已在后台开始生成定时任务草案，生成完成后会通知你，你可以继续聊天。',
+          intentText: data.intent_text || '',
+          analysisStatus: 'queued',
+        }
+        break
+      case 'planner_draft_ready':
+        pendingScheduledTaskSuggestion.value = {
+          content: '已根据当前对话生成定时任务草案：' + (data.title || '未命名任务'),
+          intentText: data.intent_text || '',
+          draftId: data.draft_id,
+          draftTitle: data.title,
+          summaryMarkdown: data.summary_markdown,
+          analysisStatus: data.analysis_status || 'draft',
+        }
+        break
+      case 'planner_draft_failed':
+        pendingScheduledTaskSuggestion.value = {
+          content: '抱歉，定时任务草案生成失败。',
+          intentText: data.intent_text || '',
+          analysisStatus: 'failed',
+          summaryMarkdown: '错误信息：' + (data.error_message || '未知错误'),
+        }
+        break
+      case 'scheduled_task_preview_queued':
+        pendingScheduledTaskSuggestion.value = {
+          content: '预执行已排队，后端正在进行执行前检查。',
+          intentText: data.intent_text || '',
+          draftId: data.draft_id,
+          draftTitle: data.draft_title,
+          summaryMarkdown: data.schedule_text ? `频率：${data.schedule_text}` : undefined,
+          analysisStatus: 'queued',
         }
         break
       // context_trimmed 不显示也不记录

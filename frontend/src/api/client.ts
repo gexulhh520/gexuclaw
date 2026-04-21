@@ -84,13 +84,14 @@ export const api = {
     provider?: string
     model?: string
   }> {
-    const response = await apiClient.post('/chat', {
+    // 切换到 V2 聊天接口以启用 PlannerAgentV2 架构
+    const response = await apiClient.post('/v2/chat/chat', {
       session_id: sessionId,
       content,
       provider,
       model,
       knowledge_base_ids: knowledgeBaseIds,
-    })
+    }, { baseURL: '/api' }) // 覆盖基础 baseURL 以适配 /api/v2/chat
     return response.data
   },
 

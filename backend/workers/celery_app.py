@@ -28,6 +28,8 @@ celery_app.conf.update(
 
 celery_app.autodiscover_tasks([
     "workers.tasks",
+    "workers.tasks_v2",
+    "workers.planner_jobs",
     "workers.document_tasks",
     "workers.maintenance_tasks",
     "workers.scheduled_task_dispatcher",
@@ -38,6 +40,8 @@ celery_app.autodiscover_tasks([
 # 导入文档处理任务模块以确保任务被注册
 import workers.document_tasks
 import workers.maintenance_tasks
+import workers.planner_jobs
+import workers.tasks_v2
 import workers.scheduled_task_dispatcher
 import workers.scheduled_task_executor
 import workers.turn_memory_tasks

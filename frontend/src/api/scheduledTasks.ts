@@ -36,6 +36,7 @@ export interface ScheduledTaskDraftResponse {
   summary_markdown: string
   content: any
   created_at: string
+  next_run_at?: string
 }
 
 export interface ScheduledTaskPreviewResponse {
@@ -56,6 +57,8 @@ export interface ScheduledTaskResponse {
   cron_expression: string
   timezone: string
   status: string
+  analysis_status: string
+  preview_status: string
   delivery_channels: string[]
   notification_targets_json?: Record<string, any>
   draft_summary_markdown?: string

@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from core.config import get_settings
 from models.scheduled_task import ScheduledTask, ScheduledTaskRun
-from services.user_service import user_service
 from services.scheduled_task_service import scheduled_task_service
+from services.user_service import user_service
 
 
 DEFAULT_RUNTIME_WHITELIST = {
@@ -45,6 +45,7 @@ class ScheduledTaskRuntimeService:
         plan = task.plan_json or {}
         feasibility = task.feasibility_json or {}
         required_tools = set((feasibility.get("required_tools") or []) + (plan.get("tool_whitelist") or []))
+        execution_steps = ScheduledTaskRuntimeService._normalize_execution_steps(plan)
         disallowed = [tool for tool in required_tools if tool and tool not in DEFAULT_RUNTIME_WHITELIST]
         user = user_service.get_user_by_id(db, task.user_id)
 
@@ -62,7 +63,11 @@ class ScheduledTaskRuntimeService:
 
         notification_targets = task.notification_targets_json or {}
         if "email" in (task.delivery_channels or []):
-            email_target = (notification_targets.get("email") or {}).get("target") or getattr(user, "notification_email", None) or getattr(user, "email", None)
+            email_target = (
+                (notification_targets.get("email") or {}).get("target")
+                or getattr(user, "notification_email", None)
+                or getattr(user, "email", None)
+            )
             if not email_target or not getattr(user, "email_notifications_enabled", False):
                 blockers.append("邮件通知未配置完成")
                 suggested_fixes.append("在用户设置页启用邮件通知并配置默认邮箱")
@@ -76,9 +81,9 @@ class ScheduledTaskRuntimeService:
                 blockers.append("微信配置缺少 base_url 或 conversation_id")
                 suggested_fixes.append("补全 ClawBot 连接地址与会话 ID")
 
-        if not (plan.get("execution_steps") or []):
+        if not execution_steps:
             blockers.append("执行步骤为空")
-            suggested_fixes.append("重新生成草案以补齐执行步骤")
+            suggested_fixes.append("重新生成草案以补全执行步骤")
 
         is_feasible = bool(feasibility.get("is_feasible", True)) and not blockers
         return {
@@ -95,11 +100,13 @@ class ScheduledTaskRuntimeService:
     @staticmethod
     def preview_task(db: Session, task: ScheduledTask) -> ScheduledTaskRun:
         preflight = ScheduledTaskRuntimeService.run_preflight_checks(db, task)
+        plan = task.plan_json or {}
+        execution_steps = ScheduledTaskRuntimeService._normalize_execution_steps(plan)
         run = scheduled_task_service.create_run(
             db,
             task,
             status_value="running",
-            execution_plan_snapshot=task.plan_json or {},
+            execution_plan_snapshot=plan,
             run_type="preview",
             trigger_source="preview",
             preflight_result_json=preflight,
@@ -113,7 +120,7 @@ class ScheduledTaskRuntimeService:
                 db,
                 run,
                 status_value="failed",
-                error_message="预检查未通过",
+                error_message="预检未通过",
                 result_summary="; ".join(preflight.get("reasons") or ["存在不可执行风险"]),
                 steps_json=[{"type": "preflight", "result": preflight}],
                 preflight_result_json=preflight,
@@ -127,7 +134,7 @@ class ScheduledTaskRuntimeService:
             run,
             status_value="success",
             result_summary="预览执行通过，任务可创建",
-            steps_json=[{"type": "preflight", "result": preflight}],
+            steps_json=[{"type": "preflight", "result": preflight}, *execution_steps],
             preflight_result_json=preflight,
             cost_metrics_json={"estimated_success_rate": (task.feasibility_json or {}).get("estimated_success_rate")},
         )
@@ -135,7 +142,7 @@ class ScheduledTaskRuntimeService:
     @staticmethod
     def simulate_task_run(db: Session, task: ScheduledTask) -> ScheduledTaskRun:
         plan = task.plan_json or {}
-        steps = plan.get("execution_steps") or []
+        steps = ScheduledTaskRuntimeService._normalize_execution_steps(plan)
         preflight = ScheduledTaskRuntimeService.run_preflight_checks(db, task)
         run = scheduled_task_service.create_run(
             db,
@@ -156,6 +163,57 @@ class ScheduledTaskRuntimeService:
             preflight_result_json=preflight,
             cost_metrics_json={"simulated": True, "steps_count": len(steps)},
         )
+
+    @staticmethod
+    def _normalize_execution_steps(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        execution_steps = plan.get("execution_steps") or []
+        if not execution_steps:
+            execution_steps = ((plan.get("strategy") or {}).get("reference_steps") or [])
+
+        for index, step in enumerate(execution_steps, start=1):
+            if not isinstance(step, dict):
+                continue
+
+            tool_name = step.get("tool_name")
+            if not tool_name:
+                continue
+
+            params = step.get("params") or step.get("key_parameters") or {}
+            if not isinstance(params, dict):
+                params = {}
+
+            normalized.append(
+                {
+                    "step_index": int(step.get("step_index") or index),
+                    "title": step.get("title") or ScheduledTaskRuntimeService._build_step_title(tool_name, params),
+                    "tool_name": tool_name,
+                    "params": params,
+                    "action": step.get("action") or ScheduledTaskRuntimeService._build_step_action(tool_name, params),
+                    "success_condition": step.get("success_condition"),
+                    "failure_handler": step.get("failure_handler"),
+                }
+            )
+
+        return normalized
+
+    @staticmethod
+    def _build_step_title(tool_name: str, params: Dict[str, Any]) -> str:
+        if tool_name == "browser__launch_browser":
+            url = params.get("url")
+            if url:
+                return f"打开 {url}"
+        if tool_name == "network__http_get":
+            url = params.get("url")
+            if url:
+                return f"请求 {url}"
+        return f"执行 {tool_name}"
+
+    @staticmethod
+    def _build_step_action(tool_name: str, params: Dict[str, Any]) -> str:
+        if params:
+            return f"调用工具 {tool_name}，参数：{params}"
+        return f"调用工具 {tool_name}"
 
     @staticmethod
     def update_task_after_run(db: Session, task: ScheduledTask, run: ScheduledTaskRun) -> ScheduledTask:

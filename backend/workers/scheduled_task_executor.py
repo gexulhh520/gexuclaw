@@ -75,18 +75,45 @@ def execute_scheduled_task(self, task_id: int):
                 steps_json=[{"type": "preflight", "result": preflight}],
             )
         else:
-            tool_messages = asyncio.run(_execute_plan_steps(task))
-            success = all("执行成功" in (item.get("content") or "") for item in tool_messages) if tool_messages else False
-            run = scheduled_task_service.update_run_status(
-                db,
-                run,
-                status_value="success" if success else "failed",
-                result_summary="任务执行完成" if success else "任务执行存在失败步骤",
-                error_message=None if success else "部分步骤执行失败",
-                preflight_result_json=preflight,
-                steps_json=tool_messages,
-                cost_metrics_json={"steps_count": len(tool_messages)},
-            )
+            if task.planner_version == "v2":
+                from services.task_execution_service_v2 import task_execution_service_v2
+                v2_result = asyncio.run(task_execution_service_v2.execute_task(db, task))
+                success = v2_result.get("success", False)
+                tool_messages = v2_result.get("tool_messages", [])
+                task.raw_trace_json = {
+                    **(task.raw_trace_json or {}),
+                    "execution_runtime": {
+                        "provider": v2_result.get("provider"),
+                        "model": v2_result.get("model"),
+                    },
+                }
+                run = scheduled_task_service.update_run_status(
+                    db,
+                    run,
+                    status_value="success" if success else "failed",
+                    result_summary=v2_result.get("final_response", "任务执行完成" if success else "任务执行失败"),
+                    error_message=None if success else "执行未达预期",
+                    preflight_result_json=preflight,
+                    steps_json=tool_messages,
+                    cost_metrics_json={
+                        "steps_count": v2_result.get("steps_count", 0),
+                        "provider": v2_result.get("provider"),
+                        "model": v2_result.get("model"),
+                    },
+                )
+            else:
+                tool_messages = asyncio.run(_execute_plan_steps(task))
+                success = all("执行成功" in (item.get("content") or "") for item in tool_messages) if tool_messages else False
+                run = scheduled_task_service.update_run_status(
+                    db,
+                    run,
+                    status_value="success" if success else "failed",
+                    result_summary="任务执行完成" if success else "任务执行存在失败步骤",
+                    error_message=None if success else "部分步骤执行失败",
+                    preflight_result_json=preflight,
+                    steps_json=tool_messages,
+                    cost_metrics_json={"steps_count": len(tool_messages)},
+                )
         scheduled_task_runtime_service.update_task_after_run(db, task, run)
 
         user = user_service.get_user_by_id(db, task.user_id)

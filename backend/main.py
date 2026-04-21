@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from core.config import get_settings
-from api import v1, auth, chat_sessions, upload, knowledge_bases, scheduled_tasks, user_settings
+from api import v1, auth, chat_sessions, chat_v2, upload, knowledge_bases, scheduled_tasks, scheduled_tasks_v2, user_settings
 from websocket import manager
 from models.database import engine, Base
 from pathlib import Path
@@ -35,8 +35,10 @@ app.add_middleware(
 app.include_router(v1.router, prefix="/api/v1", tags=["v1"])
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(chat_sessions.router, prefix="/api/sessions", tags=["会话管理"])
+app.include_router(chat_v2.router, prefix="/api/v2/chat", tags=["聊天V2"])
 app.include_router(knowledge_bases.router, prefix="/api/knowledge-bases", tags=["知识库"])
 app.include_router(scheduled_tasks.router, prefix="/api/scheduled-tasks", tags=["定时任务"])
+app.include_router(scheduled_tasks_v2.router, prefix="/api/v2/scheduled-tasks", tags=["定时任务V2"])
 app.include_router(user_settings.router, prefix="/api/user-settings", tags=["用户设置"])
 app.include_router(upload.router, prefix="/api/upload", tags=["文件上传"])
 app.include_router(manager.router, prefix="/ws", tags=["websocket"])

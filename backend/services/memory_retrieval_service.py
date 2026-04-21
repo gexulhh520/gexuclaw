@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
@@ -15,12 +16,38 @@ class MemoryRetrievalService:
         ).order_by(TurnMemory.created_at.desc(), TurnMemory.id.desc()).limit(limit).all()
 
     def search_turn_memories(self, db: Session, user_id: int, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        if top_k <= 0:
+            return []
+        if not (query or "").strip():
+            return []
+
         table = turn_memory_service._get_or_create_table()
         if table.count_rows() == 0:
             return []
 
-        query_vector = turn_memory_service._build_query_vector(query)
-        results = table.search(query_vector).limit(max(top_k * 5, 20)).to_pandas()
+        try:
+            query_vector = turn_memory_service._build_query_vector(query)
+        except Exception as exc:
+            print(
+                "[MemoryRetrieval Warn] _build_query_vector failed | "
+                f"user_id={user_id} top_k={top_k} query_preview={(query or '')[:120]!r} error={exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            return []
+
+        if not query_vector:
+            return []
+
+        try:
+            results = table.search(query_vector).limit(max(top_k * 5, 20)).to_pandas()
+        except Exception as exc:
+            print(
+                "[MemoryRetrieval Warn] LanceDB search failed | "
+                f"user_id={user_id} top_k={top_k} query_preview={(query or '')[:120]!r} error={exc}\n"
+                f"{traceback.format_exc()}"
+            )
+            return []
+
         if len(results) == 0:
             return []
 
@@ -67,8 +94,28 @@ class MemoryRetrievalService:
         recent_limit: int = 4,
         top_k: int = 5,
     ) -> Dict[str, Any]:
-        recent = self.get_recent_turn_memories(db, session_db_id, recent_limit)
-        retrieved = self.search_turn_memories(db, user_id, query, top_k)
+        recent: List[TurnMemory] = []
+        retrieved: List[Dict[str, Any]] = []
+
+        try:
+            recent = self.get_recent_turn_memories(db, session_db_id, recent_limit)
+        except Exception as exc:
+            print(
+                "[MemoryRetrieval Warn] get_recent_turn_memories failed | "
+                f"session_db_id={session_db_id} user_id={user_id} recent_limit={recent_limit} error={exc}\n"
+                f"{traceback.format_exc()}"
+            )
+
+        try:
+            retrieved = self.search_turn_memories(db, user_id, query, top_k)
+        except Exception as exc:
+            query_preview = (query or "")[:120]
+            print(
+                "[MemoryRetrieval Warn] search_turn_memories failed | "
+                f"session_db_id={session_db_id} user_id={user_id} top_k={top_k} query_preview={query_preview!r} "
+                f"error={exc}\n{traceback.format_exc()}"
+            )
+
         return {
             "recent_context": [
                 {

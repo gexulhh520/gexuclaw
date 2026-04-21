@@ -7,10 +7,17 @@
           <div class="summary-markdown" v-html="formattedSummary"></div>
         </el-card>
         <el-card shadow="never" class="task-card-spacer">
-          <template #header>执行步骤</template>
-          <el-timeline>
+          <template #header>执行内容</template>
+          <div v-if="draft.content?.strategy" class="task-strategy">
+            <div class="strategy-item"><strong>目标：</strong>{{ draft.content.strategy.goal }}</div>
+            <div class="strategy-item"><strong>策略：</strong>{{ draft.content.strategy.execution_strategy }}</div>
+            <div class="strategy-item"><strong>推荐工具：</strong>
+              <el-tag size="small" v-for="t in draft.content.strategy.tool_hints" :key="t">{{ t }}</el-tag>
+            </div>
+          </div>
+          <el-timeline v-if="draft.content?.execution_steps?.length" class="task-step-timeline">
             <el-timeline-item
-              v-for="step in draft.content.execution_steps || []"
+              v-for="step in draft.content.execution_steps"
               :key="step.step_index"
               :timestamp="step.tool_name || 'planner'"
             >
@@ -18,6 +25,7 @@
               <div class="task-step-desc">{{ step.action }}</div>
             </el-timeline-item>
           </el-timeline>
+          <div v-if="!draft.content?.strategy && !draft.content?.execution_steps?.length">暂无可展示的执行内容</div>
         </el-card>
       </div>
 
@@ -39,6 +47,9 @@
           </el-form-item>
           <el-form-item label="Cron">
             <el-input :model-value="form.cron_expression" disabled />
+          </el-form-item>
+          <el-form-item label="下次执行">
+            <el-input :model-value="formatDateTime(draft?.next_run_at)" disabled />
           </el-form-item>
           <el-form-item label="时区">
             <el-input :model-value="form.timezone" @update:model-value="updateField('timezone', $event)" />
@@ -111,6 +122,17 @@ const formattedSummary = computed(() => {
     .replace(/`([^`]+)`/g, '<code>$1</code>')
 })
 
+function formatDateTime(value?: string | null) {
+  if (!value) {
+    return '待计算'
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return date.toLocaleString()
+}
+
 function updateField(key: string, value: any) {
   emit('update:form', {
     ...props.form,
@@ -130,8 +152,22 @@ function updateField(key: string, value: any) {
   margin-top: 16px;
 }
 
-.task-step-desc,
-.preview-section {
+.task-strategy .strategy-item {
+  margin-bottom: 8px;
+  line-height: 1.5;
+  color: #606266;
+}
+
+.task-strategy .el-tag {
+  margin-right: 6px;
+}
+
+.task-step-timeline {
+  margin-top: 12px;
+}
+
+.task-step-desc {
+  margin-top: 4px;
   color: #606266;
   line-height: 1.7;
 }

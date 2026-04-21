@@ -99,6 +99,7 @@ class ScheduledTaskDraftResponse(BaseModel):
     summary_markdown: str = ""
     content: ScheduledTaskDraftContent
     created_at: datetime
+    next_run_at: Optional[datetime] = None
 
 
 class ScheduledTaskPreviewResponse(BaseModel):

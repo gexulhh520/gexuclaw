@@ -80,6 +80,9 @@ class Settings(BaseSettings):
                                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                      "application/zip", "application/x-zip-compressed"]
 
+    # Scheduled task V2 toggles (for debugging / rollout)
+    SCHEDULED_TASK_V2_PLANNER_DISPATCH_ENABLED: bool = True
+
     class Config:
         # Always load the backend .env regardless of CWD (Celery often runs from repo root).
         env_file = str(Path(__file__).resolve().parents[1] / ".env")

@@ -1,6 +1,7 @@
 import json
 import re
 import hashlib
+import traceback
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -59,7 +60,11 @@ class ScheduledTaskPlannerService:
 
         user = user_service.get_user_by_id(db, user_id)
         timezone = timezone or getattr(user, "timezone", None) or "Asia/Shanghai"
-        schedule_text = schedule_text or self._extract_schedule_text(intent_text)
+        schedule_text = schedule_text or await self._resolve_schedule_text(
+            intent_text,
+            provider=provider,
+            model=model,
+        )
         trace_context, latest_message_id = await self._build_trace_context(
             db,
             user_id=user_id,
@@ -142,22 +147,40 @@ class ScheduledTaskPlannerService:
         intent_text: str,
     ) -> Tuple[Dict[str, Any], Optional[int]]:
         session = db.query(ChatSession).filter(ChatSession.id == session_db_id).first()
+        if not session:
+            raise ValueError(f"session_db_id={session_db_id} 对应会话不存在")
+
         messages = chat_session_service.get_session_messages_with_contents(db, session_db_id)
         latest_assistant_message_id: Optional[int] = None
         execution_items: List[Dict[str, Any]] = []
-        memory_bundle = memory_retrieval_service.build_context_bundle(
-            db=db,
-            user_id=user_id,
-            session_db_id=session_db_id,
-            query=intent_text,
-            recent_limit=4,
-            top_k=5,
-        )
+        memory_bundle = {"recent_context": [], "retrieved_context": []}
+        try:
+            memory_bundle = memory_retrieval_service.build_context_bundle(
+                db=db,
+                user_id=user_id,
+                session_db_id=session_db_id,
+                query=intent_text,
+                recent_limit=4,
+                top_k=5,
+            )
+        except Exception as exc:
+            print(
+                "[Planner Warn] build_context_bundle failed, fallback to empty memory bundle | "
+                f"session_db_id={session_db_id} user_id={user_id} error={exc}\n"
+                f"{traceback.format_exc()}"
+            )
 
         for message in messages:
             if message.get("role") == "assistant":
                 latest_assistant_message_id = message["id"]
-                steps = await get_execution_steps_by_message(db, message["id"])
+                try:
+                    steps = await get_execution_steps_by_message(db, message["id"])
+                except Exception as exc:
+                    print(
+                        "[Planner Warn] get_execution_steps_by_message failed, skip message steps | "
+                        f"message_id={message['id']} error={exc}"
+                    )
+                    steps = []
                 if steps:
                     execution_items.extend(
                         [
@@ -339,6 +362,52 @@ class ScheduledTaskPlannerService:
     def _extract_schedule_text(self, intent_text: str) -> str:
         match = re.search(r"(每天.*|每周.*|每月.*|工作日.*|今天.*|明天.*)", intent_text)
         return match.group(1) if match else "每天 09:00"
+
+    async def _resolve_schedule_text(
+        self,
+        intent_text: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        schedule_text = self._extract_schedule_text(intent_text)
+        if schedule_text and schedule_text != "每天 09:00":
+            return schedule_text
+
+        inferred = await self._infer_schedule_text_with_llm(
+            intent_text=intent_text,
+            provider=provider,
+            model=model,
+        )
+        return inferred or schedule_text
+
+    async def _infer_schedule_text_with_llm(
+        self,
+        intent_text: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Optional[str]:
+        prompt = (
+            "请从用户意图中提取一个自然语言调度描述，只返回一行文本，不要解释，不要 JSON。\n"
+            "如果能识别出明确时间，就返回类似“每天 09:00”“每周一 10:30”“每月1号 08:00”；"
+            "如果识别不出，返回最合理的建议，但不要固定写 09:00。\n"
+            f"用户意图：{intent_text}\n"
+        )
+        try:
+            response = await llm_client_instance.chat(
+                messages=[{"role": "user", "content": prompt}],
+                provider=provider or "openai",
+                model=model,
+                temperature=0.0,
+                system_prompt="你是调度文本提取器，只输出一行自然语言调度描述。",
+            )
+            text = (response.get("content") or "").strip()
+            if not text:
+                return None
+            text = text.splitlines()[0].strip()
+            text = re.sub(r"^```(?:json)?", "", text).strip("` ").strip()
+            return text[:120] or None
+        except Exception:
+            return None
 
     def _compute_schedule(
         self,

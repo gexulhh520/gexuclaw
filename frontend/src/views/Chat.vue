@@ -848,11 +848,15 @@ async function previewScheduledTaskDraft() {
   }
   scheduledTaskPreviewLoading.value = true
   try {
-    scheduledTaskPreview.value = await scheduledTaskApi.previewDraft(scheduledTaskDraft.value.id)
-    if (scheduledTaskPreview.value.success) {
-      ElMessage.success('预检查通过')
+    const response = await httpClient.post(`/v2/scheduled-tasks/drafts/${scheduledTaskDraft.value.id}/preview`, {}, { baseURL: '/api' })
+    if (response.data.success) {
+      ElMessage.success('预检查已触发')
+      scheduledTaskPreview.value = {
+        success: true,
+        message: '预检查任务已在后台运行，您可以稍后查看任务状态'
+      }
     } else {
-      ElMessage.warning(scheduledTaskPreview.value.message || '预检查未通过')
+      ElMessage.warning(response.data.message || '预检查未通过')
     }
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '预览执行失败')
@@ -867,25 +871,13 @@ async function confirmScheduledTaskDraft() {
   }
   scheduledTaskSubmitting.value = true
   try {
-    const created = await scheduledTaskApi.createTask({
-      draft_id: scheduledTaskDraft.value.id,
-      title: scheduledTaskForm.value.title,
-      description: scheduledTaskForm.value.description,
-      schedule_text: scheduledTaskForm.value.schedule_text,
-      cron_expression: scheduledTaskForm.value.cron_expression,
-      timezone: scheduledTaskForm.value.timezone,
-      delivery_channels: scheduledTaskForm.value.delivery_channels,
-      notification_targets_json: buildNotificationTargets(),
-      source_session_id: chatStore.sessionId,
-      source_message_id: scheduledTaskSourceMessageId.value,
-      intent_text: scheduledTaskIntentText.value || scheduledTaskDraft.value.title,
-    })
+    const created = await httpClient.post(`/v2/scheduled-tasks/drafts/${scheduledTaskDraft.value.id}/confirm`, {}, { baseURL: '/api' })
     scheduledTaskDialogVisible.value = false
     scheduledTaskDraft.value = null
     scheduledTaskPreview.value = null
     scheduledTaskIntentText.value = ''
     scheduledTaskSourceMessageId.value = undefined
-    ElMessage.success(`任务已创建：${created.title}`)
+    ElMessage.success(created.data.message || '任务已成功创建')
     router.push('/tasks')
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '创建任务失败')

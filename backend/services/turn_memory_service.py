@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from typing import Any, Dict, List, Optional
 
 import lancedb
@@ -129,7 +130,12 @@ class TurnMemoryService:
             model=settings.EMBEDDING_MODEL,
             prompt=query,
         )
-        return response["embedding"]
+        embedding = response.get("embedding") if isinstance(response, dict) else None
+        if not isinstance(embedding, list) or not embedding:
+            raise ValueError(
+                f"embedding response invalid: type={type(response).__name__}, keys={list(response.keys()) if isinstance(response, dict) else 'n/a'}"
+            )
+        return embedding
 
     def _build_embedding_text(self, memory: TurnMemory) -> str:
         tags = ", ".join(memory.tags_json or [])

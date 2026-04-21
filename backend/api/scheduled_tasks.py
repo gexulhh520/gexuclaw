@@ -78,6 +78,7 @@ def _build_draft_response(task) -> ScheduledTaskDraftResponse:
         summary_markdown=task.draft_summary_markdown or plan.get("summary_markdown") or "",
         content=content,
         created_at=task.created_at,
+        next_run_at=task.next_run_at,
     )
 
 

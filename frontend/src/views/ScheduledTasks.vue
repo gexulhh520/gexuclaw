@@ -31,6 +31,7 @@
           </div>
         </template>
         <div class="task-meta">频率：{{ task.schedule_text }}</div>
+        <div class="task-meta">下次执行：{{ formatDateTime(task.next_run_at) }}</div>
         <div class="task-meta">时区：{{ task.timezone }}</div>
         <div class="task-meta">通知：{{ (task.delivery_channels || []).join('、') || '站内' }}</div>
         <div class="task-meta">失败次数：{{ task.failure_count }}</div>
@@ -50,7 +51,10 @@
           <el-descriptions-item label="描述">{{ currentTask.description || '暂无' }}</el-descriptions-item>
           <el-descriptions-item label="频率">{{ currentTask.schedule_text }}</el-descriptions-item>
           <el-descriptions-item label="Cron">{{ currentTask.cron_expression }}</el-descriptions-item>
+          <el-descriptions-item label="下次执行">{{ formatDateTime(currentTask.next_run_at) }}</el-descriptions-item>
           <el-descriptions-item label="时区">{{ currentTask.timezone }}</el-descriptions-item>
+          <el-descriptions-item label="分析状态">{{ currentTask.analysis_status }}</el-descriptions-item>
+          <el-descriptions-item label="预览状态">{{ currentTask.preview_status }}</el-descriptions-item>
           <el-descriptions-item label="通知">{{ (currentTask.delivery_channels || []).join('、') }}</el-descriptions-item>
         </el-descriptions>
 
@@ -88,6 +92,17 @@ const detailVisible = ref(false)
 const currentTask = ref<ScheduledTaskResponse | null>(null)
 const taskRuns = ref<any[]>([])
 const taskNotifications = ref<any[]>([])
+
+function formatDateTime(value?: string | null) {
+  if (!value) {
+    return '待计算'
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return date.toLocaleString()
+}
 
 async function loadTasks() {
   loading.value = true
