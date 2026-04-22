@@ -230,6 +230,12 @@ def main():
         assert_true(assistant_message is not None, "assistant message 未落库")
         assert_true(len(execution_steps) == 4, "execution steps 数量不正确")
         assert_true(execution_steps[0].sort_order == 0, "execution step sort_order 未按顺序保存")
+        assert_true(not (execution_steps[0].extra_data or {}), "普通步骤不应写入空 metadata")
+
+        queued_step_data = execution_steps[1].extra_data or {}
+        assert_true(queued_step_data.get("request_id") == "req_v2_worker_test", "request_id 未写入 step metadata")
+        assert_true(queued_step_data.get("job_id") == "job_v2_worker_test", "job_id 未写入 step metadata")
+        assert_true("metadata" not in queued_step_data, "无额外信息时不应写入嵌套 metadata")
 
         extra_data = execution_steps[2].extra_data or {}
         assert_true(extra_data.get("draft_id") == 321, "draft_id 未写入 step metadata")
@@ -238,6 +244,8 @@ def main():
         assert_true(extra_data.get("intent_text"), "intent_text 未写入 step metadata")
         assert_true(extra_data.get("request_id") == "req_v2_worker_test", "request_id 未写入 step metadata")
         assert_true(extra_data.get("job_id") == "job_v2_worker_test", "job_id 未写入 step metadata")
+        assert_true("timestamp" not in extra_data, "timestamp 不应进入持久化 metadata")
+        assert_true(not (execution_steps[3].extra_data or {}), "结束步骤不应写入空 metadata")
 
         assert_true(turn_memory_calls == [turn.id], "build_turn_memory_task 未触发")
         done_event = next((event for event in captured_events if event.get("type") == "done"), None)

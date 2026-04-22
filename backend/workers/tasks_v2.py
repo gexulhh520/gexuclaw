@@ -32,6 +32,29 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
+def _build_step_metadata(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    metadata: Dict[str, Any] = {}
+
+    nested_metadata = event.get("metadata")
+    if nested_metadata:
+        metadata["metadata"] = nested_metadata
+
+    for key in (
+        "tool_call_id",
+        "draft_id",
+        "draft_title",
+        "analysis_status",
+        "intent_text",
+        "request_id",
+        "job_id",
+    ):
+        value = event.get(key)
+        if value is not None:
+            metadata[key] = value
+
+    return metadata or None
+
+
 @celery_app.task(bind=True)
 def execute_agent_task_v2(
     self,
@@ -88,23 +111,14 @@ async def _execute_v2(
             if event.get("type") == "context_trimmed":
                 continue
             await _send_to_session(session_id, event)
+            step_metadata = _build_step_metadata(event)
             collected_steps.append(
                 {
                     "step_type": event.get("type"),
                     "content": event.get("content"),
                     "tool_name": event.get("tool_name"),
                     "tool_status": event.get("tool_status"),
-                    "metadata": {
-                        "tool_call_id": event.get("tool_call_id"),
-                        "metadata": event.get("metadata"),
-                        "timestamp": event.get("timestamp"),
-                        "draft_id": event.get("draft_id"),
-                        "draft_title": event.get("draft_title"),
-                        "analysis_status": event.get("analysis_status"),
-                        "intent_text": event.get("intent_text"),
-                        "request_id": event.get("request_id"),
-                        "job_id": event.get("job_id"),
-                    },
+                    **({"metadata": step_metadata} if step_metadata else {}),
                 }
             )
             if event.get("type") == "thinking_end" and event.get("content"):
