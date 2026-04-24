@@ -353,6 +353,15 @@
           </div>
         </div>
 
+        <div>
+          <div class="dialog-label">协作描述</div>
+          <textarea
+            v-model="pendingSessionDescription"
+            class="dialog-textarea"
+            placeholder="例如：研究 Agent 先查资料，写作 Agent 再成稿，主 Agent 最后汇总。"
+          />
+        </div>
+
         <div v-if="pendingSessionLocation === 'project'">
           <div class="dialog-label">选择项目空间</div>
           <el-select
@@ -431,6 +440,7 @@ interface ChatMessage {
 interface SessionItem {
   id: string;
   title: string;
+  description?: string;
   updatedAt: string;
   agentIds: string[];
   messages: ChatMessage[];
@@ -711,6 +721,7 @@ const workspaceFullscreen = ref(false);
 const newSessionDialogVisible = ref(false);
 const newProjectDialogVisible = ref(false);
 const pendingAgentIds = ref<string[]>(["writing_agent"]);
+const pendingSessionDescription = ref("");
 const pendingSessionTitle = ref("新的创作会话");
 const pendingSessionLocation = ref<"project" | "personal">("project");
 const pendingProjectTargetId = ref<string>(projectSpaces.value[0]?.id || "");
@@ -784,6 +795,7 @@ function openNewSessionDialog() {
   pendingSessionLocation.value = selectedProjectId.value ? "project" : "personal";
   pendingProjectTargetId.value = selectedProjectId.value || projectSpaces.value[0]?.id || "";
   pendingAgentIds.value = primaryAgent.value ? [primaryAgent.value.id] : ["writing_agent"];
+  pendingSessionDescription.value = "";
 }
 
 function togglePendingAgent(agentId: string) {
@@ -827,6 +839,7 @@ function createSession() {
   const session: SessionItem = {
     id: `session-${Date.now()}`,
     title: pendingSessionTitle.value.trim(),
+    description: pendingSessionDescription.value.trim(),
     updatedAt: "刚刚",
     agentIds: [...pendingAgentIds.value],
     messages: [
@@ -1173,10 +1186,23 @@ onMounted(async () => {
 }
 
 .project-card.active,
-.session-item.active,
-.target-card.active {
+.session-item.active {
   border-color: rgba(91, 109, 255, 0.5);
   background: linear-gradient(180deg, rgba(39, 54, 83, 0.96), rgba(27, 39, 60, 0.96));
+}
+
+.target-card.active {
+  border-color: rgba(91, 109, 255, 0.32);
+  background: linear-gradient(180deg, rgba(232, 239, 255, 0.98), rgba(243, 246, 255, 0.98));
+  box-shadow: 0 10px 22px rgba(91, 109, 255, 0.12);
+}
+
+.target-card.active .target-title {
+  color: #22314d;
+}
+
+.target-card.active .target-desc {
+  color: #5c6f8f;
 }
 
 .project-card-top,
@@ -1889,45 +1915,81 @@ onMounted(async () => {
   box-sizing: border-box;
 }
 
+.dialog-textarea {
+  width: 100%;
+  min-height: 96px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 12px;
+  color: #0f172a;
+  background: #fff;
+  font: inherit;
+  line-height: 1.6;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
 .dialog-footer {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
 }
 
-:deep(.project-select .el-select__wrapper),
-:deep(.dialog-select .el-select__wrapper) {
+:deep(.project-select .el-select__wrapper) {
   min-height: 46px;
   border-radius: 16px;
   background: linear-gradient(180deg, rgba(29, 41, 64, 0.96), rgba(24, 35, 56, 0.96));
   box-shadow: inset 0 0 0 1px rgba(106, 124, 156, 0.16), 0 12px 28px rgba(0, 0, 0, 0.18);
 }
 
-:deep(.project-select .el-select__wrapper.is-focused),
-:deep(.dialog-select .el-select__wrapper.is-focused) {
+:deep(.dialog-select .el-select__wrapper) {
+  min-height: 46px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 255, 0.98));
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.22), 0 10px 22px rgba(15, 23, 42, 0.08);
+}
+
+:deep(.project-select .el-select__wrapper.is-focused) {
   box-shadow:
     inset 0 0 0 1px rgba(91, 109, 255, 0.52),
     0 0 0 4px rgba(91, 109, 255, 0.12),
     0 18px 34px rgba(0, 0, 0, 0.24);
 }
 
+:deep(.dialog-select .el-select__wrapper.is-focused) {
+  box-shadow:
+    inset 0 0 0 1px rgba(91, 109, 255, 0.52),
+    0 0 0 4px rgba(91, 109, 255, 0.12),
+    0 14px 28px rgba(15, 23, 42, 0.12);
+}
+
 :deep(.project-select .el-select__placeholder),
-:deep(.dialog-select .el-select__placeholder),
 :deep(.project-select .el-select__selected-item),
-:deep(.dialog-select .el-select__selected-item),
-:deep(.project-select .el-input__inner),
-:deep(.dialog-select .el-input__inner) {
+:deep(.project-select .el-input__inner) {
   color: #edf3ff;
 }
 
-:deep(.project-select .el-select__caret),
-:deep(.dialog-select .el-select__caret) {
+:deep(.dialog-select .el-select__placeholder),
+:deep(.dialog-select .el-select__selected-item),
+:deep(.dialog-select .el-input__inner) {
+  color: #1f2a44;
+}
+
+:deep(.project-select .el-select__caret) {
   color: #8ea0bd;
 }
 
-:deep(.project-select .el-select__wrapper:hover),
-:deep(.dialog-select .el-select__wrapper:hover) {
+:deep(.dialog-select .el-select__caret) {
+  color: #6b7a90;
+}
+
+:deep(.project-select .el-select__wrapper:hover) {
   box-shadow: inset 0 0 0 1px rgba(124, 143, 176, 0.22), 0 14px 28px rgba(0, 0, 0, 0.22);
+}
+
+:deep(.dialog-select .el-select__wrapper:hover) {
+  box-shadow: inset 0 0 0 1px rgba(124, 143, 176, 0.28), 0 12px 24px rgba(15, 23, 42, 0.1);
 }
 
 :deep(.agent-dark-select-popper.el-popper) {
