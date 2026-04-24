@@ -477,7 +477,7 @@ import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { useRoute } from "vue-router";
 
-import { agentPlatformApi, type AgentRecord } from "@/api/agentPlatform";
+import { agentPlatformApi, type AgentRecord, type ProjectRecord, type AgentRunRecord } from "@/api/agentPlatform";
 
 type AgentStatus = "online" | "busy" | "idle";
 type WorkspaceType = "writing" | "browser" | "research" | "video";
@@ -562,119 +562,10 @@ const fallbackAgents: SidebarAgent[] = [
   },
 ];
 
-const projectSpaces = ref<ProjectSpace[]>([
-  {
-    id: "project-edu",
-    name: "教育内容创作项目",
-    icon: "📘",
-    sessions: [
-      {
-        id: "session-outline",
-        title: "课程大纲撰写",
-        updatedAt: "10:42",
-        agentIds: ["writing_agent", "research_agent"],
-        messages: [
-          {
-            id: "m1",
-            role: "user",
-            content: "帮我先搭一个课程大纲，主题是团队协作与高效沟通。",
-            time: "10:30",
-          },
-          {
-            id: "m2",
-            role: "assistant",
-            content: "可以，我们先从受众、场景和章节结构入手，再逐步展开。",
-            time: "10:31",
-          },
-          {
-            id: "m3",
-            role: "user",
-            content: "把 3.2 部分展开，增加案例和行动建议。",
-            time: "10:32",
-          },
-        ],
-      },
-      {
-        id: "session-content",
-        title: "课程内容创作",
-        updatedAt: "昨天",
-        agentIds: ["writing_agent"],
-        messages: [
-          {
-            id: "m4",
-            role: "assistant",
-            content: "我已经整理好了章节结构，可以继续写正文。",
-            time: "昨天",
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: "project-brand",
-    name: "产品官网升级项目",
-    icon: "🚀",
-    sessions: [
-      {
-        id: "session-copy",
-        title: "产品文案撰写",
-        updatedAt: "09:15",
-        agentIds: ["writing_agent", "browser_agent"],
-        messages: [
-          {
-            id: "m5",
-            role: "user",
-            content: "主页需要更专业一点，强调多智能体协作价值。",
-            time: "09:10",
-          },
-          {
-            id: "m6",
-            role: "assistant",
-            content: "收到，我会从品牌表达、结构层次和行动引导三方面一起调整。",
-            time: "09:15",
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: "project-knowledge",
-    name: "个人知识库构建",
-    icon: "🧠",
-    sessions: [],
-  },
-]);
-
-const personalSessions = ref<SessionItem[]>([
-  {
-    id: "personal-seo",
-    title: "SEO 优化方案",
-    updatedAt: "5天前",
-    agentIds: ["writing_agent", "research_agent"],
-    messages: [
-      {
-        id: "m7",
-        role: "user",
-        content: "给我一个更偏内容策略的 SEO 优化方案。",
-        time: "5天前",
-      },
-    ],
-  },
-  {
-    id: "personal-notes",
-    title: "读书笔记整理",
-    updatedAt: "昨天",
-    agentIds: ["research_agent"],
-    messages: [
-      {
-        id: "m8",
-        role: "assistant",
-        content: "我已经先按主题和概念做了第一轮拆分。",
-        time: "昨天",
-      },
-    ],
-  },
-]);
+const projectSpaces = ref<ProjectSpace[]>([]);
+const personalSessions = ref<SessionItem[]>([]);
+const isLoadingProjects = ref(false);
+const isLoadingSessions = ref(false);
 
 const executionSummary =
   "正在协调文档写作智能体与研究智能体，准备补足结构、案例与表达细节。";
@@ -889,7 +780,7 @@ function sendMessage() {
   draftMessage.value = "";
 }
 
-function createSession() {
+async function createSession() {
   if (!pendingSessionTitle.value.trim()) {
     ElMessage.warning("请先填写会话标题");
     return;
@@ -900,62 +791,89 @@ function createSession() {
     return;
   }
 
-  const session: SessionItem = {
-    id: `session-${Date.now()}`,
-    title: pendingSessionTitle.value.trim(),
-    description: pendingSessionDescription.value.trim(),
-    updatedAt: "刚刚",
-    agentIds: [...pendingAgentIds.value],
-    messages: [
-      {
-        id: `message-${Date.now()}-welcome`,
-        role: "assistant",
-        content: "会话已创建，我们可以开始协作了。你可以直接描述目标，我来帮你拆解和推进。",
-        time: "刚刚",
-      },
-    ],
-  };
+  try {
+    const isProjectLocation = pendingSessionLocation.value === "project";
+    const targetProjectId = isProjectLocation ? pendingProjectTargetId.value : undefined;
 
-  if (pendingSessionLocation.value === "project") {
-    const targetProject = projectSpaces.value.find(
-      (project) => project.id === pendingProjectTargetId.value,
-    );
-    if (!targetProject) {
+    if (isProjectLocation && !targetProjectId) {
       ElMessage.warning("请选择项目空间");
       return;
     }
-    targetProject.sessions.unshift(session);
-    selectedProjectId.value = targetProject.id;
-  } else {
-    personalSessions.value.unshift(session);
-    selectedProjectId.value = "";
-  }
 
-  selectedSessionId.value = session.id;
-  selectedAgentId.value = session.agentIds[0];
-  newSessionDialogVisible.value = false;
-  pendingSessionTitle.value = "新的创作会话";
+    // 使用新的 createSession API
+    const sessionRecord = await agentPlatformApi.createSession({
+      title: pendingSessionTitle.value.trim(),
+      description: pendingSessionDescription.value.trim() || undefined,
+      projectId: targetProjectId,
+      agentIds: [...pendingAgentIds.value],
+    });
+
+    const newSession: SessionItem = {
+      id: sessionRecord.sessionUid,
+      title: sessionRecord.title,
+      description: sessionRecord.description || undefined,
+      updatedAt: "刚刚",
+      agentIds: [...pendingAgentIds.value],
+      messages: [
+        {
+          id: `msg-${sessionRecord.sessionUid}-welcome`,
+          role: "assistant",
+          content: "会话已创建，我们可以开始协作了。你可以直接描述目标，我来帮你拆解和推进。",
+          time: "刚刚",
+        },
+      ],
+    };
+
+    if (isProjectLocation && targetProjectId) {
+      const targetProject = projectSpaces.value.find(
+        (project) => project.id === targetProjectId,
+      );
+      if (targetProject) {
+        targetProject.sessions.unshift(newSession);
+      }
+      selectedProjectId.value = targetProjectId;
+    } else {
+      personalSessions.value.unshift(newSession);
+      selectedProjectId.value = "";
+    }
+
+    selectedSessionId.value = newSession.id;
+    selectedAgentId.value = newSession.agentIds[0];
+    newSessionDialogVisible.value = false;
+    pendingSessionTitle.value = "新的创作会话";
+    pendingSessionDescription.value = "";
+
+    ElMessage.success("会话创建成功");
+  } catch (error) {
+    ElMessage.error("创建会话失败");
+    console.error("Failed to create session:", error);
+  }
 }
 
-function createProject() {
+async function createProject() {
   if (!pendingProjectTitle.value.trim()) {
     ElMessage.warning("请填写项目名称");
     return;
   }
 
-  const project: ProjectSpace = {
-    id: `project-${Date.now()}`,
-    name: pendingProjectTitle.value.trim(),
-    icon: "📁",
-    sessions: [],
-  };
+  try {
+    // 使用新的 createProject API
+    const projectRecord = await agentPlatformApi.createProject({
+      name: pendingProjectTitle.value.trim(),
+    });
 
-  projectSpaces.value.unshift(project);
-  selectedProjectId.value = project.id;
-  selectedSessionId.value = "";
-  pendingProjectTargetId.value = project.id;
-  pendingProjectTitle.value = "";
-  newProjectDialogVisible.value = false;
+    const project = mapProjectRecordToProject(projectRecord);
+    projectSpaces.value.unshift(project);
+    selectedProjectId.value = project.id;
+    selectedSessionId.value = "";
+    pendingProjectTargetId.value = project.id;
+    pendingProjectTitle.value = "";
+    newProjectDialogVisible.value = false;
+    ElMessage.success("项目创建成功");
+  } catch (error) {
+    ElMessage.error("创建项目失败");
+    console.error("Failed to create project:", error);
+  }
 }
 
 async function loadAgentProfiles() {
@@ -968,6 +886,98 @@ async function loadAgentProfiles() {
   } catch {
     agentList.value = fallbackAgents;
   }
+}
+
+async function loadProjects() {
+  isLoadingProjects.value = true;
+  try {
+    const projects = await agentPlatformApi.listProjects();
+    projectSpaces.value = projects.map(mapProjectRecordToProject);
+  } catch (error) {
+    ElMessage.error("加载项目空间失败");
+    console.error("Failed to load projects:", error);
+    projectSpaces.value = [];
+  } finally {
+    isLoadingProjects.value = false;
+  }
+}
+
+function mapProjectRecordToProject(pr: ProjectRecord): ProjectSpace {
+  return {
+    id: pr.projectUid,
+    name: pr.name,
+    icon: pr.icon || "📁",
+    sessions: [],
+  };
+}
+
+function getProjectIcon(source: string): string {
+  const iconMap: Record<string, string> = {
+    project: "📁",
+    session: "💬",
+    default: "📄",
+  };
+  return iconMap[source] || iconMap.default;
+}
+
+async function loadRuns() {
+  isLoadingSessions.value = true;
+  try {
+    const runs = await agentPlatformApi.listRuns(undefined, 50);
+    personalSessions.value = runs.map(mapRunToSession);
+  } catch (error) {
+    ElMessage.error("加载运行记录失败");
+    console.error("Failed to load runs:", error);
+    personalSessions.value = [];
+  } finally {
+    isLoadingSessions.value = false;
+  }
+}
+
+function mapRunToSession(run: AgentRunRecord): SessionItem {
+  const agentIds = parseAgentIds(run.snapshotJson);
+  return {
+    id: run.runUid,
+    title: run.userMessage.slice(0, 30) + (run.userMessage.length > 30 ? "..." : ""),
+    description: run.resultSummary || undefined,
+    updatedAt: formatRunTime(run.createdAt),
+    agentIds,
+    messages: [
+      {
+        id: `msg-${run.runUid}`,
+        role: "user",
+        content: run.userMessage,
+        time: formatRunTime(run.createdAt),
+      },
+    ],
+  };
+}
+
+function parseAgentIds(snapshotJson: string): string[] {
+  try {
+    const snapshot = JSON.parse(snapshotJson);
+    if (snapshot.agent?.agentUid) {
+      return [snapshot.agent.agentUid];
+    }
+  } catch {
+    // ignore
+  }
+  return ["writing_agent"];
+}
+
+function formatRunTime(isoTime: string): string {
+  const date = new Date(isoTime);
+  const now = new Date();
+  const diff = now.getTime() - date.getTime();
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes}分钟前`;
+  if (hours < 24) return `${hours}小时前`;
+  if (days < 7) return `${days}天前`;
+  return date.toLocaleDateString("zh-CN");
 }
 
 function mapAgentRecord(agent: AgentRecord): SidebarAgent {
@@ -1021,7 +1031,11 @@ function mapAgentRecord(agent: AgentRecord): SidebarAgent {
 }
 
 onMounted(async () => {
-  await loadAgentProfiles();
+  await Promise.all([
+    loadAgentProfiles(),
+    loadProjects(),
+    loadRuns(),
+  ]);
 
   const preferredAgent = typeof route.query.agent === "string" ? route.query.agent : "";
   if (!preferredAgent) return;

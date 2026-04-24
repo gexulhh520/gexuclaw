@@ -120,6 +120,33 @@ export async function ensureDatabaseSchema(): Promise<void> {
       created_at text not null
     );
 
+    create table if not exists projects (
+      id serial primary key,
+      project_uid text not null unique,
+      user_id text,
+      name text not null,
+      description text not null default '',
+      icon text not null default '📁',
+      status text not null default 'active',
+      metadata_json text not null default '{}',
+      created_at text not null,
+      updated_at text not null
+    );
+
+    create table if not exists sessions (
+      id serial primary key,
+      session_uid text not null unique,
+      project_id integer,
+      user_id text,
+      title text not null,
+      description text not null default '',
+      agent_ids_json text not null default '[]',
+      status text not null default 'active',
+      metadata_json text not null default '{}',
+      created_at text not null,
+      updated_at text not null
+    );
+
     create table if not exists work_contexts (
       id serial primary key,
       work_context_uid text not null unique,
@@ -180,10 +207,23 @@ export async function ensureDatabaseSchema(): Promise<void> {
     comment on column model_invocations.prompt_context_summary_json is '本次 PromptContext 摘要';
     comment on column model_invocations.selected_context_refs_json is '本次被选入上下文的 refs';
 
-    comment on table work_contexts is '同一工作目标下的工作上下文主表';
+    comment on table projects is '项目空间表，作为多个会话的容器';
+    comment on column projects.project_uid is '业务稳定 id';
+    comment on column projects.name is '项目名称';
+    comment on column projects.icon is '项目图标';
+
+    comment on table sessions is '会话表，代表与 Agent 的一次完整协作过程';
+    comment on column sessions.session_uid is '业务稳定 id';
+    comment on column sessions.project_id is '归属项目 id，null 表示个人会话';
+    comment on column sessions.agent_ids_json is '本次会话关联的智能体列表';
+
+    comment on table work_contexts is '同一工作目标下的工作上下文主表，由 LLM 动态生成';
     comment on column work_contexts.work_context_uid is '业务稳定 id';
+    comment on column work_contexts.session_id is '归属的会话 uid';
+    comment on column work_contexts.project_id is '归属的项目 uid，用于快速筛选';
     comment on column work_contexts.title is '工作标题';
     comment on column work_contexts.goal is '工作目标描述';
+    comment on column work_contexts.source is '来源：manual 或 llm_generated';
     comment on column work_contexts.current_run_id is '最近一次运行的 agent_runs.id';
     comment on column work_contexts.latest_artifact_id is '最近一个产物的 agent_artifacts.id';
     comment on column work_contexts.metadata_json is '扩展元数据';

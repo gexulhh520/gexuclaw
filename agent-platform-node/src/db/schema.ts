@@ -1,7 +1,7 @@
 import { boolean, integer, pgTable, serial, text } from "drizzle-orm/pg-core";
 
 // agents：Agent 的基础身份表。
-// 这里只放“这个 Agent 是谁”的稳定属性，不放具体运行配置。
+// 这里只放"这个 Agent 是谁"的稳定属性，不放具体运行配置。
 export const agents = pgTable("agents", {
   id: serial("id").primaryKey(),
   // agent_uid：业务稳定 id，给 API、日志、前端和外部引用使用。
@@ -12,7 +12,7 @@ export const agents = pgTable("agents", {
   description: text("description").notNull().default(""),
   capabilitiesJson: text("capabilities_json").notNull().default("[]"),
   ownerUserId: text("owner_user_id"),
-  // current_version_id：指向当前默认运行版本，便于 run API 直接取“当前发布版”。
+  // current_version_id：指向当前默认运行版本，便于 run API 直接取"当前发布版"。
   currentVersionId: integer("current_version_id"),
   standaloneEnabled: boolean("standalone_enabled").notNull().default(true),
   subagentEnabled: boolean("subagent_enabled").notNull().default(false),
@@ -119,7 +119,7 @@ export const agentRunSteps = pgTable("agent_run_steps", {
 });
 
 // model_invocations：一次模型调用的审计记录。
-// 用来回答“这次到底调用了哪个模型、看到了哪些上下文、耗了多少 token”。
+// 用来回答"这次到底调用了哪个模型、看到了哪些上下文、耗了多少 token"。
 export const modelInvocations = pgTable("model_invocations", {
   id: serial("id").primaryKey(),
   invocationUid: text("invocation_uid").notNull().unique(),
@@ -143,17 +143,52 @@ export const modelInvocations = pgTable("model_invocations", {
   createdAt: text("created_at").notNull(),
 });
 
+// projects：项目空间表。
+// 作为多个会话的容器，代表一个完整的工作领域或目标。
+export const projects = pgTable("projects", {
+  id: serial("id").primaryKey(),
+  projectUid: text("project_uid").notNull().unique(),
+  userId: text("user_id"),
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  icon: text("icon").notNull().default("📁"),
+  status: text("status").notNull().default("active"),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+// sessions：会话表。
+// 代表与 Agent 的一次完整协作过程，归属某个项目或个人空间。
+export const sessions = pgTable("sessions", {
+  id: serial("id").primaryKey(),
+  sessionUid: text("session_uid").notNull().unique(),
+  projectId: integer("project_id"), // null 表示个人会话，不归属项目
+  userId: text("user_id"),
+  title: text("title").notNull(),
+  description: text("description").notNull().default(""),
+  // agentIdsJson：本次会话关联的智能体列表
+  agentIdsJson: text("agent_ids_json").notNull().default("[]"),
+  status: text("status").notNull().default("active"),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 // work_contexts：同一工作目标下的主容器。
-// 它承接“这件工作是什么、现在做到哪、最近一次运行和最近一个产物是什么”。
+// 归属某个会话，由 LLM 在会话过程中动态生成，承接"这件工作是什么、现在做到哪、最近一次运行和最近一个产物是什么"。
 export const workContexts = pgTable("work_contexts", {
   id: serial("id").primaryKey(),
   workContextUid: text("work_context_uid").notNull().unique(),
   userId: text("user_id"),
+  // sessionId：归属的会话（字符串类型，与 agent_runs 保持一致）
   sessionId: text("session_id"),
+  // projectId：归属的项目（可选，用于快速筛选）
   projectId: text("project_id"),
   title: text("title").notNull(),
   goal: text("goal").notNull().default(""),
   status: text("status").notNull().default("active"),
+  // source：来源标识，如 manual / llm_generated
   source: text("source").notNull().default("manual"),
   currentRunId: integer("current_run_id"),
   latestArtifactId: integer("latest_artifact_id"),

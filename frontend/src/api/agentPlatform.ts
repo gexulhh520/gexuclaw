@@ -120,6 +120,140 @@ export type ModelInvocationRecord = {
   createdAt: string
 }
 
+export type ProjectRecord = {
+  id: number
+  projectUid: string
+  userId: string | null
+  name: string
+  description: string
+  icon: string
+  status: string
+  metadataJson: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type SessionRecord = {
+  id: number
+  sessionUid: string
+  projectId: number | null
+  userId: string | null
+  title: string
+  description: string
+  agentIdsJson: string
+  status: string
+  metadataJson: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type WorkContextRecord = {
+  id: number
+  workContextUid: string
+  title: string
+  goal: string
+  userId: string | null
+  sessionId: string | null
+  projectId: string | null
+  source: string
+  status: string
+  currentStage: string
+  currentRunId: number | null
+  latestArtifactId: number | null
+  runRefsJson: string
+  artifactRefsJson: string
+  metadataJson: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type AgentArtifactRecord = {
+  id: number
+  artifactUid: string
+  workContextId: number
+  runId: number | null
+  artifactType: string
+  title: string
+  mimeType: string | null
+  contentText: string
+  contentJson: string
+  uri: string | null
+  status: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type CreateProjectInput = {
+  name: string
+  description?: string
+  icon?: string
+  metadata?: Record<string, unknown>
+}
+
+export type CreateSessionInput = {
+  title: string
+  description?: string
+  projectId?: string
+  agentIds: string[]
+  metadata?: Record<string, unknown>
+}
+
+export type CreateWorkContextInput = {
+  title: string
+  goal?: string
+  userId?: string
+  sessionId?: string
+  projectId?: string
+  source?: string
+  metadata?: Record<string, unknown>
+}
+
+export type CreateArtifactInput = {
+  runId?: number
+  artifactType: string
+  title: string
+  mimeType?: string
+  contentText?: string
+  contentJson?: Record<string, unknown>
+  uri?: string
+  status?: string
+}
+
+export type CreateModelProfileInput = {
+  profileUid?: string
+  name: string
+  provider?: string
+  modelName: string
+  baseUrl?: string
+  capability?: Record<string, unknown>
+  defaultParams?: Record<string, unknown>
+  maxContextTokens?: number
+}
+
+export type CreateAgentInput = {
+  agentUid?: string
+  name: string
+  type?: 'custom' | 'builtin' | 'main'
+  description?: string
+  capabilities?: string[]
+  ownerUserId?: string
+  standaloneEnabled?: boolean
+  subagentEnabled?: boolean
+  uiMode?: 'generic' | 'custom'
+  uiRoute?: string
+}
+
+export type CreateAgentVersionInput = {
+  modelProfileUid: string
+  systemPrompt: string
+  skillText?: string
+  allowedTools?: string[]
+  contextPolicy?: Record<string, unknown>
+  modelParamsOverride?: Record<string, unknown>
+  outputSchema?: Record<string, unknown>
+  maxSteps?: number
+}
+
 type ApiEnvelope<T> = {
   success: boolean
   data: T
@@ -143,8 +277,18 @@ export const agentPlatformApi = {
     return unwrap(data)
   },
 
+  async createAgent(input: CreateAgentInput) {
+    const { data } = await httpClient.post<ApiEnvelope<AgentRecord>>('/agents', input)
+    return unwrap(data)
+  },
+
   async listModelProfiles() {
     const { data } = await httpClient.get<ApiEnvelope<ModelProfileRecord[]>>('/model-profiles')
+    return unwrap(data)
+  },
+
+  async createModelProfile(input: CreateModelProfileInput) {
+    const { data } = await httpClient.post<ApiEnvelope<ModelProfileRecord>>('/model-profiles', input)
     return unwrap(data)
   },
 
@@ -153,10 +297,28 @@ export const agentPlatformApi = {
     return unwrap(data)
   },
 
-  async runAgent(agentUid: string, userMessage: string) {
+  async createAgentVersion(agentUid: string, input: CreateAgentVersionInput) {
+    const { data } = await httpClient.post<ApiEnvelope<AgentVersionRecord>>(
+      `/agents/${agentUid}/versions`,
+      input
+    )
+    return unwrap(data)
+  },
+
+  async runAgent(
+    agentUid: string,
+    userMessage: string,
+    options: {
+      handoffNote?: string
+      mode?: 'standalone' | 'subagent' | 'main'
+      sessionId?: string
+      userId?: string
+      workContextId?: string
+    } = {}
+  ) {
     const { data } = await httpClient.post<ApiEnvelope<{ runUid: string; status: string; summary: string; stepsCount: number }>>(
       `/agents/${agentUid}/runs`,
-      { userMessage }
+      { userMessage, ...options }
     )
     return unwrap(data)
   },
@@ -180,6 +342,74 @@ export const agentPlatformApi = {
 
   async listRunModelInvocations(runUid: string) {
     const { data } = await httpClient.get<ApiEnvelope<ModelInvocationRecord[]>>(`/runs/${runUid}/model-invocations`)
+    return unwrap(data)
+  },
+
+  // Projects API
+  async listProjects() {
+    const { data } = await httpClient.get<ApiEnvelope<ProjectRecord[]>>('/projects')
+    return unwrap(data)
+  },
+
+  async createProject(input: CreateProjectInput) {
+    const { data } = await httpClient.post<ApiEnvelope<ProjectRecord>>('/projects', input)
+    return unwrap(data)
+  },
+
+  async getProject(projectUid: string) {
+    const { data } = await httpClient.get<ApiEnvelope<ProjectRecord>>(`/projects/${projectUid}`)
+    return unwrap(data)
+  },
+
+  // Sessions API
+  async listSessions(params: { projectUid?: string; personal?: boolean; limit?: number } = {}) {
+    const { data } = await httpClient.get<ApiEnvelope<SessionRecord[]>>('/sessions', {
+      params,
+    })
+    return unwrap(data)
+  },
+
+  async createSession(input: CreateSessionInput) {
+    const { data } = await httpClient.post<ApiEnvelope<SessionRecord>>('/sessions', input)
+    return unwrap(data)
+  },
+
+  async getSession(sessionUid: string) {
+    const { data } = await httpClient.get<ApiEnvelope<SessionRecord>>(`/sessions/${sessionUid}`)
+    return unwrap(data)
+  },
+
+  // WorkContexts API
+  async listWorkContexts(params: { sessionId?: string; projectId?: string; limit?: number } = {}) {
+    const { data } = await httpClient.get<ApiEnvelope<WorkContextRecord[]>>('/work-contexts', {
+      params,
+    })
+    return unwrap(data)
+  },
+
+  async createWorkContext(input: CreateWorkContextInput) {
+    const { data } = await httpClient.post<ApiEnvelope<WorkContextRecord>>('/work-contexts', input)
+    return unwrap(data)
+  },
+
+  async getWorkContext(workContextUid: string) {
+    const { data } = await httpClient.get<ApiEnvelope<WorkContextRecord>>(`/work-contexts/${workContextUid}`)
+    return unwrap(data)
+  },
+
+  // Artifacts API
+  async listArtifacts(workContextUid: string) {
+    const { data } = await httpClient.get<ApiEnvelope<AgentArtifactRecord[]>>(
+      `/work-contexts/${workContextUid}/artifacts`
+    )
+    return unwrap(data)
+  },
+
+  async createArtifact(workContextUid: string, input: CreateArtifactInput) {
+    const { data } = await httpClient.post<ApiEnvelope<AgentArtifactRecord>>(
+      `/work-contexts/${workContextUid}/artifacts`,
+      input
+    )
     return unwrap(data)
   },
 }

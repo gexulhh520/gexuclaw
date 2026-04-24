@@ -1,10 +1,11 @@
 <template>
   <div id="app">
-    <router-view />
+    <AgentPlatform />
   </div>
 </template>
 
 <script setup lang="ts">
+import AgentPlatform from './views/AgentPlatform.vue'
 </script>
 
 <style>

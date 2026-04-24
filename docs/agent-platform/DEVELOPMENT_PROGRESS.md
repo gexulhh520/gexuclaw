@@ -1071,3 +1071,45 @@
 下一步建议：
 - 继续把右侧工作台接成真实的“文档写作工作台”。
 - 再把会话、项目空间与 WorkContext 的真实数据连接起来。
+## 2026-04-24：旧前端剥离后收敛 Agent Platform 第一版入口
+
+本次目标：
+- 根据开发文档重新对齐当前阶段范围，不再沿旧聊天、登录、任务页面继续修补。
+- 在旧前端代码删除后，让前端入口直接进入 Agent Platform。
+- 将 Agent Platform 页面收敛为第一阶段最小工作台：Agent、ModelProfile、Run、Step、ModelInvocation。
+
+修改文件：
+- `frontend/src/App.vue`
+- `frontend/src/views/AgentPlatform.vue`
+- `frontend/src/api/agentPlatform.ts`
+- `frontend/src/stores/chat.ts`
+- `docs/agent-platform/DEVELOPMENT_PROGRESS.md`
+
+完成内容：
+- `App.vue` 不再依赖已删除的 router，直接渲染 `AgentPlatform`。
+- 删除旧聊天 store，避免引用已删除的旧聊天 API。
+- 重写 `AgentPlatform.vue`，移除会话、项目、复杂右侧工作台等超出第一阶段范围的 UI。
+- 新页面支持：
+  - Agent 列表与选择
+  - ModelProfile 列表
+  - 创建 Agent
+  - 创建 ModelProfile
+  - 发布 AgentVersion
+  - 运行当前 Agent
+  - 查看最近 Run
+  - 查看 Run Steps
+  - 查看 Model Invocations
+- 补齐 `agentPlatform.ts` 中创建 Agent、创建 ModelProfile、发布 AgentVersion、运行 Agent 的前端 API 封装。
+
+验证方式：
+- `agent-platform-node` 执行 `npm.cmd run typecheck` 通过。
+- `frontend` 执行 `npm.cmd run build` 通过。
+- 首次普通沙箱构建在 Vite 启动 esbuild 子进程时触发 `spawn EPERM`，提升权限重跑后构建成功。
+
+未完成事项：
+- 前端当前仍是第一阶段运行调试台，暂未做 WorkContext / Artifact 可视化。
+- 生产构建提示单包超过 500 kB，后续可按需做 Element Plus / 页面级 code splitting。
+
+下一步建议：
+- 启动 Node 服务和前端 dev server，使用 `builtin_browser_agent` 做一次真实页面验收。
+- 若第一阶段验收稳定，再进入 Phase 2 的 WorkContext / Artifact 前端展示。
