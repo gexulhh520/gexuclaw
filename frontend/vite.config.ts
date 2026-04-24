@@ -12,6 +12,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/api/agent-platform': {
+        target: 'http://127.0.0.1:3100',
+        changeOrigin: true,
+      },
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,

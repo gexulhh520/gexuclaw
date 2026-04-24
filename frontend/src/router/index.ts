@@ -4,16 +4,25 @@ import Chat from '../views/Chat.vue'
 import Login from '../views/Login.vue'
 import ScheduledTasks from '../views/ScheduledTasks.vue'
 import UserSettings from '../views/UserSettings.vue'
+import AgentPlatform from '../views/AgentPlatform.vue'
+import WorkbenchHome from '../views/WorkbenchHome.vue'
 
 const routes: Array<RouteRecordRaw> = [
   {
     path: '/',
-    redirect: '/chat'
+    redirect: '/workspace'
+  },
+  {
+    path: '/workspace',
+    name: 'WorkbenchHome',
+    component: WorkbenchHome,
+    meta: { requiresAuth: false }
   },
   {
     path: '/login',
     name: 'Login',
     component: Login,
+    redirect: '/workspace',
     meta: { guest: true }
   },
   {
@@ -34,6 +43,12 @@ const routes: Array<RouteRecordRaw> = [
     component: UserSettings,
     meta: { requiresAuth: true }
   },
+  {
+    path: '/agent-platform',
+    name: 'AgentPlatform',
+    component: AgentPlatform,
+    meta: { requiresAuth: false }
+  },
 ]
 
 const router = createRouter({
@@ -42,7 +57,7 @@ const router = createRouter({
 })
 
 // 路由守卫
-router.beforeEach(async (to, from, next) => {
+router.beforeEach(async (to, _from, next) => {
   const userStore = useUserStore()
   
   // 如果有 token 且未初始化，尝试获取用户信息
@@ -58,7 +73,7 @@ router.beforeEach(async (to, from, next) => {
   
   // 游客页面（已登录用户不能访问）
   if (to.meta.guest && userStore.isLoggedIn) {
-    next('/chat')
+    next('/workspace')
     return
   }
   

@@ -5,7 +5,10 @@
         <h2>用户设置</h2>
         <p>维护默认时区、邮件通知和个人微信 ClawBot 配置。</p>
       </div>
-      <el-button @click="router.push('/chat')">返回聊天</el-button>
+      <div class="header-actions">
+        <el-button @click="router.push('/agent-platform')">Agent Platform</el-button>
+        <el-button @click="router.push('/chat')">返回聊天</el-button>
+      </div>
     </div>
 
     <el-card shadow="never">
@@ -128,6 +131,11 @@ onMounted(() => {
   justify-content: space-between;
   align-items: flex-start;
   margin-bottom: 20px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 10px;
 }
 
 .settings-actions {

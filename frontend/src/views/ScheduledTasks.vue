@@ -13,6 +13,7 @@
           <el-option label="已暂停" value="paused" />
           <el-option label="分析中" value="analysis_running" />
         </el-select>
+        <el-button @click="router.push('/agent-platform')">Agent Platform</el-button>
         <el-button @click="loadTasks">刷新</el-button>
         <el-button @click="router.push('/chat')">返回聊天</el-button>
       </div>
