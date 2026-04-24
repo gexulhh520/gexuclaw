@@ -2,11 +2,13 @@
   <div
     class="agent-os-page"
     :class="{
+      'sidebar-collapsed-layout': sidebarCollapsed,
+      'conversation-collapsed-layout': conversationCollapsed,
       'workspace-hidden-layout': workspaceHidden,
       'workspace-fullscreen-layout': workspaceFullscreen,
     }"
   >
-    <aside class="sidebar-shell">
+    <aside class="sidebar-shell" :class="{ collapsed: sidebarCollapsed }">
       <div class="brand-card panel-card">
         <div class="brand-mark">AI</div>
         <div>
@@ -99,8 +101,18 @@
       </div>
     </aside>
 
-    <main class="conversation-shell">
-      <div v-if="selectedProject" class="project-toolbar panel-card">
+    <div class="layout-divider sidebar-divider">
+      <button
+        class="divider-toggle"
+        :title="sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'"
+        @click="sidebarCollapsed = !sidebarCollapsed"
+      >
+        {{ sidebarCollapsed ? "›" : "‹" }}
+      </button>
+    </div>
+
+    <main v-if="!conversationCollapsed" class="conversation-shell">
+      <div v-if="!conversationCollapsed && selectedProject" class="project-toolbar panel-card">
         <div class="toolbar-label">当前项目空间</div>
         <el-select
           v-model="selectedProjectId"
@@ -119,7 +131,7 @@
         <button class="ghost-mini">项目空间设置</button>
       </div>
 
-      <section class="conversation-panel panel-card">
+      <section v-if="!conversationCollapsed" class="conversation-panel panel-card">
         <div v-if="selectedProject && !currentSession" class="project-empty-state">
           <div class="empty-icon">+</div>
           <div class="empty-title">这个项目空间还没有会话</div>
@@ -182,6 +194,13 @@
             </section>
           </div>
 
+          <div v-if="false" class="conversation-collapsed-rail panel-card">
+            <div class="collapsed-rail-label">聊天窗口已折叠</div>
+            <button class="inline-primary collapsed-rail-action" @click="conversationCollapsed = false">
+              展开聊天
+            </button>
+          </div>
+
           <div class="composer">
             <div class="composer-tools">
               <button class="tool-chip">+ 附件</button>
@@ -199,6 +218,49 @@
         </template>
       </section>
     </main>
+
+    <div v-if="conversationCollapsed" class="floating-composer panel-card">
+      <div class="composer-tools">
+        <button class="tool-chip">+ 附件</button>
+        <button class="tool-chip">@ 智能体</button>
+        <button class="tool-chip"># 项目上下文</button>
+      </div>
+      <div class="composer-box">
+        <textarea
+          v-model="draftMessage"
+          placeholder="输入你的需求或问题，让智能体继续写作、改写、润色或分析。"
+        />
+        <button class="send-button" @click="sendMessage">发送</button>
+      </div>
+    </div>
+    <div
+      v-if="!workspaceHidden && !workspaceFullscreen && !conversationCollapsed"
+      class="layout-divider center-divider"
+    >
+      <button
+        class="divider-toggle"
+        :title="conversationCollapsed ? '展开聊天窗口' : '折叠聊天窗口'"
+        @click="conversationCollapsed = !conversationCollapsed"
+      >
+        聊
+      </button>
+      <button
+        class="divider-toggle"
+        :title="workspaceHidden ? '展开右侧工作台' : '折叠右侧工作台'"
+        @click="workspaceHidden = !workspaceHidden"
+      >
+        右
+      </button>
+    </div>
+
+    <button
+      v-if="conversationCollapsed && !workspaceHidden && !workspaceFullscreen"
+      class="conversation-reveal-float"
+      :title="'展开聊天窗口'"
+      @click="conversationCollapsed = false"
+    >
+      聊
+    </button>
 
     <section
       v-if="!workspaceHidden"
@@ -715,6 +777,8 @@ const selectedAgentId = ref<string>("writing_agent");
 const draftMessage = ref("");
 const executionExpanded = ref(true);
 const activeWorkspaceTab = ref("工作区");
+const sidebarCollapsed = ref(false);
+const conversationCollapsed = ref(false);
 const workspaceHidden = ref(false);
 const workspaceFullscreen = ref(false);
 
@@ -972,7 +1036,18 @@ onMounted(async () => {
 <style scoped>
 .agent-os-page {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) minmax(420px, 0.96fr);
+  --sidebar-column: 280px;
+  --sidebar-divider-column: 14px;
+  --conversation-column: minmax(0, 1fr);
+  --center-divider-column: 14px;
+  --workspace-column: minmax(420px, 0.96fr);
+  --workspace-offset: 448px;
+  grid-template-columns:
+    var(--sidebar-column)
+    var(--sidebar-divider-column)
+    var(--conversation-column)
+    var(--center-divider-column)
+    var(--workspace-column);
   height: 100vh;
   overflow: hidden;
   box-sizing: border-box;
@@ -986,7 +1061,83 @@ onMounted(async () => {
 
 .agent-os-page.workspace-hidden-layout,
 .agent-os-page.workspace-fullscreen-layout {
-  grid-template-columns: 280px minmax(0, 1fr);
+  --workspace-column: 0px;
+  --center-divider-column: 0px;
+  --workspace-offset: 24px;
+}
+
+.agent-os-page.sidebar-collapsed-layout {
+  --sidebar-column: 88px;
+}
+
+.agent-os-page.conversation-collapsed-layout {
+  --conversation-column: 0px;
+  --center-divider-column: 0px;
+}
+
+.layout-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  position: relative;
+  z-index: 2;
+}
+
+.layout-divider::before {
+  content: "";
+  position: absolute;
+  inset: 18px 6px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(91, 109, 255, 0.22), rgba(71, 85, 105, 0.14));
+  opacity: 0.85;
+}
+
+.divider-toggle {
+  position: relative;
+  z-index: 1;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(113, 128, 150, 0.18);
+  border-radius: 999px;
+  background: rgba(24, 35, 56, 0.96);
+  color: #e5ecfb;
+  font-size: 14px;
+  line-height: 1;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.18);
+}
+
+.sidebar-divider {
+  grid-column: 2;
+  align-self: stretch;
+}
+
+.center-divider {
+  grid-column: 4;
+  align-self: stretch;
+  flex-direction: column;
+}
+
+.center-divider .divider-toggle {
+  width: 34px;
+  height: 34px;
+}
+
+.conversation-reveal-float {
+  position: fixed;
+  left: calc(var(--sidebar-column) + var(--sidebar-divider-column) + 8px);
+  top: 50%;
+  z-index: 46;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(113, 128, 150, 0.18);
+  border-radius: 999px;
+  background: rgba(24, 35, 56, 0.96);
+  color: #e5ecfb;
+  transform: translateY(-50%);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.18);
 }
 
 .soft-scrollbar {
@@ -1031,12 +1182,35 @@ onMounted(async () => {
 }
 
 .sidebar-shell {
+  grid-column: 1;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 16px;
   padding: 20px 18px;
   border-right: 1px solid rgba(113, 128, 150, 0.14);
   background: rgba(16, 24, 39, 0.72);
+}
+
+.sidebar-shell.collapsed {
+  gap: 12px;
+  padding: 16px 12px;
+  overflow: hidden;
+}
+
+.sidebar-shell.collapsed .sidebar-actions,
+.sidebar-shell.collapsed .sidebar-scroll,
+.sidebar-shell.collapsed .profile-card {
+  display: none;
+}
+
+.sidebar-shell.collapsed .brand-card {
+  justify-content: center;
+  padding: 12px;
+}
+
+.sidebar-shell.collapsed .brand-title,
+.sidebar-shell.collapsed .brand-subtitle {
+  display: none;
 }
 
 .brand-card {
@@ -1288,12 +1462,55 @@ onMounted(async () => {
 }
 
 .conversation-shell {
+  grid-column: 3;
   min-width: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
   padding: 20px;
   border-right: 1px solid rgba(113, 128, 150, 0.14);
+}
+
+.conversation-shell.collapsed {
+  padding-bottom: 0;
+}
+
+.conversation-collapsed-rail {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  padding: 18px;
+  text-align: center;
+}
+
+.collapsed-rail-label {
+  color: #dbe6fb;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.collapsed-rail-action {
+  width: 100%;
+  max-width: 180px;
+}
+
+.floating-composer {
+  position: fixed;
+  left: 50%;
+  right: auto;
+  bottom: 24px;
+  z-index: 45;
+  width: min(760px, calc(100vw - 64px));
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 14px;
+}
+
+.conversation-shell.collapsed .composer {
+  display: none;
 }
 
 .project-toolbar {
@@ -1506,6 +1723,16 @@ onMounted(async () => {
   padding-top: 14px;
 }
 
+.floating-composer {
+  display: grid;
+  gap: 12px;
+  border-radius: 20px;
+  background: rgba(24, 34, 52, 0.96);
+  border: 1px solid rgba(113, 128, 150, 0.18);
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(20px);
+}
+
 .composer-tools {
   display: flex;
   flex-wrap: wrap;
@@ -1591,6 +1818,7 @@ onMounted(async () => {
 }
 
 .workspace-host {
+  grid-column: 5;
   min-width: 0;
   width: 100%;
   max-width: 100%;
@@ -2021,13 +2249,25 @@ onMounted(async () => {
 
 @media (max-width: 1600px) {
   .agent-os-page {
-    grid-template-columns: 260px minmax(0, 1fr) minmax(360px, 0.92fr);
+    --sidebar-column: 260px;
+    --workspace-column: minmax(360px, 0.92fr);
+    --workspace-offset: 392px;
   }
 }
 
 @media (max-width: 1360px) {
   .agent-os-page {
     grid-template-columns: 1fr;
+    --sidebar-column: 1fr;
+    --sidebar-divider-column: 0px;
+    --conversation-column: 1fr;
+    --center-divider-column: 0px;
+    --workspace-column: 1fr;
+    --workspace-offset: 24px;
+  }
+
+  .layout-divider {
+    display: none;
   }
 
   .sidebar-shell,
@@ -2038,6 +2278,24 @@ onMounted(async () => {
 
   .workspace-host {
     padding: 0 20px 20px;
+  }
+
+  .floating-composer {
+    position: static;
+    width: 100%;
+    left: auto;
+    right: auto;
+    bottom: auto;
+  }
+
+  .conversation-shell.collapsed .composer {
+    position: static;
+    width: 100%;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    z-index: auto;
+    padding-top: 14px;
   }
 }
 
