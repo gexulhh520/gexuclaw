@@ -40,6 +40,20 @@ export function registerBuiltinTools(): void {
         },
         error: url ? undefined : "Missing url",
         meta: { mock: true },
+        artifactCandidates: url
+          ? [
+              {
+                kind: "page",
+                title: `页面快照 - ${url}`,
+                contentJson: {
+                  url,
+                  title: `Mock page for ${url}`,
+                  text: "This is a mock browser result for first-phase AgentRuntime validation.",
+                },
+                defaultRole: "intermediate",
+              },
+            ]
+          : [],
       };
     },
   });
@@ -60,6 +74,18 @@ export function registerBuiltinTools(): void {
           text: "Mock current page information.",
         },
         meta: { mock: true },
+        artifactCandidates: [
+          {
+            kind: "page",
+            title: "当前页面信息",
+            contentJson: {
+              title: "Mock current page",
+              url: "mock://current-page",
+              text: "Mock current page information.",
+            },
+            defaultRole: "intermediate",
+          },
+        ],
       };
     },
   });

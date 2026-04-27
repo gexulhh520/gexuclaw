@@ -13,6 +13,7 @@ import {
 import type { ChatMessage } from "./model-client.js";
 import { ModelClient } from "./model-client.js";
 import { ToolRuntime } from "./tool-runtime.js";
+import { persistArtifactsFromToolResult } from "../modules/artifacts/artifact-coordinator.js";
 
 // 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
 type RunAgentInputExtended = {
@@ -377,6 +378,12 @@ export class AgentRuntime {
           toolCallId: toolCall.id,
           toolStatus: toolResult.success ? "success" : "failed",
           output: toolResult,
+        });
+
+        await persistArtifactsFromToolResult({
+          workContextUid: args.input.workContextId,
+          runId: args.runId,
+          toolResult,
         });
 
         messages.push({

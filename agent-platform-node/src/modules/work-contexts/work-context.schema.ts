@@ -38,7 +38,7 @@ export const createArtifactSchema = z.object({
   title: z.string().min(1),
   mimeType: z.string().optional(),
   contentText: z.string().default(""),
-  contentJson: z.record(z.any()).default({}),
+  contentJson: z.union([z.record(z.any()), z.array(z.any())]).default({}),
   uri: z.string().optional(),
   status: z.string().default("ready"),
   sourceRunId: z.number().int().positive().optional(),
