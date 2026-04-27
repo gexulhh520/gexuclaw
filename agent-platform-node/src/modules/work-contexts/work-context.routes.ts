@@ -5,6 +5,7 @@ import {
   createArtifact,
   createWorkContext,
   getWorkContextByUid,
+  getWorkContextWorkbench,
   listArtifactsByWorkContext,
   listWorkContexts,
 } from "./work-context.service.js";
@@ -46,6 +47,15 @@ export async function registerWorkContextRoutes(app: FastifyInstance) {
     async (request) => {
       const input = createArtifactSchema.parse(request.body);
       return ok(await createArtifact(request.params.workContextUid, input));
+    },
+  );
+
+  // 获取 WorkContext 工作台聚合数据
+  // GET /api/agent-platform/work-contexts/:workContextUid/workbench
+  app.get<{ Params: { workContextUid: string } }>(
+    "/api/agent-platform/work-contexts/:workContextUid/workbench",
+    async (request) => {
+      return ok(await getWorkContextWorkbench(request.params.workContextUid));
     },
   );
 }

@@ -170,12 +170,16 @@ export async function ensureDatabaseSchema(): Promise<void> {
       work_context_id integer not null,
       run_id integer,
       artifact_type text not null,
+      artifact_role text not null default 'output',
       title text not null,
       mime_type text,
       content_text text not null default '',
       content_json text not null default '{}',
       uri text,
       status text not null default 'ready',
+      source_run_id integer,
+      source_artifact_ids_json text not null default '[]',
+      metadata_json text not null default '{}',
       created_at text not null,
       updated_at text not null
     );
@@ -232,9 +236,22 @@ export async function ensureDatabaseSchema(): Promise<void> {
     comment on column agent_artifacts.artifact_uid is '业务稳定 id';
     comment on column agent_artifacts.work_context_id is '所属工作上下文 id';
     comment on column agent_artifacts.run_id is '来源运行 id';
-    comment on column agent_artifacts.artifact_type is '产物类型，例如 text、json、document';
+    comment on column agent_artifacts.artifact_type is '产物类型：text | structured_data | page | image | link | file | collection';
+    comment on column agent_artifacts.artifact_role is '产物角色：input | reference | intermediate | draft | final | output';
     comment on column agent_artifacts.content_text is '文本内容';
     comment on column agent_artifacts.content_json is '结构化 JSON 内容';
     comment on column agent_artifacts.uri is '外部存储地址或文件引用';
+    comment on column agent_artifacts.source_run_id is '明确记录产物来源 run';
+    comment on column agent_artifacts.source_artifact_ids_json is '派生产物的血缘关系';
+    comment on column agent_artifacts.metadata_json is '扩展字段（subtype、文件信息、页面信息等）';
+  `);
+
+  // 迁移：为已存在的 agent_artifacts 表添加新字段
+  await pool.query(`
+    alter table agent_artifacts
+    add column if not exists artifact_role text not null default 'output',
+    add column if not exists source_run_id integer,
+    add column if not exists source_artifact_ids_json text not null default '[]',
+    add column if not exists metadata_json text not null default '{}';
   `);
 }

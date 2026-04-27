@@ -1,6 +1,6 @@
 import { desc, eq, isNull } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { projects, sessions } from "../../db/schema.js";
+import { agentArtifacts, agentRuns, projects, sessions, workContexts } from "../../db/schema.js";
 import { notFound } from "../../shared/errors.js";
 import { makeUid } from "../../shared/ids.js";
 import { jsonStringify } from "../../shared/json.js";
@@ -90,4 +90,46 @@ export async function getSessionByUid(sessionUid: string) {
   }
 
   return session;
+}
+
+// 获取会话工作台聚合数据
+export async function getSessionWorkbench(sessionUid: string) {
+  const session = await getSessionByUid(sessionUid);
+
+  // 加载该会话的 workContexts（按更新时间倒序）
+  const workContextList = await db
+    .select()
+    .from(workContexts)
+    .where(eq(workContexts.sessionId, sessionUid))
+    .orderBy(desc(workContexts.updatedAt))
+    .limit(10);
+
+  // 加载该会话的最近 runs
+  const runList = await db
+    .select()
+    .from(agentRuns)
+    .where(eq(agentRuns.sessionId, sessionUid))
+    .orderBy(desc(agentRuns.id))
+    .limit(20);
+
+  // 如果有 workContext，加载最近的 artifacts
+  let artifactList: typeof agentArtifacts.$inferSelect[] = [];
+  if (workContextList.length > 0) {
+    const workContextIds = workContextList.map(wc => wc.id);
+    artifactList = await db
+      .select()
+      .from(agentArtifacts)
+      .where(eq(agentArtifacts.workContextId, workContextIds[0]))
+      .orderBy(desc(agentArtifacts.id))
+      .limit(20);
+  }
+
+  return {
+    session,
+    workContexts: workContextList,
+    runs: runList,
+    artifacts: artifactList,
+    // 默认选中最近活跃的 workContext
+    selectedWorkContext: workContextList[0] || null,
+  };
 }

@@ -381,59 +381,300 @@
         <!-- Tab: 产物 - Artifact 列表与详情 -->
         <div v-if="activeWorkspaceTab === '产物'" class="workspace-tab-panel">
           <div class="artifact-split-panel">
+            <!-- 左侧：产物列表 -->
             <div class="artifact-list">
               <div class="panel-header">
                 <span class="panel-title">产物列表 ({{ workContextArtifacts.length }})</span>
+                <div class="panel-filters">
+                  <select v-model="artifactRoleFilter" class="filter-select">
+                    <option value="">全部角色</option>
+                    <option value="input">输入</option>
+                    <option value="reference">参考</option>
+                    <option value="intermediate">中间产物</option>
+                    <option value="draft">草稿</option>
+                    <option value="final">终稿</option>
+                    <option value="output">输出</option>
+                  </select>
+                </div>
               </div>
               <div class="artifact-items">
                 <div
-                  v-for="artifact in workContextArtifacts"
+                  v-for="artifact in filteredArtifacts"
                   :key="artifact.artifactUid"
                   class="artifact-item"
                   :class="{ active: selectedArtifact?.artifactUid === artifact.artifactUid }"
                   @click="selectedArtifact = artifact"
                 >
-                  <div class="artifact-type">{{ artifact.artifactType }}</div>
+                  <div class="artifact-header">
+                    <span class="artifact-type-badge" :class="artifact.artifactType">
+                      {{ getArtifactTypeLabel(artifact.artifactType) }}
+                    </span>
+                    <span class="artifact-role-badge" :class="artifact.artifactRole">
+                      {{ getArtifactRoleLabel(artifact.artifactRole) }}
+                    </span>
+                  </div>
                   <div class="artifact-title">{{ artifact.title || '未命名产物' }}</div>
                   <div class="artifact-meta">
-                    <span>{{ formatTime(artifact.createdAt) }}</span>
+                    <span class="meta-time">{{ formatTime(artifact.createdAt) }}</span>
                     <span :class="['artifact-status', artifact.status]">{{ artifact.status }}</span>
                   </div>
                 </div>
-                <div v-if="workContextArtifacts.length === 0" class="empty-list">
-                  暂无产物
+                <div v-if="filteredArtifacts.length === 0" class="empty-list">
+                  {{ workContextArtifacts.length === 0 ? '暂无产物' : '没有符合筛选条件的产物' }}
                 </div>
               </div>
             </div>
+
+            <!-- 右侧：产物详情 -->
             <div class="artifact-detail" v-if="selectedArtifact">
               <div class="panel-header">
                 <span class="panel-title">产物详情</span>
+                <div class="panel-actions">
+                  <button class="ghost-mini" @click="copyArtifactContent(selectedArtifact)">
+                    复制内容
+                  </button>
+                </div>
               </div>
               <div class="artifact-content">
-                <div class="detail-row">
-                  <span class="detail-label">类型:</span>
-                  <span class="detail-value">{{ selectedArtifact.artifactType }}</span>
+                <!-- 基本信息 -->
+                <div class="detail-section">
+                  <div class="detail-header">
+                    <h4>{{ selectedArtifact.title }}</h4>
+                    <div class="detail-badges">
+                      <span class="badge type" :class="selectedArtifact.artifactType">
+                        {{ getArtifactTypeLabel(selectedArtifact.artifactType) }}
+                      </span>
+                      <span class="badge role" :class="selectedArtifact.artifactRole">
+                        {{ getArtifactRoleLabel(selectedArtifact.artifactRole) }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div class="detail-grid">
+                    <div class="detail-item">
+                      <span class="detail-label">状态</span>
+                      <span class="detail-value" :class="selectedArtifact.status">{{ selectedArtifact.status }}</span>
+                    </div>
+                    <div class="detail-item">
+                      <span class="detail-label">MIME 类型</span>
+                      <span class="detail-value">{{ selectedArtifact.mimeType || '-' }}</span>
+                    </div>
+                    <div class="detail-item">
+                      <span class="detail-label">创建时间</span>
+                      <span class="detail-value">{{ formatTime(selectedArtifact.createdAt) }}</span>
+                    </div>
+                    <div class="detail-item">
+                      <span class="detail-label">更新时间</span>
+                      <span class="detail-value">{{ formatTime(selectedArtifact.updatedAt) }}</span>
+                    </div>
+                  </div>
                 </div>
-                <div class="detail-row">
-                  <span class="detail-label">标题:</span>
-                  <span class="detail-value">{{ selectedArtifact.title }}</span>
+
+                <!-- 类型化内容展示 -->
+                <div class="detail-section artifact-content-display">
+                  <div class="section-header">
+                    <span class="section-title">{{ getArtifactContentTitle(selectedArtifact.artifactType) }}</span>
+                    <div class="content-actions">
+                      <button
+                        v-if="selectedArtifact.artifactType === 'text'"
+                        class="action-btn"
+                        :class="{ active: textViewMode === 'rendered' }"
+                        @click="textViewMode = textViewMode === 'raw' ? 'rendered' : 'raw'"
+                      >
+                        {{ textViewMode === 'raw' ? '渲染' : '原始' }}
+                      </button>
+                      <span class="content-length">{{ getArtifactContentLength(selectedArtifact) }} 字符</span>
+                    </div>
+                  </div>
+
+                  <!-- 文本类型 -->
+                  <template v-if="selectedArtifact.artifactType === 'text'">
+                    <div v-if="textViewMode === 'rendered' && isMarkdown(selectedArtifact.contentText)" class="markdown-preview">
+                      <div class="markdown-body" v-html="renderMarkdown(selectedArtifact.contentText)"></div>
+                    </div>
+                    <pre v-else class="preview-content text">{{ selectedArtifact.contentText }}</pre>
+                  </template>
+
+                  <!-- 结构化数据类型 -->
+                  <template v-else-if="selectedArtifact.artifactType === 'structured_data'">
+                    <div class="structured-data-view">
+                      <div class="data-table-container" v-if="parseStructuredData(selectedArtifact).isTable">
+                        <table class="data-table">
+                          <thead>
+                            <tr>
+                              <th v-for="col in parseStructuredData(selectedArtifact).columns" :key="col">{{ col }}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(row, idx) in parseStructuredData(selectedArtifact).rows" :key="idx">
+                              <td v-for="col in parseStructuredData(selectedArtifact).columns" :key="col">
+                                {{ row[col] }}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <pre v-else class="preview-content json">{{ formatJson(selectedArtifact.contentJson) }}</pre>
+                    </div>
+                  </template>
+
+                  <!-- 页面类型 -->
+                  <template v-else-if="selectedArtifact.artifactType === 'page'">
+                    <div class="page-preview">
+                      <div class="page-meta" v-if="getPageMeta(selectedArtifact)">
+                        <div class="page-url">{{ getPageMeta(selectedArtifact).url }}</div>
+                        <div class="page-title">{{ getPageMeta(selectedArtifact).title }}</div>
+                      </div>
+                      <iframe
+                        v-if="selectedArtifact.uri"
+                        :src="selectedArtifact.uri"
+                        class="page-iframe"
+                        sandbox="allow-scripts allow-same-origin"
+                      ></iframe>
+                      <div v-else-if="selectedArtifact.contentText" class="page-content">
+                        <div class="html-preview" v-html="sanitizeHtml(selectedArtifact.contentText)"></div>
+                      </div>
+                      <div v-else class="empty-content">无可预览内容</div>
+                    </div>
+                  </template>
+
+                  <!-- 图片类型 -->
+                  <template v-else-if="selectedArtifact.artifactType === 'image'">
+                    <div class="image-preview">
+                      <img
+                        v-if="selectedArtifact.uri"
+                        :src="selectedArtifact.uri"
+                        :alt="selectedArtifact.title"
+                        class="preview-image"
+                        @error="onImageError"
+                      />
+                      <div v-else-if="isBase64Image(selectedArtifact.contentText)" class="base64-image-container">
+                        <img :src="selectedArtifact.contentText" :alt="selectedArtifact.title" class="preview-image" />
+                      </div>
+                      <div v-else class="image-placeholder">
+                        <div class="placeholder-icon">🖼️</div>
+                        <div class="placeholder-text">图片数据</div>
+                        <div v-if="getImageMeta(selectedArtifact)" class="image-meta">
+                          <span>{{ getImageMeta(selectedArtifact).width }} x {{ getImageMeta(selectedArtifact).height }}</span>
+                          <span>{{ getImageMeta(selectedArtifact).format }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- 链接类型 -->
+                  <template v-else-if="selectedArtifact.artifactType === 'link'">
+                    <div class="link-preview">
+                      <a
+                        :href="selectedArtifact.uri || selectedArtifact.contentText"
+                        target="_blank"
+                        class="link-card"
+                      >
+                        <div class="link-icon">🔗</div>
+                        <div class="link-info">
+                          <div class="link-title">{{ selectedArtifact.title }}</div>
+                          <div class="link-url">{{ selectedArtifact.uri || selectedArtifact.contentText }}</div>
+                        </div>
+                        <div class="link-arrow">→</div>
+                      </a>
+                      <div v-if="getLinkMeta(selectedArtifact)" class="link-meta">
+                        <span class="meta-item">{{ getLinkMeta(selectedArtifact).siteName }}</span>
+                        <span class="meta-item" v-if="getLinkMeta(selectedArtifact).description">
+                          {{ getLinkMeta(selectedArtifact).description.slice(0, 100) }}...
+                        </span>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- 文件类型 -->
+                  <template v-else-if="selectedArtifact.artifactType === 'file'">
+                    <div class="file-preview">
+                      <div class="file-card">
+                        <div class="file-icon">{{ getFileIcon(selectedArtifact.mimeType) }}</div>
+                        <div class="file-info">
+                          <div class="file-name">{{ selectedArtifact.title }}</div>
+                          <div class="file-meta">
+                            <span class="file-type">{{ selectedArtifact.mimeType || '未知类型' }}</span>
+                            <span v-if="getFileSize(selectedArtifact)" class="file-size">{{ getFileSize(selectedArtifact) }}</span>
+                          </div>
+                        </div>
+                        <a
+                          v-if="selectedArtifact.uri"
+                          :href="selectedArtifact.uri"
+                          target="_blank"
+                          class="file-download"
+                          download
+                        >
+                          下载
+                        </a>
+                      </div>
+                      <div v-if="isTextFile(selectedArtifact.mimeType) && selectedArtifact.contentText" class="file-content">
+                        <pre class="preview-content">{{ selectedArtifact.contentText.slice(0, 5000) }}</pre>
+                        <div v-if="selectedArtifact.contentText.length > 5000" class="content-truncated">
+                          内容已截断，共 {{ selectedArtifact.contentText.length }} 字符
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- 集合类型 -->
+                  <template v-else-if="selectedArtifact.artifactType === 'collection'">
+                    <div class="collection-preview">
+                      <div class="collection-header">
+                        <span class="collection-count">{{ getCollectionItems(selectedArtifact).length }} 项</span>
+                      </div>
+                      <div class="collection-items">
+                        <div
+                          v-for="(item, idx) in getCollectionItems(selectedArtifact)"
+                          :key="idx"
+                          class="collection-item"
+                        >
+                          <span class="item-index">{{ idx + 1 }}</span>
+                          <span class="item-type">{{ item.type }}</span>
+                          <span class="item-title">{{ item.title }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- 默认类型 -->
+                  <template v-else>
+                    <pre class="preview-content">{{ selectedArtifact.contentText }}</pre>
+                  </template>
                 </div>
-                <div class="detail-row">
-                  <span class="detail-label">MIME:</span>
-                  <span class="detail-value">{{ selectedArtifact.mimeType || '-' }}</span>
+
+                <!-- JSON 内容（如果存在且不是结构化数据类型） -->
+                <div class="detail-section" v-if="selectedArtifact.contentJson && selectedArtifact.contentJson !== '{}' && selectedArtifact.artifactType !== 'structured_data'">
+                  <div class="section-header">
+                    <span class="section-title">结构化数据</span>
+                  </div>
+                  <pre class="preview-content json">{{ formatJson(selectedArtifact.contentJson) }}</pre>
                 </div>
-                <div class="detail-row">
-                  <span class="detail-label">状态:</span>
-                  <span class="detail-value">{{ selectedArtifact.status }}</span>
+
+                <!-- URI 链接 -->
+                <div class="detail-section" v-if="selectedArtifact.uri && selectedArtifact.artifactType !== 'link' && selectedArtifact.artifactType !== 'page'">
+                  <div class="section-header">
+                    <span class="section-title">外部链接</span>
+                  </div>
+                  <a :href="selectedArtifact.uri" target="_blank" class="external-link">
+                    {{ selectedArtifact.uri }}
+                  </a>
                 </div>
-                <div class="artifact-preview" v-if="selectedArtifact.contentText">
-                  <div class="preview-label">内容预览</div>
-                  <pre class="preview-content">{{ selectedArtifact.contentText }}</pre>
+
+                <!-- 元数据 -->
+                <div class="detail-section" v-if="selectedArtifact.metadataJson && selectedArtifact.metadataJson !== '{}'">
+                  <div class="section-header">
+                    <span class="section-title">元数据</span>
+                  </div>
+                  <pre class="preview-content json">{{ formatJson(selectedArtifact.metadataJson) }}</pre>
                 </div>
               </div>
             </div>
             <div class="artifact-detail empty" v-else>
-              <div class="empty-state">选择一个产物查看详情</div>
+              <div class="empty-state">
+                <div class="empty-icon">📄</div>
+                <div class="empty-text">选择一个产物查看详情</div>
+              </div>
             </div>
           </div>
         </div>
@@ -441,13 +682,23 @@
         <!-- Tab: 执行过程 - Run 列表与 Steps -->
         <div v-if="activeWorkspaceTab === '执行过程'" class="workspace-tab-panel">
           <div class="run-split-panel">
+            <!-- 左侧：Run 列表 -->
             <div class="run-list">
               <div class="panel-header">
                 <span class="panel-title">执行记录 ({{ workContextRuns.length }})</span>
+                <div class="panel-filters">
+                  <select v-model="runStatusFilter" class="filter-select">
+                    <option value="">全部状态</option>
+                    <option value="success">成功</option>
+                    <option value="failed">失败</option>
+                    <option value="running">运行中</option>
+                    <option value="queued">排队中</option>
+                  </select>
+                </div>
               </div>
               <div class="run-items">
                 <div
-                  v-for="run in workContextRuns"
+                  v-for="run in filteredRuns"
                   :key="run.runUid"
                   class="run-item"
                   :class="{ active: selectedRun?.runUid === run.runUid, [run.status]: true }"
@@ -455,61 +706,163 @@
                 >
                   <div class="run-header">
                     <span class="run-id">{{ run.runUid.slice(0, 12) }}...</span>
-                    <span class="run-status" :class="run.status">{{ run.status }}</span>
+                    <span class="run-status-badge" :class="run.status">{{ getRunStatusLabel(run.status) }}</span>
                   </div>
-                  <div class="run-agent">{{ run.agentName || run.agentId }}</div>
+                  <div class="run-agent-row">
+                    <span class="agent-avatar">{{ getAgentShortName(run.agentName || String(run.agentId)) }}</span>
+                    <span class="agent-name">{{ run.agentName || run.agentId }}</span>
+                  </div>
+                  <div class="run-message" v-if="run.userMessage">{{ run.userMessage.slice(0, 50) }}...</div>
                   <div class="run-summary" v-if="run.resultSummary">{{ run.resultSummary.slice(0, 60) }}...</div>
-                  <div class="run-time">{{ formatTime(run.startedAt) }}</div>
+                  <div class="run-meta">
+                    <span class="meta-time">{{ formatTime(run.startedAt) }}</span>
+                    <span v-if="run.finishedAt" class="meta-duration">
+                      {{ getRunDuration(run.startedAt!, run.finishedAt!) }}
+                    </span>
+                  </div>
                 </div>
-                <div v-if="workContextRuns.length === 0" class="empty-list">
-                  暂无执行记录
+                <div v-if="filteredRuns.length === 0" class="empty-list">
+                  {{ workContextRuns.length === 0 ? '暂无执行记录' : '没有符合筛选条件的记录' }}
                 </div>
               </div>
             </div>
+
+            <!-- 右侧：Run 详情 -->
             <div class="run-detail" v-if="selectedRun">
               <div class="panel-header">
                 <span class="panel-title">执行详情</span>
-              </div>
-              <div class="run-steps" v-if="selectedRunSteps.length > 0">
-                <div
-                  v-for="step in selectedRunSteps"
-                  :key="step.id"
-                  class="run-step-item"
-                  :class="step.stepType"
-                >
-                  <div class="step-header">
-                    <span class="step-index">#{{ step.stepIndex }}</span>
-                    <span class="step-type">{{ step.stepType }}</span>
-                    <span class="step-time">{{ formatTime(step.createdAt) }}</span>
-                  </div>
-                  <div class="step-content" v-if="step.content">{{ step.content }}</div>
-                  <div class="step-tool" v-if="step.toolName">
-                    <span class="tool-name">{{ step.toolName }}</span>
-                    <span class="tool-status" :class="step.toolStatus">{{ step.toolStatus }}</span>
-                  </div>
+                <div class="panel-actions">
+                  <button class="ghost-mini" @click="copyRunId(selectedRun.runUid)">
+                    复制 ID
+                  </button>
                 </div>
               </div>
-              <div class="run-info" v-else>
-                <div class="info-row">
-                  <span class="info-label">Agent:</span>
-                  <span class="info-value">{{ selectedRun.agentName || selectedRun.agentId }}</span>
+
+              <div class="run-detail-content">
+                <!-- Run 基本信息 -->
+                <div class="detail-section">
+                  <div class="detail-header">
+                    <div class="run-status-indicator" :class="selectedRun.status">
+                      <span class="status-icon">{{ getRunStatusIcon(selectedRun.status) }}</span>
+                      <span class="status-text">{{ getRunStatusLabel(selectedRun.status) }}</span>
+                    </div>
+                    <div class="run-id-display">
+                      <code>{{ selectedRun.runUid }}</code>
+                    </div>
+                  </div>
+
+                  <div class="detail-grid">
+                    <div class="detail-item">
+                      <span class="detail-label">执行 Agent</span>
+                      <span class="detail-value">{{ selectedRun.agentName || selectedRun.agentId }}</span>
+                    </div>
+                    <div class="detail-item">
+                      <span class="detail-label">执行模式</span>
+                      <span class="detail-value">{{ selectedRun.mode || 'standalone' }}</span>
+                    </div>
+                    <div class="detail-item">
+                      <span class="detail-label">开始时间</span>
+                      <span class="detail-value">{{ formatTime(selectedRun.startedAt) }}</span>
+                    </div>
+                    <div class="detail-item">
+                      <span class="detail-label">结束时间</span>
+                      <span class="detail-value">{{ formatTime(selectedRun.finishedAt) || '运行中...' }}</span>
+                    </div>
+                    <div class="detail-item" v-if="selectedRun.startedAt && selectedRun.finishedAt">
+                      <span class="detail-label">执行时长</span>
+                      <span class="detail-value">{{ getRunDuration(selectedRun.startedAt, selectedRun.finishedAt) }}</span>
+                    </div>
+                  </div>
                 </div>
-                <div class="info-row">
-                  <span class="info-label">状态:</span>
-                  <span class="info-value" :class="selectedRun.status">{{ selectedRun.status }}</span>
+
+                <!-- 用户消息 -->
+                <div class="detail-section" v-if="selectedRun.userMessage">
+                  <div class="section-header">
+                    <span class="section-title">用户输入</span>
+                  </div>
+                  <div class="message-box user">
+                    {{ selectedRun.userMessage }}
+                  </div>
                 </div>
-                <div class="info-row">
-                  <span class="info-label">消息:</span>
-                  <span class="info-value">{{ selectedRun.userMessage }}</span>
+
+                <!-- 执行结果 -->
+                <div class="detail-section" v-if="selectedRun.resultSummary">
+                  <div class="section-header">
+                    <span class="section-title">执行结果</span>
+                  </div>
+                  <div class="message-box result">
+                    {{ selectedRun.resultSummary }}
+                  </div>
                 </div>
-                <div class="info-row" v-if="selectedRun.resultSummary">
-                  <span class="info-label">结果:</span>
-                  <span class="info-value">{{ selectedRun.resultSummary }}</span>
+
+                <!-- 错误信息 -->
+                <div class="detail-section" v-if="selectedRun.errorMessage">
+                  <div class="section-header">
+                    <span class="section-title">错误信息</span>
+                  </div>
+                  <div class="message-box error">
+                    {{ selectedRun.errorMessage }}
+                  </div>
+                </div>
+
+                <!-- 执行步骤时间线 -->
+                <div class="detail-section" v-if="selectedRunSteps.length > 0">
+                  <div class="section-header">
+                    <span class="section-title">执行步骤 ({{ selectedRunSteps.length }})</span>
+                  </div>
+                  <div class="steps-timeline">
+                    <div
+                      v-for="(step, index) in selectedRunSteps"
+                      :key="step.id"
+                      class="timeline-item"
+                      :class="[step.stepType, { last: index === selectedRunSteps.length - 1 }]"
+                    >
+                      <div class="timeline-marker" :class="step.stepType">
+                        <span class="marker-icon">{{ getStepTypeIcon(step.stepType) }}</span>
+                      </div>
+                      <div class="timeline-content">
+                        <div class="step-header-row">
+                          <span class="step-type-label">{{ getStepTypeLabel(step.stepType) }}</span>
+                          <span class="step-time">{{ formatTime(step.createdAt) }}</span>
+                        </div>
+                        <div class="step-body" v-if="step.content">
+                          <div class="step-content-text">{{ step.content }}</div>
+                        </div>
+                        <div class="step-tool-info" v-if="step.toolName">
+                          <span class="tool-label">工具:</span>
+                          <span class="tool-name">{{ step.toolName }}</span>
+                          <span class="tool-status-badge" :class="step.toolStatus">{{ step.toolStatus }}</span>
+                        </div>
+                        <!-- 工具输入输出 -->
+                        <div class="step-io" v-if="step.inputJson || step.outputJson">
+                          <div class="io-section" v-if="step.inputJson && step.inputJson !== '{}'">
+                            <div class="io-label">输入</div>
+                            <pre class="io-content">{{ formatStepIo(step.inputJson) }}</pre>
+                          </div>
+                          <div class="io-section" v-if="step.outputJson && step.outputJson !== '{}'">
+                            <div class="io-label">输出</div>
+                            <pre class="io-content">{{ formatStepIo(step.outputJson) }}</pre>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 无步骤提示 -->
+                <div class="detail-section empty-steps" v-else>
+                  <div class="empty-state">
+                    <div class="empty-icon">📋</div>
+                    <div class="empty-text">暂无执行步骤记录</div>
+                  </div>
                 </div>
               </div>
             </div>
             <div class="run-detail empty" v-else>
-              <div class="empty-state">选择一个执行记录查看详情</div>
+              <div class="empty-state">
+                <div class="empty-icon">▶️</div>
+                <div class="empty-text">选择一个执行记录查看详情</div>
+              </div>
             </div>
           </div>
         </div>
@@ -672,7 +1025,20 @@ interface RunStep {
   input?: unknown;
   output?: unknown;
   createdAt: string;
+  agentName?: string | null;
+}
+
+interface MessageItem {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  time?: string;
+  runId?: string;
   agentName?: string;
+  agentAvatar?: string;
+  steps?: RunStep[];
+  isStreaming?: boolean;
+  run?: RunInfo;
 }
 
 interface RunInfo {
@@ -700,7 +1066,7 @@ interface SessionItem {
   description?: string;
   updatedAt: string;
   agentIds: string[];
-  messages: ChatMessage[];
+  messages: MessageItem[];
 }
 
 interface ProjectSpace {
@@ -762,100 +1128,6 @@ const personalSessions = ref<SessionItem[]>([]);
 const isLoadingProjects = ref(false);
 const isLoadingSessions = ref(false);
 
-const executionSummary =
-  "正在协调文档写作智能体与研究智能体，准备补足结构、案例与表达细节。";
-
-const executionSteps = [
-  {
-    id: "step-1",
-    title: "生成初始大纲",
-    status: "已完成",
-    detail: "完成章节结构与写作方向梳理，形成可继续扩写的主干。",
-  },
-  {
-    id: "step-2",
-    title: "补充案例素材",
-    status: "进行中",
-    detail: "正在为 3.2 节补充更贴合团队协作场景的案例与建议。",
-  },
-  {
-    id: "step-3",
-    title: "优化语句表达",
-    status: "排队中",
-    detail: "将对生成内容做一轮语言润色与逻辑压缩，提升可读性。",
-  },
-];
-
-const workspaceTemplateMap: Record<
-  WorkspaceType,
-  {
-    name: string;
-    short: string;
-    avatar: string;
-    subtitle: string;
-    description: string;
-    panelIntro: string;
-    features: { title: string; description: string }[];
-  }
-> = {
-  writing: {
-    name: "文档写作工作台",
-    short: "写",
-    avatar: "linear-gradient(135deg, #7c3aed, #5b6dff)",
-    subtitle: "面向长文撰写、章节编辑与结构优化",
-    description: "这里会承载文档编辑器、大纲、建议批注、版本记录等写作工作能力。",
-    panelIntro: "当前是写作工作台宿主壳子，后续会接入真正的文档编辑与版本对比视图。",
-    features: [
-      { title: "正文编辑", description: "用于承载主文档内容、段落编排与实时修改。" },
-      { title: "结构大纲", description: "显示标题层级、章节导航与整体结构调整入口。" },
-      { title: "AI 批注", description: "用于展示润色建议、改写提示与高亮反馈。" },
-      { title: "版本对比", description: "追踪不同写作阶段的内容变化与修订记录。" },
-    ],
-  },
-  browser: {
-    name: "浏览器工作台",
-    short: "浏",
-    avatar: "linear-gradient(135deg, #0ea5e9, #2563eb)",
-    subtitle: "面向网页浏览、页面操作与采集整理",
-    description: "这里会承载浏览器视图、网页任务状态、页面抓取结果与自动化步骤。",
-    panelIntro: "当前是浏览器工作台宿主壳子，后续会接入真实网页视图与浏览动作记录。",
-    features: [
-      { title: "网页视图", description: "显示当前访问页面与页面上下文。" },
-      { title: "操作面板", description: "承载点击、输入、采集等浏览动作。" },
-      { title: "结果抽取", description: "整理网页结构化信息与抓取内容。" },
-      { title: "任务回放", description: "回看自动操作路径与关键步骤。" },
-    ],
-  },
-  research: {
-    name: "研究工作台",
-    short: "研",
-    avatar: "linear-gradient(135deg, #14b8a6, #10b981)",
-    subtitle: "面向资料研读、摘要整理与知识沉淀",
-    description: "这里会承载资料列表、摘录、高亮、知识图谱与研究结论产出。",
-    panelIntro: "当前是研究工作台宿主壳子，后续会接入文档阅读器与引用整理能力。",
-    features: [
-      { title: "资料列表", description: "管理来源文档、网页摘录与引用材料。" },
-      { title: "重点摘录", description: "沉淀高价值片段，支持摘要与标签归类。" },
-      { title: "知识图谱", description: "组织概念关系与主题脉络。" },
-      { title: "研究结论", description: "输出结构化结论与可复用见解。" },
-    ],
-  },
-  video: {
-    name: "视频剪辑工作台",
-    short: "剪",
-    avatar: "linear-gradient(135deg, #f97316, #ef4444)",
-    subtitle: "面向素材整理、剪辑时间线与镜头编排",
-    description: "这里会承载素材管理、时间线、剪辑建议与导出设置。",
-    panelIntro: "当前是视频工作台宿主壳子，后续会接入时间线与镜头管理视图。",
-    features: [
-      { title: "素材区", description: "整理镜头、音频、字幕与附件素材。" },
-      { title: "时间线", description: "承载剪辑片段排序、节奏编辑与标记。" },
-      { title: "建议面板", description: "展示节奏优化、转场与叙事建议。" },
-      { title: "导出配置", description: "配置分辨率、比例与输出版本。" },
-    ],
-  },
-};
-
 const agentList = ref<SidebarAgent[]>(fallbackAgents);
 const selectedProjectId = ref<string>(projectSpaces.value[0]?.id || "");
 const selectedSessionId = ref<string>(projectSpaces.value[0]?.sessions[0]?.id || "");
@@ -892,6 +1164,27 @@ const selectedArtifact = ref<AgentArtifactRecord | null>(null);
 const selectedRun = ref<AgentRunRecord | null>(null);
 const selectedRunSteps = ref<AgentRunStepRecord[]>([]);
 
+// 产物筛选
+const artifactRoleFilter = ref<string>('');
+
+// 筛选后的产物列表
+const filteredArtifacts = computed(() => {
+  if (!artifactRoleFilter.value) return workContextArtifacts.value;
+  return workContextArtifacts.value.filter(a => a.artifactRole === artifactRoleFilter.value);
+});
+
+// Run 状态筛选
+const runStatusFilter = ref<string>('');
+
+// 筛选后的 Run 列表
+const filteredRuns = computed(() => {
+  if (!runStatusFilter.value) return workContextRuns.value;
+  return workContextRuns.value.filter(r => r.status === runStatusFilter.value);
+});
+
+// 文本视图模式
+const textViewMode = ref<'raw' | 'rendered'>('raw');
+
 const selectedProject = computed(() =>
   projectSpaces.value.find((project) => project.id === selectedProjectId.value),
 );
@@ -917,9 +1210,7 @@ const primaryAgent = computed(() => {
   return currentSessionAgents.value[0] || agentList.value[0];
 });
 
-const workspaceTemplate = computed(
-  () => workspaceTemplateMap[primaryAgent.value.workspaceType] || workspaceTemplateMap.writing,
-);
+
 
 function selectProject(projectId: string) {
   selectedProjectId.value = projectId;
@@ -961,35 +1252,30 @@ async function selectSession(projectId: string | undefined, sessionId: string) {
   await loadAndSelectSessionWorkContext(sessionId);
 }
 
-// 加载并选中会话的 WorkContext
+// 加载并选中会话的 WorkContext（使用聚合接口）
 async function loadAndSelectSessionWorkContext(sessionId: string) {
   try {
-    console.log(`[loadAndSelectSessionWorkContext] Loading work contexts for session: ${sessionId}`);
-    const workContexts = await agentPlatformApi.listWorkContexts({ sessionId, limit: 10 });
-    console.log(`[loadAndSelectSessionWorkContext] Loaded ${workContexts.length} work contexts`);
+    console.log(`[loadAndSelectSessionWorkContext] Loading workbench for session: ${sessionId}`);
+    const workbench = await agentPlatformApi.getSessionWorkbench(sessionId);
+    console.log(`[loadAndSelectSessionWorkContext] Loaded workbench:`, workbench);
 
-    sessionWorkContexts.value = workContexts;
+    sessionWorkContexts.value = workbench.workContexts;
+    sessionRuns.value = workbench.runs;
 
-    if (workContexts.length > 0) {
-      // 选择最近更新的 workContext
-      const sorted = [...workContexts].sort((a, b) => {
-        const timeA = new Date(a.updatedAt || a.createdAt).getTime();
-        const timeB = new Date(b.updatedAt || b.createdAt).getTime();
-        return timeB - timeA;
-      });
-      selectedWorkContext.value = sorted[0];
-      console.log(`[loadAndSelectSessionWorkContext] Selected work context: ${sorted[0].workContextUid}`);
+    if (workbench.selectedWorkContext) {
+      selectedWorkContext.value = workbench.selectedWorkContext;
+      workContextArtifacts.value = workbench.artifacts;
+      console.log(`[loadAndSelectSessionWorkContext] Selected work context: ${workbench.selectedWorkContext.workContextUid}`);
 
-      // 加载该 workContext 的 artifacts 和 runs
-      await reloadArtifactsForSelectedWorkContext();
-      await loadWorkContextRuns(sorted[0].workContextUid);
+      // 加载该 workContext 的 runs
+      await loadWorkContextRuns(workbench.selectedWorkContext.workContextUid);
     } else {
       selectedWorkContext.value = null;
       workContextArtifacts.value = [];
       workContextRuns.value = [];
     }
   } catch (error) {
-    console.error('[loadAndSelectSessionWorkContext] Failed to load work contexts:', error);
+    console.error('[loadAndSelectSessionWorkContext] Failed to load workbench:', error);
   }
 }
 
@@ -1023,8 +1309,8 @@ async function loadSessionMessages(session: SessionItem) {
             content: s.content || undefined,
             toolName: s.toolName || undefined,
             toolStatus: s.toolStatus || undefined,
-            input: s.inputJson,
-            output: s.outputJson,
+            input: s.input,
+            output: s.output,
             createdAt: s.createdAt,
             agentName: s.agentName,
           }));
@@ -1038,6 +1324,9 @@ async function loadSessionMessages(session: SessionItem) {
           role: "assistant",
           content: run.resultSummary,
           time: formatRunTime(run.updatedAt || run.createdAt),
+          runId: run.runUid,
+          agentName: run.agentName || primaryAgent.value?.name || 'AI Assistant',
+          steps: steps,
           run: {
             runId: run.runUid,
             agentId: String(run.agentId),
@@ -1131,7 +1420,7 @@ async function sendMessage() {
       };
 
       // 订阅 SSE 实时推送
-      subscribeToRunSteps(response.runId, assistantMessage.run, assistantMessage);
+      subscribeToRunSteps(response.runId, assistantMessage.run);
     }
 
     currentSession.value.messages.push(assistantMessage);
@@ -1206,16 +1495,6 @@ function updateMessageContentByRunId(runId: string, content: string) {
 // 切换 Run 步骤展开/收起
 function toggleRunExpanded(runInfo: RunInfo) {
   runInfo.isExpanded = !runInfo.isExpanded;
-}
-
-// 复制 Run ID
-async function copyRunId(runId: string) {
-  try {
-    await navigator.clipboard.writeText(runId);
-    ElMessage.success('Run ID 已复制');
-  } catch {
-    ElMessage.error('复制失败');
-  }
 }
 
 // 选择 Run 并加载 Steps
@@ -1337,7 +1616,8 @@ async function reselectCurrentWorkContext(sessionId: string, runId: string) {
     const workContexts = await agentPlatformApi.listWorkContexts({ sessionId, limit: 50 });
     
     // 查找 current_run_id 匹配的 workContext
-    const matchedByRun = workContexts.find(wc => wc.currentRunId === runId);
+    // currentRunId 是 number，runId 是 string，需要转换后比较
+    const matchedByRun = workContexts.find(wc => wc.currentRunId?.toString() === runId);
     if (matchedByRun) {
       console.log(`[reselectCurrentWorkContext] Found work context by runId: ${matchedByRun.workContextUid}`);
       selectedWorkContext.value = matchedByRun;
@@ -1361,19 +1641,26 @@ async function reselectCurrentWorkContext(sessionId: string, runId: string) {
 }
 
 // 刷新选中 workContext 的 artifacts
+// 刷新选中 WorkContext 的数据（使用聚合接口）
 async function reloadArtifactsForSelectedWorkContext() {
   if (!selectedWorkContext.value) {
     console.warn('[reloadArtifactsForSelectedWorkContext] No selected work context');
     return;
   }
-  
+
   try {
     const workContextUid = selectedWorkContext.value.workContextUid;
-    const artifacts = await agentPlatformApi.listArtifacts(workContextUid);
-    console.log(`[reloadArtifactsForSelectedWorkContext] Loaded ${artifacts.length} artifacts`);
-    workContextArtifacts.value = artifacts;
+    const workbench = await agentPlatformApi.getWorkContextWorkbench(workContextUid);
+    console.log(`[reloadArtifactsForSelectedWorkContext] Loaded workbench:`, workbench);
+
+    // 更新 WorkContext（包含展开的元数据字段）
+    selectedWorkContext.value = workbench.workContext;
+    // 更新产物列表
+    workContextArtifacts.value = workbench.artifacts;
+    // 更新 runs 列表
+    workContextRuns.value = workbench.runs;
   } catch (error) {
-    console.error('[reloadArtifactsForSelectedWorkContext] Failed to load artifacts:', error);
+    console.error('[reloadArtifactsForSelectedWorkContext] Failed to load workbench:', error);
   }
 }
 
@@ -1385,6 +1672,363 @@ function getAgentNameById(agentId: string): string {
   }
   const agent = agentList.value.find(a => a.id === agentId);
   return agent?.name || agentId;
+}
+
+// 获取 Artifact 类型标签
+function getArtifactTypeLabel(type: string): string {
+  const labelMap: Record<string, string> = {
+    text: '文本',
+    structured_data: '结构化数据',
+    page: '页面',
+    image: '图片',
+    link: '链接',
+    file: '文件',
+    collection: '集合',
+  };
+  return labelMap[type] || type;
+}
+
+// 获取 Artifact 角色标签
+function getArtifactRoleLabel(role: string): string {
+  const labelMap: Record<string, string> = {
+    input: '输入',
+    reference: '参考',
+    intermediate: '中间产物',
+    draft: '草稿',
+    final: '终稿',
+    output: '输出',
+  };
+  return labelMap[role] || role;
+}
+
+// 格式化 JSON 显示
+function formatJson(jsonStr: string): string {
+  try {
+    const obj = JSON.parse(jsonStr);
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return jsonStr;
+  }
+}
+
+// 复制产物内容
+async function copyArtifactContent(artifact: AgentArtifactRecord) {
+  try {
+    const content = artifact.contentText || artifact.contentJson || '';
+    await navigator.clipboard.writeText(content);
+    ElMessage.success('内容已复制到剪贴板');
+  } catch (error) {
+    console.error('Failed to copy:', error);
+    ElMessage.error('复制失败');
+  }
+}
+
+// 获取 Run 状态标签
+function getRunStatusLabel(status: string): string {
+  const labelMap: Record<string, string> = {
+    success: '成功',
+    failed: '失败',
+    running: '运行中',
+    queued: '排队中',
+    cancelled: '已取消',
+  };
+  return labelMap[status] || status;
+}
+
+// 获取 Run 状态图标
+function getRunStatusIcon(status: string): string {
+  const iconMap: Record<string, string> = {
+    success: '✓',
+    failed: '✗',
+    running: '▶',
+    queued: '⏳',
+    cancelled: '⏹',
+  };
+  return iconMap[status] || '•';
+}
+
+// 获取执行时长
+function getRunDuration(startedAt: string, finishedAt: string): string {
+  const start = new Date(startedAt).getTime();
+  const end = new Date(finishedAt).getTime();
+  const duration = end - start;
+
+  if (duration < 1000) {
+    return `${duration}ms`;
+  } else if (duration < 60000) {
+    return `${Math.round(duration / 1000)}s`;
+  } else {
+    const minutes = Math.floor(duration / 60000);
+    const seconds = Math.round((duration % 60000) / 1000);
+    return `${minutes}m ${seconds}s`;
+  }
+}
+
+// 复制 Run ID
+async function copyRunId(runId: string) {
+  try {
+    await navigator.clipboard.writeText(runId);
+    ElMessage.success('Run ID 已复制');
+  } catch (error) {
+    console.error('Failed to copy:', error);
+    ElMessage.error('复制失败');
+  }
+}
+
+// 获取步骤类型标签
+function getStepTypeLabel(stepType: string): string {
+  const labelMap: Record<string, string> = {
+    thought: '思考',
+    tool_call: '工具调用',
+    tool_result: '工具结果',
+    message: '消息',
+    system: '系统',
+    error: '错误',
+  };
+  return labelMap[stepType] || stepType;
+}
+
+// 获取步骤类型图标
+function getStepTypeIcon(stepType: string): string {
+  const iconMap: Record<string, string> = {
+    thought: '💭',
+    tool_call: '🔧',
+    tool_result: '📤',
+    message: '💬',
+    system: '⚙️',
+    error: '⚠️',
+  };
+  return iconMap[stepType] || '•';
+}
+
+// 格式化步骤输入输出
+function formatStepIo(io: string): string {
+  try {
+    const parsed = JSON.parse(io);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return io;
+  }
+}
+
+// 获取产物内容标题
+function getArtifactContentTitle(type: string): string {
+  const titleMap: Record<string, string> = {
+    text: '文本内容',
+    structured_data: '结构化数据',
+    page: '页面预览',
+    image: '图片预览',
+    link: '链接信息',
+    file: '文件信息',
+    collection: '集合内容',
+  };
+  return titleMap[type] || '内容预览';
+}
+
+// 获取产物内容长度
+function getArtifactContentLength(artifact: AgentArtifactRecord): number {
+  return (artifact.contentText?.length || 0) + (artifact.contentJson?.length || 0);
+}
+
+// 检查是否是 Markdown
+function isMarkdown(text: string): boolean {
+  if (!text) return false;
+  const markdownPatterns = [
+    /^#{1,6}\s/m,           // 标题
+    /\*\*|__/,              // 粗体
+    /\*|_/,                 // 斜体
+    /`{1,3}/,               // 代码
+    /\[.*?\]\(.*?\)/,       // 链接
+    /^\s*[-*+]\s/m,         // 列表
+    /^\s*\d+\.\s/m,         // 有序列表
+    /^```/m,                // 代码块
+    /^\|.*\|.*\|/m,         // 表格
+    /^>/m,                  // 引用
+  ];
+  return markdownPatterns.some(pattern => pattern.test(text));
+}
+
+// 简单的 Markdown 渲染（避免引入大型库）
+function renderMarkdown(text: string): string {
+  if (!text) return '';
+  return text
+    // 代码块
+    .replace(/```(\w+)?\n([\s\S]*?)```/g, '<pre class="code-block"><code>$2</code></pre>')
+    // 行内代码
+    .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+    // 标题
+    .replace(/^######\s(.+)$/gm, '<h6>$1</h6>')
+    .replace(/^#####\s(.+)$/gm, '<h5>$1</h5>')
+    .replace(/^####\s(.+)$/gm, '<h4>$1</h4>')
+    .replace(/^###\s(.+)$/gm, '<h3>$1</h3>')
+    .replace(/^##\s(.+)$/gm, '<h2>$1</h2>')
+    .replace(/^#\s(.+)$/gm, '<h1>$1</h1>')
+    // 粗体
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+    // 斜体
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/_([^_]+)_/g, '<em>$1</em>')
+    // 链接
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="md-link">$1</a>')
+    // 无序列表
+    .replace(/^\s*[-*+]\s(.+)$/gm, '<li>$1</li>')
+    // 有序列表
+    .replace(/^\s*\d+\.\s(.+)$/gm, '<li>$1</li>')
+    // 引用
+    .replace(/^>\s?(.+)$/gm, '<blockquote>$1</blockquote>')
+    // 段落
+    .replace(/\n\n/g, '</p><p>')
+    // 换行
+    .replace(/\n/g, '<br>');
+}
+
+// 解析结构化数据
+function parseStructuredData(artifact: AgentArtifactRecord) {
+  try {
+    const data = JSON.parse(artifact.contentJson || '{}');
+    
+    // 检查是否是表格数据（数组且元素是对象）
+    if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'object') {
+      const columns = Object.keys(data[0]);
+      return {
+        isTable: true,
+        columns,
+        rows: data.slice(0, 100), // 限制显示100行
+      };
+    }
+    
+    // 检查是否是对象数组格式
+    if (data.data && Array.isArray(data.data)) {
+      const columns = Object.keys(data.data[0] || {});
+      return {
+        isTable: true,
+        columns,
+        rows: data.data.slice(0, 100),
+      };
+    }
+    
+    return { isTable: false, data };
+  } catch {
+    return { isTable: false, data: null };
+  }
+}
+
+// 获取页面元数据
+function getPageMeta(artifact: AgentArtifactRecord) {
+  try {
+    const metadata = JSON.parse(artifact.metadataJson || '{}');
+    return {
+      url: metadata.url || artifact.uri,
+      title: metadata.pageTitle || metadata.title || artifact.title,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// 检查是否是 Base64 图片
+function isBase64Image(text: string): boolean {
+  if (!text) return false;
+  return /^data:image\/[a-z]+;base64,/.test(text);
+}
+
+// 图片加载错误处理
+function onImageError(event: Event) {
+  const img = event.target as HTMLImageElement;
+  img.style.display = 'none';
+  // 可以在这里显示占位符
+}
+
+// 获取图片元数据
+function getImageMeta(artifact: AgentArtifactRecord) {
+  try {
+    const metadata = JSON.parse(artifact.metadataJson || '{}');
+    return {
+      width: metadata.width,
+      height: metadata.height,
+      format: metadata.format || artifact.mimeType?.replace('image/', ''),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// 获取链接元数据
+function getLinkMeta(artifact: AgentArtifactRecord) {
+  try {
+    const metadata = JSON.parse(artifact.metadataJson || '{}');
+    return {
+      siteName: metadata.siteName,
+      description: metadata.description,
+      favicon: metadata.favicon,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// 获取文件图标
+function getFileIcon(mimeType: string | null): string {
+  if (!mimeType) return '📄';
+  if (mimeType.includes('pdf')) return '📕';
+  if (mimeType.includes('word') || mimeType.includes('document')) return '📝';
+  if (mimeType.includes('excel') || mimeType.includes('sheet')) return '📊';
+  if (mimeType.includes('powerpoint') || mimeType.includes('presentation')) return '📽️';
+  if (mimeType.includes('zip') || mimeType.includes('compressed')) return '📦';
+  if (mimeType.includes('code') || mimeType.includes('javascript') || mimeType.includes('json')) return '💻';
+  if (mimeType.includes('text')) return '📃';
+  return '📄';
+}
+
+// 获取文件大小
+function getFileSize(artifact: AgentArtifactRecord): string {
+  try {
+    const metadata = JSON.parse(artifact.metadataJson || '{}');
+    const bytes = metadata.size || metadata.fileSize;
+    if (!bytes) return '';
+    
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  } catch {
+    return '';
+  }
+}
+
+// 检查是否是文本文件
+function isTextFile(mimeType: string | null): boolean {
+  if (!mimeType) return true;
+  const textTypes = ['text/', 'application/json', 'application/javascript', 'application/xml'];
+  return textTypes.some(type => mimeType.includes(type));
+}
+
+// 获取集合项目
+function getCollectionItems(artifact: AgentArtifactRecord): Array<{ type: string; title: string }> {
+  try {
+    const data = JSON.parse(artifact.contentJson || '[]');
+    if (Array.isArray(data)) {
+      return data.map((item: any) => ({
+        type: item.type || 'item',
+        title: item.title || item.name || String(item),
+      }));
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+// HTML 净化（简单的 XSS 防护）
+function sanitizeHtml(html: string): string {
+  if (!html) return '';
+  const div = document.createElement('div');
+  div.textContent = html;
+  return div.innerHTML
+    // 允许安全的标签
+    .replace(/&lt;(b|i|em|strong|code|pre|br|p|ul|ol|li|h[1-6]|blockquote)&gt;/g, '<$1>')
+    .replace(/&lt;\/(b|i|em|strong|code|pre|p|ul|ol|li|h[1-6]|blockquote)&gt;/g, '</$1>');
 }
 
 // 根据 Agent 名称获取短名称
@@ -1566,15 +2210,6 @@ function mapProjectRecordToProject(pr: ProjectRecord): ProjectSpace {
   };
 }
 
-function getProjectIcon(source: string): string {
-  const iconMap: Record<string, string> = {
-    project: "📁",
-    session: "💬",
-    default: "📄",
-  };
-  return iconMap[source] || iconMap.default;
-}
-
 async function loadPersonalSessions() {
   isLoadingSessions.value = true;
   try {
@@ -1598,25 +2233,6 @@ function mapSessionRecordToSessionItem(session: import("../api/agentPlatform").S
     updatedAt: formatRunTime(session.createdAt),
     agentIds,
     messages: [], // 会话初始时没有消息，需要通过其他方式加载
-  };
-}
-
-function mapRunToSession(run: AgentRunRecord): SessionItem {
-  const agentIds = parseAgentIds(run.snapshotJson);
-  return {
-    id: run.runUid,
-    title: run.userMessage.slice(0, 30) + (run.userMessage.length > 30 ? "..." : ""),
-    description: run.resultSummary || undefined,
-    updatedAt: formatRunTime(run.createdAt),
-    agentIds,
-    messages: [
-      {
-        id: `msg-${run.runUid}`,
-        role: "user",
-        content: run.userMessage,
-        time: formatRunTime(run.createdAt),
-      },
-    ],
   };
 }
 
@@ -3099,6 +3715,11 @@ onMounted(async () => {
   word-break: break-word;
 }
 
+.preview-content.json {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 12px;
+}
+
 .empty-list {
   padding: 24px;
   text-align: center;
@@ -3107,8 +3728,657 @@ onMounted(async () => {
 }
 
 .empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   color: #5a6a85;
   font-size: 14px;
+}
+
+.empty-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+  opacity: 0.5;
+}
+
+.empty-text {
+  font-size: 14px;
+}
+
+/* 产物筛选器 */
+.panel-filters {
+  margin-top: 8px;
+}
+
+.filter-select {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(114, 128, 150, 0.3);
+  background: #141d2e;
+  color: #c8d4e8;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.filter-select:focus {
+  outline: none;
+  border-color: #5b6dff;
+}
+
+/* 产物列表项改进 */
+.artifact-header {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.artifact-type-badge,
+.artifact-role-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.artifact-type-badge {
+  background: rgba(91, 109, 255, 0.15);
+  color: #5b6dff;
+}
+
+.artifact-role-badge {
+  background: rgba(124, 58, 237, 0.15);
+  color: #a78bfa;
+}
+
+.artifact-role-badge.input {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.artifact-role-badge.output {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.artifact-role-badge.final {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.meta-time {
+  font-size: 11px;
+  color: #5a6a85;
+}
+
+/* 产物详情改进 */
+.panel-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.detail-section {
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid rgba(114, 128, 150, 0.14);
+}
+
+.detail-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.detail-header {
+  margin-bottom: 16px;
+}
+
+.detail-header h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #eef4ff;
+  margin: 0 0 10px 0;
+}
+
+.detail-badges {
+  display: flex;
+  gap: 8px;
+}
+
+.badge {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.badge.type {
+  background: rgba(91, 109, 255, 0.15);
+  color: #5b6dff;
+}
+
+.badge.role {
+  background: rgba(124, 58, 237, 0.15);
+  color: #a78bfa;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-item .detail-label {
+  font-size: 11px;
+  color: #8ea0bd;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.detail-item .detail-value {
+  font-size: 13px;
+  color: #c8d4e8;
+}
+
+.detail-value.ready {
+  color: #22c55e;
+}
+
+.detail-value.processing {
+  color: #f59e0b;
+}
+
+.detail-value.error {
+  color: #ef4444;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8ea0bd;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.content-length {
+  font-size: 11px;
+  color: #5a6a85;
+}
+
+.external-link {
+  display: block;
+  padding: 10px 12px;
+  background: rgba(91, 109, 255, 0.1);
+  border-radius: 8px;
+  color: #5b6dff;
+  font-size: 13px;
+  text-decoration: none;
+  word-break: break-all;
+  transition: background 0.2s;
+}
+
+.external-link:hover {
+  background: rgba(91, 109, 255, 0.2);
+}
+
+/* 产物类型化展示样式 */
+.artifact-content-display {
+  min-height: 200px;
+}
+
+.content-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.action-btn {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(114, 128, 150, 0.3);
+  background: #141d2e;
+  color: #8ea0bd;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.action-btn:hover,
+.action-btn.active {
+  background: rgba(91, 109, 255, 0.2);
+  border-color: #5b6dff;
+  color: #5b6dff;
+}
+
+/* Markdown 预览 */
+.markdown-preview {
+  background: #141d2e;
+  border-radius: 8px;
+  padding: 16px;
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.markdown-body {
+  color: #c8d4e8;
+  line-height: 1.8;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  color: #eef4ff;
+  margin: 16px 0 12px;
+  font-weight: 600;
+}
+
+.markdown-body h1 { font-size: 20px; }
+.markdown-body h2 { font-size: 18px; }
+.markdown-body h3 { font-size: 16px; }
+.markdown-body h4 { font-size: 14px; }
+.markdown-body h5 { font-size: 13px; }
+.markdown-body h6 { font-size: 12px; }
+
+.markdown-body p {
+  margin: 12px 0;
+}
+
+.markdown-body strong {
+  color: #eef4ff;
+  font-weight: 600;
+}
+
+.markdown-body code {
+  background: rgba(91, 109, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+  color: #a78bfa;
+}
+
+.markdown-body pre {
+  background: #0d1420;
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.markdown-body pre code {
+  background: none;
+  padding: 0;
+  color: #c8d4e8;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid #5b6dff;
+  padding-left: 12px;
+  margin: 12px 0;
+  color: #8ea0bd;
+}
+
+.markdown-body a {
+  color: #5b6dff;
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 12px 0;
+  padding-left: 24px;
+}
+
+.markdown-body li {
+  margin: 4px 0;
+}
+
+/* 结构化数据表格 */
+.structured-data-view {
+  background: #141d2e;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.data-table-container {
+  max-height: 400px;
+  overflow: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(114, 128, 150, 0.2);
+}
+
+.data-table th {
+  background: rgba(0, 0, 0, 0.2);
+  font-weight: 600;
+  color: #eef4ff;
+  position: sticky;
+  top: 0;
+}
+
+.data-table td {
+  color: #c8d4e8;
+}
+
+.data-table tr:hover td {
+  background: rgba(91, 109, 255, 0.05);
+}
+
+/* 页面预览 */
+.page-preview {
+  background: #141d2e;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.page-meta {
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid rgba(114, 128, 150, 0.2);
+}
+
+.page-url {
+  font-size: 11px;
+  color: #5b6dff;
+  word-break: break-all;
+  margin-bottom: 4px;
+}
+
+.page-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #eef4ff;
+}
+
+.page-iframe {
+  width: 100%;
+  height: 400px;
+  border: none;
+  background: white;
+}
+
+.page-content {
+  padding: 16px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.html-preview {
+  color: #c8d4e8;
+  line-height: 1.6;
+}
+
+.empty-content {
+  padding: 40px;
+  text-align: center;
+  color: #5a6a85;
+}
+
+/* 图片预览 */
+.image-preview {
+  background: #141d2e;
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+
+.preview-image {
+  max-width: 100%;
+  max-height: 400px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.base64-image-container {
+  display: inline-block;
+}
+
+.image-placeholder {
+  padding: 40px;
+}
+
+.placeholder-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.placeholder-text {
+  font-size: 14px;
+  color: #8ea0bd;
+  margin-bottom: 8px;
+}
+
+.image-meta {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  font-size: 12px;
+  color: #5a6a85;
+}
+
+/* 链接预览 */
+.link-preview {
+  background: #141d2e;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.link-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  background: rgba(91, 109, 255, 0.1);
+  border-radius: 8px;
+  text-decoration: none;
+  transition: background 0.2s;
+}
+
+.link-card:hover {
+  background: rgba(91, 109, 255, 0.2);
+}
+
+.link-icon {
+  font-size: 24px;
+}
+
+.link-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.link-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #eef4ff;
+  margin-bottom: 4px;
+}
+
+.link-url {
+  font-size: 12px;
+  color: #5b6dff;
+  word-break: break-all;
+}
+
+.link-arrow {
+  font-size: 20px;
+  color: #5b6dff;
+}
+
+.link-meta {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(114, 128, 150, 0.2);
+}
+
+.meta-item {
+  display: block;
+  font-size: 12px;
+  color: #8ea0bd;
+  margin: 4px 0;
+}
+
+/* 文件预览 */
+.file-preview {
+  background: #141d2e;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.file-icon {
+  font-size: 32px;
+}
+
+.file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #eef4ff;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.file-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #8ea0bd;
+}
+
+.file-download {
+  padding: 6px 12px;
+  background: #5b6dff;
+  color: white;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.2s;
+}
+
+.file-download:hover {
+  background: #4a5de0;
+}
+
+.file-content {
+  padding: 16px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.content-truncated {
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: #8ea0bd;
+  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid rgba(114, 128, 150, 0.2);
+}
+
+/* 集合预览 */
+.collection-preview {
+  background: #141d2e;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.collection-header {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(114, 128, 150, 0.2);
+}
+
+.collection-count {
+  font-size: 12px;
+  color: #8ea0bd;
+}
+
+.collection-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.collection-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+}
+
+.item-index {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(91, 109, 255, 0.2);
+  color: #5b6dff;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+}
+
+.item-type {
+  padding: 2px 8px;
+  background: rgba(124, 58, 237, 0.2);
+  color: #a78bfa;
+  font-size: 11px;
+  border-radius: 4px;
+}
+
+.item-title {
+  flex: 1;
+  font-size: 13px;
+  color: #c8d4e8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Run 列表样式 */
@@ -3116,42 +4386,76 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .run-id {
   font-size: 12px;
-  font-family: monospace;
+  font-family: 'Monaco', 'Menlo', monospace;
   color: #8ea0bd;
 }
 
-.run-status {
-  padding: 2px 8px;
+.run-status-badge {
+  padding: 3px 10px;
   border-radius: 12px;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
 }
 
-.run-status.success {
+.run-status-badge.success {
   background: rgba(34, 197, 94, 0.15);
   color: #22c55e;
 }
 
-.run-status.failed {
+.run-status-badge.failed {
   background: rgba(239, 68, 68, 0.15);
   color: #ef4444;
 }
 
-.run-status.running {
+.run-status-badge.running {
   background: rgba(245, 158, 11, 0.15);
   color: #f59e0b;
 }
 
-.run-agent {
+.run-status-badge.queued {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
+.run-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.agent-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #5b6dff 0%, #8b5cf6 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: white;
+}
+
+.agent-name {
   font-size: 13px;
   font-weight: 500;
   color: #eef4ff;
-  margin-bottom: 4px;
+}
+
+.run-message {
+  font-size: 12px;
+  color: #c8d4e8;
+  line-height: 1.5;
+  margin-bottom: 6px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
 }
 
 .run-summary {
@@ -3161,9 +4465,269 @@ onMounted(async () => {
   margin-bottom: 6px;
 }
 
-.run-time {
+.run-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.meta-duration {
   font-size: 11px;
-  color: #5a6a85;
+  color: #5b6dff;
+  font-weight: 500;
+}
+
+/* Run 详情样式 */
+.run-detail-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.run-status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.run-status-indicator.success {
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.run-status-indicator.failed {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.run-status-indicator.running {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.status-icon {
+  font-size: 18px;
+}
+
+.status-text {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.run-status-indicator.success .status-text {
+  color: #22c55e;
+}
+
+.run-status-indicator.failed .status-text {
+  color: #ef4444;
+}
+
+.run-status-indicator.running .status-text {
+  color: #f59e0b;
+}
+
+.run-id-display {
+  margin-bottom: 16px;
+}
+
+.run-id-display code {
+  display: block;
+  padding: 10px 12px;
+  background: #141d2e;
+  border-radius: 6px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+  color: #8ea0bd;
+  word-break: break-all;
+}
+
+.message-box {
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.message-box.user {
+  background: rgba(91, 109, 255, 0.1);
+  border-left: 3px solid #5b6dff;
+  color: #c8d4e8;
+}
+
+.message-box.result {
+  background: rgba(34, 197, 94, 0.1);
+  border-left: 3px solid #22c55e;
+  color: #c8d4e8;
+}
+
+.message-box.error {
+  background: rgba(239, 68, 68, 0.1);
+  border-left: 3px solid #ef4444;
+  color: #ef4444;
+}
+
+/* 步骤时间线样式 */
+.steps-timeline {
+  position: relative;
+}
+
+.timeline-item {
+  display: flex;
+  gap: 12px;
+  padding-bottom: 20px;
+  position: relative;
+}
+
+.timeline-item:not(.last)::before {
+  content: '';
+  position: absolute;
+  left: 15px;
+  top: 32px;
+  bottom: 0;
+  width: 2px;
+  background: rgba(114, 128, 150, 0.3);
+}
+
+.timeline-marker {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.timeline-marker.thought {
+  background: rgba(139, 92, 246, 0.2);
+}
+
+.timeline-marker.tool_call {
+  background: rgba(245, 158, 11, 0.2);
+}
+
+.timeline-marker.tool_result {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.timeline-marker.message {
+  background: rgba(34, 197, 94, 0.2);
+}
+
+.timeline-marker.system {
+  background: rgba(148, 163, 184, 0.2);
+}
+
+.timeline-marker.error {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.timeline-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.step-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.step-type-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #eef4ff;
+}
+
+.step-body {
+  margin-bottom: 8px;
+}
+
+.step-content-text {
+  font-size: 13px;
+  color: #c8d4e8;
+  line-height: 1.6;
+}
+
+.step-tool-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.tool-label {
+  font-size: 11px;
+  color: #8ea0bd;
+}
+
+.tool-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f59e0b;
+}
+
+.tool-status-badge {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.tool-status-badge.pending {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.tool-status-badge.success {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.tool-status-badge.failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.step-io {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.io-section {
+  background: #141d2e;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.io-label {
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.2);
+  font-size: 10px;
+  font-weight: 600;
+  color: #8ea0bd;
+  text-transform: uppercase;
+}
+
+.io-content {
+  padding: 10px;
+  margin: 0;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 11px;
+  color: #c8d4e8;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.empty-steps {
+  padding: 40px 0;
 }
 
 /* Run Steps 样式 */

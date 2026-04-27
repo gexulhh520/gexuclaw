@@ -78,12 +78,16 @@ export async function createArtifact(workContextUid: string, input: CreateArtifa
       workContextId: workContext.id,
       runId: input.runId,
       artifactType: input.artifactType,
+      artifactRole: input.artifactRole,
       title: input.title,
       mimeType: input.mimeType,
       contentText: input.contentText,
       contentJson: jsonStringify(input.contentJson),
       uri: input.uri,
       status: input.status,
+      sourceRunId: input.sourceRunId,
+      sourceArtifactIdsJson: jsonStringify(input.sourceArtifactIds),
+      metadataJson: jsonStringify(input.metadata),
       createdAt: now,
       updatedAt: now,
     })
@@ -145,4 +149,49 @@ export async function listArtifactsByWorkContext(workContextUid: string) {
     .from(agentArtifacts)
     .where(eq(agentArtifacts.workContextId, workContext.id))
     .orderBy(desc(agentArtifacts.id));
+}
+
+// 获取 WorkContext 工作台聚合数据
+export async function getWorkContextWorkbench(workContextUid: string) {
+  const workContext = await getWorkContextByUid(workContextUid);
+
+  // 加载该 WorkContext 的 artifacts
+  const artifacts = await db
+    .select()
+    .from(agentArtifacts)
+    .where(eq(agentArtifacts.workContextId, workContext.id))
+    .orderBy(desc(agentArtifacts.id))
+    .limit(50);
+
+  // 加载该 WorkContext 关联的 runs（通过 workContextId 或 sourceRunId）
+  const runs = await db
+    .select()
+    .from(agentRuns)
+    .where(eq(agentRuns.workContextId, workContextUid))
+    .orderBy(desc(agentRuns.id))
+    .limit(20);
+
+  // 解析 metadataJson 获取扩展字段
+  let metadata: Record<string, any> = {};
+  try {
+    metadata = JSON.parse(workContext.metadataJson || '{}');
+  } catch {
+    metadata = {};
+  }
+
+  return {
+    workContext: {
+      ...workContext,
+      // 展开常用元数据字段
+      currentStage: metadata.currentStage || '',
+      progressSummary: metadata.progressSummary || '',
+      nextAction: metadata.nextAction || '',
+    },
+    artifacts,
+    runs,
+    // 最近一个产物
+    latestArtifact: artifacts[0] || null,
+    // 最近一次运行
+    latestRun: runs[0] || null,
+  };
 }

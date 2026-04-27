@@ -168,18 +168,28 @@ export type WorkContextRecord = {
   updatedAt: string
 }
 
+// Artifact 类型枚举
+export type ArtifactType = 'text' | 'structured_data' | 'page' | 'image' | 'link' | 'file' | 'collection'
+
+// Artifact 角色枚举
+export type ArtifactRole = 'input' | 'reference' | 'intermediate' | 'draft' | 'final' | 'output'
+
 export type AgentArtifactRecord = {
   id: number
   artifactUid: string
   workContextId: number
   runId: number | null
-  artifactType: string
+  artifactType: ArtifactType
+  artifactRole: ArtifactRole
   title: string
   mimeType: string | null
   contentText: string
   contentJson: string
   uri: string | null
   status: string
+  sourceRunId: number | null
+  sourceArtifactIdsJson: string
+  metadataJson: string
   createdAt: string
   updatedAt: string
 }
@@ -541,6 +551,33 @@ export const agentPlatformApi = {
       `/work-contexts/${workContextUid}/artifacts`,
       input
     )
+    return unwrap(data)
+  },
+
+  // 工作台聚合接口
+  async getSessionWorkbench(sessionUid: string) {
+    const { data } = await httpClient.get<ApiEnvelope<{
+      session: SessionRecord
+      workContexts: WorkContextRecord[]
+      runs: AgentRunRecord[]
+      artifacts: AgentArtifactRecord[]
+      selectedWorkContext: WorkContextRecord | null
+    }>>(`/sessions/${sessionUid}/workbench`)
+    return unwrap(data)
+  },
+
+  async getWorkContextWorkbench(workContextUid: string) {
+    const { data } = await httpClient.get<ApiEnvelope<{
+      workContext: WorkContextRecord & {
+        currentStage: string
+        progressSummary: string
+        nextAction: string
+      }
+      artifacts: AgentArtifactRecord[]
+      runs: AgentRunRecord[]
+      latestArtifact: AgentArtifactRecord | null
+      latestRun: AgentRunRecord | null
+    }>>(`/work-contexts/${workContextUid}/workbench`)
     return unwrap(data)
   },
 }

@@ -10,15 +10,40 @@ export const createWorkContextSchema = z.object({
   metadata: z.record(z.any()).default({}),
 });
 
+// Artifact 类型枚举
+export const ArtifactTypeEnum = z.enum([
+  "text",
+  "structured_data",
+  "page",
+  "image",
+  "link",
+  "file",
+  "collection",
+]);
+
+// Artifact 角色枚举
+export const ArtifactRoleEnum = z.enum([
+  "input",
+  "reference",
+  "intermediate",
+  "draft",
+  "final",
+  "output",
+]);
+
 export const createArtifactSchema = z.object({
   runId: z.number().int().positive().optional(),
-  artifactType: z.string().min(1),
+  artifactType: ArtifactTypeEnum,
+  artifactRole: ArtifactRoleEnum.default("output"),
   title: z.string().min(1),
   mimeType: z.string().optional(),
   contentText: z.string().default(""),
   contentJson: z.record(z.any()).default({}),
   uri: z.string().optional(),
   status: z.string().default("ready"),
+  sourceRunId: z.number().int().positive().optional(),
+  sourceArtifactIds: z.array(z.string()).default([]),
+  metadata: z.record(z.any()).default({}),
 });
 
 export type CreateWorkContextInput = z.infer<typeof createWorkContextSchema>;

@@ -204,13 +204,24 @@ export const agentArtifacts = pgTable("agent_artifacts", {
   artifactUid: text("artifact_uid").notNull().unique(),
   workContextId: integer("work_context_id").notNull(),
   runId: integer("run_id"),
+  // artifactType: 产物形态类型
+  // text | structured_data | page | image | link | file | collection
   artifactType: text("artifact_type").notNull(),
+  // artifactRole: 产物业务角色
+  // input | reference | intermediate | draft | final | output
+  artifactRole: text("artifact_role").notNull().default("output"),
   title: text("title").notNull(),
   mimeType: text("mime_type"),
   contentText: text("content_text").notNull().default(""),
   contentJson: text("content_json").notNull().default("{}"),
   uri: text("uri"),
   status: text("status").notNull().default("ready"),
+  // sourceRunId: 明确记录产物来源 run
+  sourceRunId: integer("source_run_id"),
+  // sourceArtifactIdsJson: 派生产物的血缘关系
+  sourceArtifactIdsJson: text("source_artifact_ids_json").notNull().default("[]"),
+  // metadataJson: 扩展字段（subtype、文件信息、页面信息等）
+  metadataJson: text("metadata_json").notNull().default("{}"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
