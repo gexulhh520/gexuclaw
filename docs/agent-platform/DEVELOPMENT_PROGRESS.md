@@ -1,4 +1,4 @@
-# Agent Platform 开发进度记录
+﻿# Agent Platform 开发进度记录
 
 本文档用于记录 Agent Platform 每次开发完成后的进度。后续每次实现、调整或验证完成，都在这里追加一条记录。
 
@@ -1113,3 +1113,36 @@
 下一步建议：
 - 启动 Node 服务和前端 dev server，使用 `builtin_browser_agent` 做一次真实页面验收。
 - 若第一阶段验收稳定，再进入 Phase 2 的 WorkContext / Artifact 前端展示。
+
+## 2026-04-27：补充 Phase 2 WorkContext / Artifact 落地设计文档
+
+本次目标：
+
+- 基于当前已经存在的 `projects / sessions / work_contexts / agent_artifacts / orchestration / runs` 实现，明确 Phase 2 下一步怎么落地。
+- 把“右侧工作台接真实内容”“会话与 WorkContext 的真实连接”“Artifact 类型与角色”写成一份可直接拆任务的设计文档。
+
+修改文件：
+
+- `docs/agent-platform/PHASE2_WORKCONTEXT_ARTIFACT_DELIVERY_DESIGN.md`
+- `docs/agent-platform/DEVELOPMENT_PROGRESS.md`
+
+完成内容：
+
+- 明确当前后端和前端已具备的基础能力与主要缺口。
+- 收口 `WorkContext / Run / Artifact` 的职责边界。
+- 定义 Artifact 第一阶段的 `artifactType` 与 `artifactRole` 体系。
+- 明确右侧工作台应围绕 `selectedWorkContext / selectedArtifact / selectedRun` 组织，而不是继续使用说明页式布局。
+- 给出异步链路 `chat -> runId -> SSE -> run completed -> refresh workbench` 的前端真实状态流。
+- 给出后端字段扩展、聚合接口、前端状态抽离、组件拆分和分阶段验收标准。
+
+验证方式：
+
+- 对照当前实现确认前端已有 `workspaceTabs = ["上下文", "产物", "执行过程"]` 雏形。
+- 对照当前实现确认 `chat` 为立即返回、异步执行、依赖 SSE 追踪进度。
+- 对照当前实现确认已有 `listWorkContexts / listArtifacts / listRuns / listRunSteps` 的调用路径可作为 Phase 2 收敛基础。
+
+下一步建议：
+
+- 先扩展 Artifact 字段与协议，新增 `artifactRole` 和来源血缘字段。
+- 再抽离工作台状态层，收口 `selectedWorkContext / selectedArtifact / selectedRun`。
+- 随后直接改造右侧工作台，让“上下文 / 产物 / 执行过程”三 tab 进入真实渲染阶段。

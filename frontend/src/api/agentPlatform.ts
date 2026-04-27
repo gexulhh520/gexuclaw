@@ -344,9 +344,10 @@ export const agentPlatformApi = {
     return unwrap(data)
   },
 
-  async listRuns(agentUid?: string, limit = 20, sessionId?: string) {
+  async listRuns(params: { agentUid?: string; sessionId?: string; workContextId?: string; limit?: number } = {}) {
+    const { agentUid, sessionId, workContextId, limit = 20 } = params
     const { data } = await httpClient.get<ApiEnvelope<AgentRunRecord[]>>('/runs', {
-      params: { agentUid, limit, sessionId },
+      params: { agentUid, sessionId, workContextId, limit },
     })
     return unwrap(data)
   },

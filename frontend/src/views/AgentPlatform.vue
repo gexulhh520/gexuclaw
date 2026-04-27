@@ -301,8 +301,10 @@
     >
       <header class="workspace-header">
         <div class="workspace-header-left">
-          <div class="workspace-host-title">工作台</div>
-          <div class="workspace-host-subtitle">{{ workspaceTemplate.subtitle }}</div>
+          <div class="workspace-host-title">{{ selectedWorkContext?.title || '未选择工作上下文' }}</div>
+          <div class="workspace-host-subtitle" v-if="selectedWorkContext">
+            {{ selectedWorkContext.goal || '暂无目标描述' }}
+          </div>
         </div>
 
         <div class="workspace-header-actions">
@@ -328,49 +330,186 @@
       </header>
 
       <div class="workspace-content soft-scrollbar">
-        <div class="workspace-template-card panel-card">
-          <div class="workspace-template-icon" :style="{ background: workspaceTemplate.avatar }">
-            {{ workspaceTemplate.short }}
+        <!-- Tab: 上下文 - WorkContext 结构化展示 -->
+        <div v-if="activeWorkspaceTab === '上下文'" class="workspace-tab-panel">
+          <div v-if="!selectedWorkContext" class="workspace-empty-state">
+            <div class="empty-title">暂无工作上下文</div>
+            <div class="empty-desc">发送消息开始工作后会自动创建工作上下文</div>
           </div>
-          <div class="workspace-template-title">{{ workspaceTemplate.name }}</div>
-          <div class="workspace-template-desc">{{ workspaceTemplate.description }}</div>
-        </div>
-
-        <div class="workspace-grid">
-          <div class="workspace-pane panel-card">
-            <div class="workspace-pane-title">当前模式</div>
-            <div class="mode-grid">
-              <div
-                v-for="feature in workspaceTemplate.features"
-                :key="feature.title"
-                class="mode-card"
-              >
-                <div class="mode-title">{{ feature.title }}</div>
-                <div class="mode-desc">{{ feature.description }}</div>
+          <div v-else class="workcontext-detail">
+            <div class="detail-section">
+              <div class="detail-label">目标</div>
+              <div class="detail-value">{{ selectedWorkContext.goal || '暂无目标' }}</div>
+            </div>
+            <div class="detail-row">
+              <div class="detail-section half">
+                <div class="detail-label">状态</div>
+                <div class="detail-value status-badge" :class="selectedWorkContext.status">
+                  {{ selectedWorkContext.status || '进行中' }}
+                </div>
+              </div>
+              <div class="detail-section half">
+                <div class="detail-label">来源</div>
+                <div class="detail-value">{{ selectedWorkContext.source || '手动创建' }}</div>
               </div>
             </div>
+            <div class="detail-section">
+              <div class="detail-label">进度摘要</div>
+              <div class="detail-value progress-summary">{{ getWorkContextProgressSummary(selectedWorkContext) }}</div>
+            </div>
+            <div class="detail-section">
+              <div class="detail-label">最近一次运行</div>
+              <div class="detail-value recent-run" v-if="selectedWorkContext.currentRunId">
+                Run #{{ selectedWorkContext.currentRunId }}
+              </div>
+              <div class="detail-value empty" v-else>暂无运行记录</div>
+            </div>
+            <div class="detail-section">
+              <div class="detail-label">最近一次产物</div>
+              <div class="detail-value recent-artifact" v-if="selectedWorkContext.latestArtifactId">
+                Artifact #{{ selectedWorkContext.latestArtifactId }}
+              </div>
+              <div class="detail-value empty" v-else>暂无产物</div>
+            </div>
+            <div class="detail-section">
+              <div class="detail-label">更新时间</div>
+              <div class="detail-value">{{ formatTime(selectedWorkContext.updatedAt) }}</div>
+            </div>
           </div>
+        </div>
 
-          <div class="workspace-pane panel-card">
-            <div class="workspace-pane-title">面板说明</div>
-            <p>{{ workspaceTemplate.panelIntro }}</p>
-          </div>
-
-          <div class="workspace-pane full panel-card">
-            <div class="workspace-pane-title">预留插槽</div>
-            <div class="placeholder-grid">
-              <div class="placeholder-card">
-                <div class="placeholder-name">智能体专属工作区</div>
-                <div class="placeholder-desc">
-                  后续会根据当前智能体类型挂载不同的工作台组件，而不是固定一种右栏内容。
+        <!-- Tab: 产物 - Artifact 列表与详情 -->
+        <div v-if="activeWorkspaceTab === '产物'" class="workspace-tab-panel">
+          <div class="artifact-split-panel">
+            <div class="artifact-list">
+              <div class="panel-header">
+                <span class="panel-title">产物列表 ({{ workContextArtifacts.length }})</span>
+              </div>
+              <div class="artifact-items">
+                <div
+                  v-for="artifact in workContextArtifacts"
+                  :key="artifact.artifactUid"
+                  class="artifact-item"
+                  :class="{ active: selectedArtifact?.artifactUid === artifact.artifactUid }"
+                  @click="selectedArtifact = artifact"
+                >
+                  <div class="artifact-type">{{ artifact.artifactType }}</div>
+                  <div class="artifact-title">{{ artifact.title || '未命名产物' }}</div>
+                  <div class="artifact-meta">
+                    <span>{{ formatTime(artifact.createdAt) }}</span>
+                    <span :class="['artifact-status', artifact.status]">{{ artifact.status }}</span>
+                  </div>
+                </div>
+                <div v-if="workContextArtifacts.length === 0" class="empty-list">
+                  暂无产物
                 </div>
               </div>
-              <div class="placeholder-card">
-                <div class="placeholder-name">沉浸工作模式</div>
-                <div class="placeholder-desc">
-                  支持右侧工作台在桌面嵌入与全屏模式之间切换，适合长时间专注处理任务。
+            </div>
+            <div class="artifact-detail" v-if="selectedArtifact">
+              <div class="panel-header">
+                <span class="panel-title">产物详情</span>
+              </div>
+              <div class="artifact-content">
+                <div class="detail-row">
+                  <span class="detail-label">类型:</span>
+                  <span class="detail-value">{{ selectedArtifact.artifactType }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">标题:</span>
+                  <span class="detail-value">{{ selectedArtifact.title }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">MIME:</span>
+                  <span class="detail-value">{{ selectedArtifact.mimeType || '-' }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">状态:</span>
+                  <span class="detail-value">{{ selectedArtifact.status }}</span>
+                </div>
+                <div class="artifact-preview" v-if="selectedArtifact.contentText">
+                  <div class="preview-label">内容预览</div>
+                  <pre class="preview-content">{{ selectedArtifact.contentText }}</pre>
                 </div>
               </div>
+            </div>
+            <div class="artifact-detail empty" v-else>
+              <div class="empty-state">选择一个产物查看详情</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: 执行过程 - Run 列表与 Steps -->
+        <div v-if="activeWorkspaceTab === '执行过程'" class="workspace-tab-panel">
+          <div class="run-split-panel">
+            <div class="run-list">
+              <div class="panel-header">
+                <span class="panel-title">执行记录 ({{ workContextRuns.length }})</span>
+              </div>
+              <div class="run-items">
+                <div
+                  v-for="run in workContextRuns"
+                  :key="run.runUid"
+                  class="run-item"
+                  :class="{ active: selectedRun?.runUid === run.runUid, [run.status]: true }"
+                  @click="selectRun(run)"
+                >
+                  <div class="run-header">
+                    <span class="run-id">{{ run.runUid.slice(0, 12) }}...</span>
+                    <span class="run-status" :class="run.status">{{ run.status }}</span>
+                  </div>
+                  <div class="run-agent">{{ run.agentName || run.agentId }}</div>
+                  <div class="run-summary" v-if="run.resultSummary">{{ run.resultSummary.slice(0, 60) }}...</div>
+                  <div class="run-time">{{ formatTime(run.startedAt) }}</div>
+                </div>
+                <div v-if="workContextRuns.length === 0" class="empty-list">
+                  暂无执行记录
+                </div>
+              </div>
+            </div>
+            <div class="run-detail" v-if="selectedRun">
+              <div class="panel-header">
+                <span class="panel-title">执行详情</span>
+              </div>
+              <div class="run-steps" v-if="selectedRunSteps.length > 0">
+                <div
+                  v-for="step in selectedRunSteps"
+                  :key="step.id"
+                  class="run-step-item"
+                  :class="step.stepType"
+                >
+                  <div class="step-header">
+                    <span class="step-index">#{{ step.stepIndex }}</span>
+                    <span class="step-type">{{ step.stepType }}</span>
+                    <span class="step-time">{{ formatTime(step.createdAt) }}</span>
+                  </div>
+                  <div class="step-content" v-if="step.content">{{ step.content }}</div>
+                  <div class="step-tool" v-if="step.toolName">
+                    <span class="tool-name">{{ step.toolName }}</span>
+                    <span class="tool-status" :class="step.toolStatus">{{ step.toolStatus }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="run-info" v-else>
+                <div class="info-row">
+                  <span class="info-label">Agent:</span>
+                  <span class="info-value">{{ selectedRun.agentName || selectedRun.agentId }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">状态:</span>
+                  <span class="info-value" :class="selectedRun.status">{{ selectedRun.status }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">消息:</span>
+                  <span class="info-value">{{ selectedRun.userMessage }}</span>
+                </div>
+                <div class="info-row" v-if="selectedRun.resultSummary">
+                  <span class="info-label">结果:</span>
+                  <span class="info-value">{{ selectedRun.resultSummary }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="run-detail empty" v-else>
+              <div class="empty-state">选择一个执行记录查看详情</div>
             </div>
           </div>
         </div>
@@ -509,7 +648,7 @@ import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { useRoute } from "vue-router";
 
-import { agentPlatformApi, type AgentRecord, type ProjectRecord, type AgentRunRecord } from "@/api/agentPlatform";
+import { agentPlatformApi, type AgentRecord, type ProjectRecord, type AgentRunRecord, type WorkContextRecord, type AgentArtifactRecord, type AgentRunStepRecord } from "@/api/agentPlatform";
 
 type AgentStatus = "online" | "busy" | "idle";
 type WorkspaceType = "writing" | "browser" | "research" | "video";
@@ -722,13 +861,20 @@ const selectedProjectId = ref<string>(projectSpaces.value[0]?.id || "");
 const selectedSessionId = ref<string>(projectSpaces.value[0]?.sessions[0]?.id || "");
 const selectedAgentId = ref<string>("writing_agent");
 const draftMessage = ref("");
-const executionExpanded = ref(true);
-const activeWorkspaceTab = ref("工作区");
 const sidebarCollapsed = ref(false);
 const conversationCollapsed = ref(false);
 const workspaceHidden = ref(false);
 const workspaceFullscreen = ref(false);
 
+// WorkContext 和 Artifact 相关状态
+const sessionWorkContexts = ref<WorkContextRecord[]>([]);
+const selectedWorkContext = ref<WorkContextRecord | null>(null);
+const workContextArtifacts = ref<AgentArtifactRecord[]>([]);
+const sessionRuns = ref<AgentRunRecord[]>([]);
+const workContextRuns = ref<AgentRunRecord[]>([]);
+
+// 右侧工作台 Tab：围绕 WorkContext & Artifact 组织
+const activeWorkspaceTab = ref("上下文");
 const newSessionDialogVisible = ref(false);
 const newProjectDialogVisible = ref(false);
 const pendingAgentIds = ref<string[]>(["writing_agent"]);
@@ -738,7 +884,13 @@ const pendingSessionLocation = ref<"project" | "personal">("project");
 const pendingProjectTargetId = ref<string>(projectSpaces.value[0]?.id || "");
 const pendingProjectTitle = ref("");
 
-const workspaceTabs = ["工作区", "执行过程", "知识图谱"];
+// 右侧工作台 Tab：围绕 WorkContext & Artifact 组织
+const workspaceTabs = ["上下文", "产物", "执行过程"];
+
+// 右侧选中的状态
+const selectedArtifact = ref<AgentArtifactRecord | null>(null);
+const selectedRun = ref<AgentRunRecord | null>(null);
+const selectedRunSteps = ref<AgentRunStepRecord[]>([]);
 
 const selectedProject = computed(() =>
   projectSpaces.value.find((project) => project.id === selectedProjectId.value),
@@ -804,13 +956,48 @@ async function selectSession(projectId: string | undefined, sessionId: string) {
   if (sourceSession) {
     await loadSessionMessages(sourceSession);
   }
+
+  // 加载并选中该会话的 WorkContext
+  await loadAndSelectSessionWorkContext(sessionId);
+}
+
+// 加载并选中会话的 WorkContext
+async function loadAndSelectSessionWorkContext(sessionId: string) {
+  try {
+    console.log(`[loadAndSelectSessionWorkContext] Loading work contexts for session: ${sessionId}`);
+    const workContexts = await agentPlatformApi.listWorkContexts({ sessionId, limit: 10 });
+    console.log(`[loadAndSelectSessionWorkContext] Loaded ${workContexts.length} work contexts`);
+
+    sessionWorkContexts.value = workContexts;
+
+    if (workContexts.length > 0) {
+      // 选择最近更新的 workContext
+      const sorted = [...workContexts].sort((a, b) => {
+        const timeA = new Date(a.updatedAt || a.createdAt).getTime();
+        const timeB = new Date(b.updatedAt || b.createdAt).getTime();
+        return timeB - timeA;
+      });
+      selectedWorkContext.value = sorted[0];
+      console.log(`[loadAndSelectSessionWorkContext] Selected work context: ${sorted[0].workContextUid}`);
+
+      // 加载该 workContext 的 artifacts 和 runs
+      await reloadArtifactsForSelectedWorkContext();
+      await loadWorkContextRuns(sorted[0].workContextUid);
+    } else {
+      selectedWorkContext.value = null;
+      workContextArtifacts.value = [];
+      workContextRuns.value = [];
+    }
+  } catch (error) {
+    console.error('[loadAndSelectSessionWorkContext] Failed to load work contexts:', error);
+  }
 }
 
 async function loadSessionMessages(session: SessionItem) {
   try {
     console.log(`[loadSessionMessages] Loading messages for session: ${session.id}`);
     // 获取该会话的所有 runs
-    const runs = await agentPlatformApi.listRuns(undefined, 50, session.id);
+    const runs = await agentPlatformApi.listRuns({ sessionId: session.id, limit: 50 });
     console.log(`[loadSessionMessages] Loaded ${runs.length} runs for session: ${session.id}`, runs);
 
     // 将 runs 转换为消息
@@ -981,12 +1168,15 @@ function subscribeToRunSteps(runId: string, runInfo: RunInfo) {
         updateMessageContentByRunId(runId, status.resultSummary);
       }
     },
-    onComplete: (data) => {
+    onComplete: async (data) => {
       console.log(`[SSE] Complete event for ${runId}:`, data);
       runInfo.status = data.status as 'running' | 'success' | 'failed';
       runInfo.isSubscribed = false;
       activeSubscriptions.delete(runId);
       console.log(`[SSE] Run ${runId} completed with status: ${data.status}`);
+      
+      // Run 完成后刷新工作上下文和产物
+      await onRunCompleted(runId);
     },
     onError: (error) => {
       console.error(`[SSE] Run ${runId} error:`, error);
@@ -1025,6 +1215,165 @@ async function copyRunId(runId: string) {
     ElMessage.success('Run ID 已复制');
   } catch {
     ElMessage.error('复制失败');
+  }
+}
+
+// 选择 Run 并加载 Steps
+async function selectRun(run: AgentRunRecord) {
+  selectedRun.value = run;
+  try {
+    const steps = await agentPlatformApi.listRunSteps(run.runUid);
+    selectedRunSteps.value = steps || [];
+  } catch (error) {
+    console.error('[selectRun] Failed to load run steps:', error);
+    selectedRunSteps.value = [];
+  }
+}
+
+// 获取 WorkContext 进度摘要
+function getWorkContextProgressSummary(workContext: WorkContextRecord): string {
+  try {
+    const metadata = JSON.parse(workContext.metadataJson || '{}');
+    return metadata.progressSummary || '暂无进度摘要';
+  } catch {
+    return '暂无进度摘要';
+  }
+}
+
+// 格式化时间
+function formatTime(time: string | Date | undefined | null): string {
+  if (!time) return '-';
+  const date = new Date(time);
+  return date.toLocaleString('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+// Run 完成后的刷新收口逻辑
+async function onRunCompleted(runId: string) {
+  console.log(`[onRunCompleted] Run ${runId} completed, refreshing data...`);
+  
+  if (!currentSession.value) {
+    console.warn('[onRunCompleted] No current session');
+    return;
+  }
+  
+  const sessionId = currentSession.value.id;
+  
+  try {
+    // 1. 刷新会话的 runs
+    console.log('[onRunCompleted] Reloading session runs...');
+    await loadSessionRuns(sessionId);
+    
+    // 2. 刷新会话的 workContexts
+    console.log('[onRunCompleted] Reloading session work contexts...');
+    await reloadSessionWorkContexts(sessionId);
+    
+    // 3. 重新选中当前 workContext
+    console.log('[onRunCompleted] Reselecting current work context...');
+    await reselectCurrentWorkContext(sessionId, runId);
+    
+    // 4. 刷新选中 workContext 的 runs（workContext 维度）
+    if (selectedWorkContext.value) {
+      console.log('[onRunCompleted] Reloading runs for selected work context...');
+      await loadWorkContextRuns(selectedWorkContext.value.workContextUid);
+      
+      // 5. 刷新选中 workContext 的 artifacts
+      console.log('[onRunCompleted] Reloading artifacts for selected work context...');
+      await reloadArtifactsForSelectedWorkContext();
+    }
+    
+    console.log('[onRunCompleted] Data refresh completed');
+  } catch (error) {
+    console.error('[onRunCompleted] Error refreshing data:', error);
+  }
+}
+
+// 刷新会话的 runs（session 维度）
+async function loadSessionRuns(sessionId: string) {
+  try {
+    const runs = await agentPlatformApi.listRuns({ sessionId, limit: 50 });
+    console.log(`[loadSessionRuns] Loaded ${runs.length} runs for session ${sessionId}`);
+    // 更新当前会话的 runs（如果需要）
+    sessionRuns.value = runs;
+  } catch (error) {
+    console.error('[loadSessionRuns] Failed to load runs:', error);
+  }
+}
+
+// 刷新选中 workContext 的 runs（workContext 维度）
+async function loadWorkContextRuns(workContextId: string) {
+  try {
+    const runs = await agentPlatformApi.listRuns({ workContextId, limit: 50 });
+    console.log(`[loadWorkContextRuns] Loaded ${runs.length} runs for workContext ${workContextId}`);
+    workContextRuns.value = runs;
+  } catch (error) {
+    console.error('[loadWorkContextRuns] Failed to load runs:', error);
+  }
+}
+
+// 刷新会话的 work contexts
+async function reloadSessionWorkContexts(sessionId: string) {
+  try {
+    const workContexts = await agentPlatformApi.listWorkContexts({ sessionId, limit: 50 });
+    console.log(`[reloadSessionWorkContexts] Loaded ${workContexts.length} work contexts`);
+    sessionWorkContexts.value = workContexts;
+  } catch (error) {
+    console.error('[reloadSessionWorkContexts] Failed to load work contexts:', error);
+  }
+}
+
+// 重新选中当前 work context
+async function reselectCurrentWorkContext(sessionId: string, runId: string) {
+  try {
+    // 优先选择：
+    // 1. current_run_id 对应此 run 的 workContext
+    // 2. 最近更新的 workContext
+    // 3. 第一个 workContext
+    
+    const workContexts = await agentPlatformApi.listWorkContexts({ sessionId, limit: 50 });
+    
+    // 查找 current_run_id 匹配的 workContext
+    const matchedByRun = workContexts.find(wc => wc.currentRunId === runId);
+    if (matchedByRun) {
+      console.log(`[reselectCurrentWorkContext] Found work context by runId: ${matchedByRun.workContextUid}`);
+      selectedWorkContext.value = matchedByRun;
+      return;
+    }
+    
+    // 按 updatedAt 排序，选择最近更新的
+    const sortedByUpdate = [...workContexts].sort((a, b) => {
+      const timeA = new Date(a.updatedAt || a.createdAt).getTime();
+      const timeB = new Date(b.updatedAt || b.createdAt).getTime();
+      return timeB - timeA;
+    });
+    
+    if (sortedByUpdate.length > 0) {
+      console.log(`[reselectCurrentWorkContext] Selecting most recent work context: ${sortedByUpdate[0].workContextUid}`);
+      selectedWorkContext.value = sortedByUpdate[0];
+    }
+  } catch (error) {
+    console.error('[reselectCurrentWorkContext] Failed to reselect work context:', error);
+  }
+}
+
+// 刷新选中 workContext 的 artifacts
+async function reloadArtifactsForSelectedWorkContext() {
+  if (!selectedWorkContext.value) {
+    console.warn('[reloadArtifactsForSelectedWorkContext] No selected work context');
+    return;
+  }
+  
+  try {
+    const workContextUid = selectedWorkContext.value.workContextUid;
+    const artifacts = await agentPlatformApi.listArtifacts(workContextUid);
+    console.log(`[reloadArtifactsForSelectedWorkContext] Loaded ${artifacts.length} artifacts`);
+    workContextArtifacts.value = artifacts;
+  } catch (error) {
+    console.error('[reloadArtifactsForSelectedWorkContext] Failed to load artifacts:', error);
   }
 }
 
@@ -1069,12 +1418,6 @@ function formatStepType(stepType: string): string {
     'error': '错误',
   };
   return typeMap[stepType] || stepType;
-}
-
-// 格式化时间
-function formatTime(timeStr: string): string {
-  const date = new Date(timeStr);
-  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 // 获取步骤类型摘要
@@ -2505,6 +2848,449 @@ onMounted(async () => {
   background: rgba(24, 35, 56, 0.96);
   color: #f8fbff;
   box-shadow: 0 18px 36px rgba(0, 0, 0, 0.35);
+}
+
+/* 右侧工作台 Tab 面板样式 */
+.workspace-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
+}
+
+.workspace-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+  color: #8ea0bd;
+}
+
+.empty-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #eef4ff;
+  margin-bottom: 8px;
+}
+
+.empty-desc {
+  font-size: 14px;
+  color: #8ea0bd;
+}
+
+/* WorkContext 详情 */
+.workcontext-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.detail-section {
+  padding: 16px;
+  background: #1d2940;
+  border-radius: 14px;
+  border: 1px solid rgba(114, 128, 150, 0.14);
+}
+
+.detail-row {
+  display: flex;
+  gap: 12px;
+}
+
+.detail-section.half {
+  flex: 1;
+}
+
+.detail-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8ea0bd;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.detail-value {
+  font-size: 14px;
+  color: #eef4ff;
+  line-height: 1.6;
+}
+
+.detail-value.empty {
+  color: #5a6a85;
+  font-style: italic;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status-badge.active,
+.status-badge.running {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.status-badge.success,
+.status-badge.completed {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.status-badge.failed,
+.status-badge.error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.progress-summary {
+  font-size: 13px;
+  color: #c8d4e8;
+  line-height: 1.7;
+}
+
+/* 产物双栏布局 */
+.artifact-split-panel,
+.run-split-panel {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+
+.artifact-list,
+.run-list {
+  display: flex;
+  flex-direction: column;
+  background: #1d2940;
+  border-radius: 14px;
+  border: 1px solid rgba(114, 128, 150, 0.14);
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(114, 128, 150, 0.14);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #eef4ff;
+}
+
+.artifact-items,
+.run-items {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.artifact-item,
+.run-item {
+  padding: 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: 8px;
+}
+
+.artifact-item:hover,
+.run-item:hover {
+  background: rgba(91, 109, 255, 0.1);
+}
+
+.artifact-item.active,
+.run-item.active {
+  background: rgba(91, 109, 255, 0.2);
+  border: 1px solid rgba(91, 109, 255, 0.3);
+}
+
+.artifact-type {
+  font-size: 11px;
+  font-weight: 600;
+  color: #5b6dff;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.artifact-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #eef4ff;
+  margin-bottom: 6px;
+}
+
+.artifact-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #8ea0bd;
+}
+
+.artifact-status {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.artifact-status.ready {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.artifact-status.processing {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.artifact-detail,
+.run-detail {
+  display: flex;
+  flex-direction: column;
+  background: #1d2940;
+  border-radius: 14px;
+  border: 1px solid rgba(114, 128, 150, 0.14);
+  overflow: hidden;
+}
+
+.artifact-detail.empty,
+.run-detail.empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.artifact-content,
+.run-info {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.artifact-preview {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(114, 128, 150, 0.14);
+}
+
+.preview-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8ea0bd;
+  margin-bottom: 8px;
+}
+
+.preview-content {
+  background: #141d2e;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #c8d4e8;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.empty-list {
+  padding: 24px;
+  text-align: center;
+  color: #5a6a85;
+  font-size: 13px;
+}
+
+.empty-state {
+  color: #5a6a85;
+  font-size: 14px;
+}
+
+/* Run 列表样式 */
+.run-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.run-id {
+  font-size: 12px;
+  font-family: monospace;
+  color: #8ea0bd;
+}
+
+.run-status {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.run-status.success {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.run-status.failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.run-status.running {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.run-agent {
+  font-size: 13px;
+  font-weight: 500;
+  color: #eef4ff;
+  margin-bottom: 4px;
+}
+
+.run-summary {
+  font-size: 12px;
+  color: #8ea0bd;
+  line-height: 1.5;
+  margin-bottom: 6px;
+}
+
+.run-time {
+  font-size: 11px;
+  color: #5a6a85;
+}
+
+/* Run Steps 样式 */
+.run-steps {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.run-step-item {
+  padding: 12px;
+  background: #141d2e;
+  border-radius: 10px;
+  margin-bottom: 10px;
+  border-left: 3px solid #5b6dff;
+}
+
+.run-step-item.tool {
+  border-left-color: #f59e0b;
+}
+
+.run-step-item.model {
+  border-left-color: #3b82f6;
+}
+
+.run-step-item.final {
+  border-left-color: #22c55e;
+}
+
+.step-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.step-index {
+  font-size: 12px;
+  font-weight: 700;
+  color: #5b6dff;
+  font-family: monospace;
+}
+
+.step-type {
+  font-size: 11px;
+  font-weight: 600;
+  color: #8ea0bd;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  background: rgba(91, 109, 255, 0.1);
+  border-radius: 4px;
+}
+
+.step-time {
+  font-size: 11px;
+  color: #5a6a85;
+  margin-left: auto;
+}
+
+.step-content {
+  font-size: 13px;
+  color: #c8d4e8;
+  line-height: 1.6;
+}
+
+.step-tool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(114, 128, 150, 0.14);
+}
+
+.tool-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f59e0b;
+}
+
+.tool-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.tool-status.pending {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.tool-status.success {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.tool-status.failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+/* Run Info 样式 */
+.run-info .info-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.run-info .info-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8ea0bd;
+  min-width: 60px;
+}
+
+.run-info .info-value {
+  font-size: 13px;
+  color: #c8d4e8;
+  flex: 1;
+  line-height: 1.6;
+}
+
+.run-info .info-value.success {
+  color: #22c55e;
+}
+
+.run-info .info-value.failed {
+  color: #ef4444;
 }
 
 .dialog-body {

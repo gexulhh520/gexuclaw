@@ -1,6 +1,6 @@
 import { desc, eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { agentArtifacts, workContexts } from "../../db/schema.js";
+import { agentArtifacts, agentRuns, workContexts } from "../../db/schema.js";
 import { notFound } from "../../shared/errors.js";
 import { makeUid } from "../../shared/ids.js";
 import { jsonStringify } from "../../shared/json.js";
@@ -98,6 +98,43 @@ export async function createArtifact(workContextUid: string, input: CreateArtifa
     .where(eq(workContexts.id, workContext.id));
 
   return artifact;
+}
+
+export async function updateWorkContextRunBinding(
+  workContextUid: string,
+  runUid: string,
+  progressSummary?: string
+) {
+  const workContext = await getWorkContextByUid(workContextUid);
+  const now = nowIso();
+
+  // 查询 run 的数据库 id
+  const [run] = await db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(eq(agentRuns.runUid, runUid));
+
+  if (!run) {
+    console.error(`[WorkContext] Run not found: ${runUid}`);
+    throw notFound("Run not found", { runUid });
+  }
+
+  const [updated] = await db
+    .update(workContexts)
+    .set({
+      currentRunId: run.id,
+      updatedAt: now,
+      metadataJson: jsonStringify({
+        ...JSON.parse(workContext.metadataJson || '{}'),
+        progressSummary,
+        lastRunAt: now,
+      }),
+    })
+    .where(eq(workContexts.id, workContext.id))
+    .returning();
+
+  console.log(`[WorkContext] Updated run binding: ${workContextUid} -> run ${run.id} (${runUid})`);
+  return updated;
 }
 
 export async function listArtifactsByWorkContext(workContextUid: string) {
