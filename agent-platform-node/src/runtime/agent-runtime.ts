@@ -435,12 +435,14 @@ export class AgentRuntime {
 
     // 如果有父 run，也发布到父 run（用于前端统一展示）
     if (this.parentRunId) {
+      console.log(`[AgentRuntime] Forwarding step ${step.stepIndex} to parent run ${this.parentRunId}`);
       const [parentRun] = await db
         .select({ runUid: agentRuns.runUid })
         .from(agentRuns)
         .where(eq(agentRuns.id, this.parentRunId));
       
       if (parentRun) {
+        console.log(`[AgentRuntime] Emitting step to parent run ${parentRun.runUid}`);
         runEventBus.emitRunStep(parentRun.runUid, {
           runId: parentRun.runUid,
           stepIndex: step.stepIndex,
@@ -453,6 +455,8 @@ export class AgentRuntime {
           createdAt: step.createdAt,
           agentName: this.agentName,
         });
+      } else {
+        console.warn(`[AgentRuntime] Parent run ${this.parentRunId} not found`);
       }
     }
 

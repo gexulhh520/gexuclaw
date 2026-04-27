@@ -969,10 +969,8 @@ function subscribeToRunSteps(runId: string, runInfo: RunInfo) {
   const unsubscribe = agentPlatformApi.subscribeRunSteps(runId, {
     onStep: (step) => {
       console.log(`[SSE] Step received for ${runId}:`, step);
-      // 添加新步骤
-      runInfo.steps.push(step);
-      // 按 stepIndex 排序
-      runInfo.steps.sort((a, b) => a.stepIndex - b.stepIndex);
+      // 添加新步骤 - 使用新数组触发响应式更新
+      runInfo.steps = [...runInfo.steps, step].sort((a, b) => a.stepIndex - b.stepIndex);
     },
     onStatus: (status) => {
       console.log(`[SSE] Status update for ${runId}:`, status);
