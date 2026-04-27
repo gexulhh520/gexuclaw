@@ -155,13 +155,50 @@ export class ModelClient {
   private invokeMock(input: ModelClientInput): ModelClientResult {
     const latestUser = [...input.messages].reverse().find((message) => message.role === "user")?.content ?? "";
     const latestTool = [...input.messages].reverse().find((message) => message.role === "tool")?.content ?? "";
+    const systemMessage = input.messages.find((message) => message.role === "system")?.content ?? "";
+    const artifactDirectivesEnabled = systemMessage.includes("Artifact directives are enabled for this agent version.");
 
     // mock 模型看到“百度 / baidu / http”时主动发起 browser.open，
     // 用来验证 tool call、allowed_tools 校验和 agent_run_steps 记录。
     // 一旦已经拿到 tool 结果，就返回最终总结，避免在 phase one 里重复死循环调用同一个工具。
     if (latestTool) {
+      const parsedTool = this.parseToolPayload(latestTool);
+      const rawCandidates = Array.isArray(parsedTool?.artifactCandidates)
+        ? parsedTool.artifactCandidates
+        : [];
+      const firstCandidate = rawCandidates[0] as Record<string, unknown> | undefined;
+      const candidateId =
+        typeof firstCandidate?.candidateId === "string" ? firstCandidate.candidateId : undefined;
+
+      const directives = {
+        artifactDecisions: candidateId
+          ? [
+              {
+                candidateId,
+                keep: true,
+                artifactRole: "reference",
+                title: "浏览页面快照",
+              },
+            ]
+          : [],
+        declaredArtifacts: [
+          {
+            artifactType: "text",
+            artifactRole: "final",
+            title: "浏览结果摘要",
+            contentText: `Mock browser flow completed for: ${latestUser}`,
+          },
+        ],
+      };
+
+      const content = artifactDirectivesEnabled
+        ? `Mock browser flow completed for: ${latestUser}\n<artifact_directives>${JSON.stringify(
+            directives,
+          )}</artifact_directives>`
+        : `Mock browser flow completed for: ${latestUser}`;
+
       return {
-        content: `Mock browser flow completed for: ${latestUser}`,
+        content,
         toolCalls: [],
         usage: { inputTokens: 0, outputTokens: 0 },
       };
@@ -207,6 +244,14 @@ export class ModelClient {
       // 模型偶尔会返回非 JSON 参数。第一阶段先降级为空对象，
       // 后续可以在这里增加 repair 或 needs_clarification 策略。
       return {};
+    }
+  }
+
+  private parseToolPayload(value: string): Record<string, unknown> | null {
+    try {
+      return JSON.parse(value) as Record<string, unknown>;
+    } catch {
+      return null;
     }
   }
 

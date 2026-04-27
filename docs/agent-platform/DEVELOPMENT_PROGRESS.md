@@ -1146,3 +1146,222 @@
 - 先扩展 Artifact 字段与协议，新增 `artifactRole` 和来源血缘字段。
 - 再抽离工作台状态层，收口 `selectedWorkContext / selectedArtifact / selectedRun`。
 - 随后直接改造右侧工作台，让“上下文 / 产物 / 执行过程”三 tab 进入真实渲染阶段。
+
+## 2026-04-27：打通 Tool Candidate -> Agent Decision -> Artifact 沉淀 -> 右侧工作台联动 最小闭环
+
+本次目标：
+
+- 在不新增数据库表和字段的前提下，把现有 `agent_artifacts / work_contexts / agent_runs.outputArtifactIdsJson` 真正用起来。
+- 让工具输出不再只停留在 `RunStep.output`，而是能先形成候选产物，再由 Agent 决定是否保留、保留为什么角色，最终沉淀为 Artifact。
+- 让前端右侧 `产物 / 执行过程` 两个区域能随着 run 完成后的真实数据刷新，自动看到新产物和最新执行记录。
+
+修改文件：
+
+- `agent-platform-node/src/tools/tool-types.ts`
+- `agent-platform-node/src/tools/tool-registry.ts`
+- `agent-platform-node/src/modules/work-contexts/work-context.schema.ts`
+- `agent-platform-node/src/modules/artifacts/artifact-builder.ts`
+- `agent-platform-node/src/modules/artifacts/artifact-coordinator.ts`
+- `agent-platform-node/src/modules/artifacts/artifact-directives.ts`
+- `agent-platform-node/src/runtime/agent-runtime.ts`
+- `agent-platform-node/src/runtime/model-client.ts`
+- `frontend/src/views/AgentPlatform.vue`
+- `docs/agent-platform/DEVELOPMENT_PROGRESS.md`
+
+完成内容：
+
+- 后端 Tool 层：
+  - 为 `ToolResult` 增加 `artifactCandidates` 协议。
+  - 为 `ToolArtifactCandidate` 增加 `candidateId`，用于后续 Agent decision 精确引用。
+  - 给内置 mock browser 工具补上候选产物输出，先验证 `page/intermediate` 这类浏览类产物链路。
+
+- 后端 Artifact 协调层：
+  - 新增 `artifact-builder.ts`，负责把工具候选产物标准化为 `CreateArtifactInput`。
+  - 新增 `artifact-coordinator.ts`，负责：
+    - 为工具候选产物分配 `candidateId`
+    - 按默认规则持久化未被显式处理的候选产物
+    - 按 Agent decision 决定候选产物保留 / 丢弃 / 改写 `artifactRole`
+    - 持久化 Agent 显式声明的 `declaredArtifacts`
+    - 回写 `agent_runs.outputArtifactIdsJson`
+  - 保持现有数据库不变，复用已有：
+    - `agent_artifacts.artifactType`
+    - `agent_artifacts.artifactRole`
+    - `agent_artifacts.sourceRunId`
+    - `agent_artifacts.sourceArtifactIdsJson`
+    - `agent_runs.outputArtifactIdsJson`
+    - `work_contexts.latestArtifactId`
+
+- 后端 Agent Runtime：
+  - 在 `agent-runtime.ts` 中引入 Artifact directive 解析与协调逻辑。
+  - 约定 Agent 可在正常回复中嵌入：
+    - `<artifact_directives>...</artifact_directives>`
+  - directive 支持两类语义：
+    - `artifactDecisions`：决定候选产物是否保留、保留为什么 `artifactRole`、是否改标题
+    - `declaredArtifacts`：直接声明新的产物对象，例如 `text/final`
+  - Runtime 会自动：
+    - 解析 directives
+    - 清理用户最终可见的回复内容，避免把机器协议暴露到 UI
+    - 在模型结束前处理显式 decision
+    - 对未被消费的候选产物按默认规则兜底落库
+
+- 后端 Mock 验证链路：
+  - 在 `model-client.ts` 的 mock provider 流程里，补了一个可验证的样例：
+    - 工具返回候选页面产物
+    - Mock Agent 显式把该候选产物标记为 `reference`
+    - 同时声明一个 `text/final` 的摘要产物
+  - 这样无需等真实 browser tool 完整接入，就能先验证整条产物沉淀链路。
+
+- 后端 Schema/输入校验：
+  - 放宽 `createArtifactSchema.contentJson`，支持对象和数组两种结构，便于后续存放表格行、集合项等结构化内容。
+
+- 前端右侧工作台联动：
+  - 在 `AgentPlatform.vue` 中补强右侧状态保持与自动选中逻辑：
+    - 加载 session workbench 时自动选中最新 artifact
+    - 刷新 `workContextRuns` 后保持已选 run，若不存在则回退到最新 run
+    - 刷新 `workbench.artifacts` 后保持已选 artifact，若不存在则回退到最新 artifact
+    - 在中间消息区展开 run 步骤时，自动切到右侧 `执行过程`
+  - 让 run 完成后的 `onRunCompleted` 刷新链条与右侧工作台形成闭环：
+    - `reload session runs`
+    - `reload session workContexts`
+    - `reselect current workContext`
+    - `reload workContext runs`
+    - `reload workbench artifacts`
+
+验证方式：
+
+- `agent-platform-node` 执行 `npm.cmd run typecheck` 通过。
+- `frontend` 执行 `npm.cmd run build` 通过。
+- 前端普通沙箱构建时，Vite / esbuild 启动子进程触发 `spawn EPERM`，提升权限重跑后构建成功。
+- 通过 mock browser + mock model 的链路，已经具备以下验证能力：
+  - 工具候选产物会出现在 tool result 中
+  - Agent decision 能修改候选产物的 `artifactRole`
+  - Agent 可声明 `declaredArtifacts`
+  - run 的 `outputArtifactIdsJson` 会被写入
+  - 前端右侧工作台刷新后可自动选中最新 artifact / run
+
+当前边界说明：
+
+- 本次没有新增数据库字段，也没有新增数据库表。
+- 当前 Agent decision 协议已经接通，但真实效果仍取决于后续真实 agent prompt / tool 输出是否继续按该协议补齐。
+- 当前验证主要基于 mock browser / mock model，真实 browser tool、writer tool 等还需要继续补 candidate 输出。
+
+下一步建议：
+
+- 把真实 `browser` / `writer` / `extract` 类工具接入 `artifactCandidates`，不再只依赖 mock tool。
+- 在主 Agent / 子 Agent 的 system prompt 或版本配置里正式写入 artifact directive 规则，而不只是在 runtime 通用注入说明。
+- 在右侧 `执行过程` 中展示 run 与 output artifacts 的关联，让“这次运行产出了什么”可以直接在执行面板里看到。
+- 后续若要支持复杂派生链路，再评估是否新增独立的 artifact lineage / version 结构。
+
+## 2026-04-27：将 Artifact Directive 启用方式从 Runtime 全局硬编码收口为 AgentVersion.contextPolicyJson 开关
+
+本次目标：
+
+- 解决 artifact directive 规则由 runtime 对所有 agent 全局注入的问题。
+- 让 artifact directive 是否启用，改由各自 `AgentVersion.contextPolicyJson` 控制。
+- 保持平台统一解析协议，但把“谁能用、能用到什么程度”的控制权收回到 AgentVersion 配置层。
+
+修改文件：
+
+- `agent-platform-node/src/modules/artifacts/artifact-directives.ts`
+- `agent-platform-node/src/runtime/agent-runtime.ts`
+- `agent-platform-node/src/runtime/model-client.ts`
+- `docs/agent-platform/DEVELOPMENT_PROGRESS.md`
+
+完成内容：
+
+- 在 `artifact-directives.ts` 中新增 `parseArtifactDirectiveConfig(...)`。
+- 约定 `contextPolicyJson` 可新增：
+  - `artifactDirectives.enabled`
+  - `artifactDirectives.mode`
+- 当前支持两种 mode：
+  - `decision_only`
+    - 只允许 Agent 对工具候选产物做 `artifactDecisions`
+    - 不允许额外声明 `declaredArtifacts`
+  - `full`
+    - 允许 `artifactDecisions`
+    - 也允许 `declaredArtifacts`
+
+- 在 `agent-runtime.ts` 中：
+  - 从 `AgentVersion.contextPolicyJson` 解析 artifact directive 配置。
+  - `renderSystemMessage()` 不再无条件注入 artifact directive 协议说明。
+  - 只有当：
+    - `artifactDirectives.enabled = true`
+    才注入协议说明。
+  - 并根据：
+    - `mode = decision_only`
+    - `mode = full`
+    决定是否提示 `declaredArtifacts` 能力。
+
+- 在 `model-client.ts` 的 mock provider 中同步对齐：
+  - 只有 system message 中明确启用了 artifact directives，mock 才会返回 `<artifact_directives>...</artifact_directives>`。
+  - 避免 runtime 关掉开关后，mock 行为仍然继续输出 directive，导致验证结果失真。
+
+配置约定：
+
+- 不启用：
+
+```json
+{
+  "artifactDirectives": {
+    "enabled": false
+  }
+}
+```
+
+- 只允许候选产物决策：
+
+```json
+{
+  "artifactDirectives": {
+    "enabled": true,
+    "mode": "decision_only"
+  }
+}
+```
+
+- 允许完整产物声明：
+
+```json
+{
+  "artifactDirectives": {
+    "enabled": true,
+    "mode": "full"
+  }
+}
+```
+
+- 与已有 `contextPolicyJson` 合并时，保留原字段不覆盖。例如：
+
+```json
+{
+  "include_work_context_summary": false,
+  "artifactDirectives": {
+    "enabled": true,
+    "mode": "decision_only"
+  }
+}
+```
+
+验证方式：
+
+- `agent-platform-node` 执行 `npm.cmd run typecheck` 通过。
+- 对照 runtime 拼装逻辑确认：
+  - 未开启时，不注入 artifact directive 协议说明。
+  - 开启 `decision_only` 时，只注入 `artifactDecisions` 提示。
+  - 开启 `full` 时，额外注入 `declaredArtifacts` 提示。
+- 对照 mock model 逻辑确认：
+  - 只有启用时，mock 才输出 directive block。
+
+设计结论：
+
+- artifact directive 的“协议解析能力”继续留在平台 runtime。
+- artifact directive 的“启用开关与使用级别”下沉到 `AgentVersion.contextPolicyJson`。
+- `skillText` 继续承载业务规则，不再承担开/关控制。
+- 当前不需要新增数据库字段，直接复用现有的 `contextPolicyJson` 即可。
+
+下一步建议：
+
+- 给现有 browser / writer / 子 agent version 明确配置默认 `artifactDirectives` 策略。
+- Browser / extract 类 agent 优先使用 `decision_only`。
+- Writer / summarizer 类 agent 优先使用 `full`。
+- 后续如需做后台配置界面，再把该开关暴露到 AgentVersion 配置 UI 中。

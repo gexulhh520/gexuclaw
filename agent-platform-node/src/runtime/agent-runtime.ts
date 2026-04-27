@@ -13,7 +13,18 @@ import {
 import type { ChatMessage } from "./model-client.js";
 import { ModelClient } from "./model-client.js";
 import { ToolRuntime } from "./tool-runtime.js";
-import { persistArtifactsFromToolResult } from "../modules/artifacts/artifact-coordinator.js";
+import {
+  extractArtifactDirectives,
+  parseArtifactDirectiveConfig,
+  type ArtifactDirectiveConfig,
+} from "../modules/artifacts/artifact-directives.js";
+import {
+  attachCandidateIdsToToolResult,
+  persistArtifactsFromAgentDecisions,
+  persistArtifactsFromToolResult,
+  persistDeclaredArtifacts,
+  type PendingArtifactCandidate,
+} from "../modules/artifacts/artifact-coordinator.js";
 
 // 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
 type RunAgentInputExtended = {
@@ -251,6 +262,7 @@ export class AgentRuntime {
   }) {
     const allowedTools = jsonParse<string[]>(args.input.versionRecord.allowedToolsJson, []);
     const contextPolicy = jsonParse<Record<string, unknown>>(args.input.versionRecord.contextPolicyJson, {});
+    const artifactDirectiveConfig = parseArtifactDirectiveConfig(contextPolicy);
     const modelParamsOverride = jsonParse<Record<string, unknown>>(
       args.input.versionRecord.modelParamsOverrideJson,
       {},
@@ -277,12 +289,13 @@ export class AgentRuntime {
       .where(eq(agentRuns.id, args.runId));
 
     const messages: ChatMessage[] = [
-      { role: "system", content: this.renderSystemMessage(promptContext) },
+      { role: "system", content: this.renderSystemMessage(promptContext, artifactDirectiveConfig) },
       { role: "user", content: args.input.userMessage },
     ];
 
     let stepIndex = 1;
     let latestContent = "";
+    let pendingArtifactCandidates: PendingArtifactCandidate[] = [];
 
     // 第一阶段的主循环故意保持小：先验证模型调用、工具白名单和运行轨迹。
     for (let turn = 0; turn < args.input.versionRecord.maxSteps; turn += 1) {
@@ -303,14 +316,42 @@ export class AgentRuntime {
         tools: toolManifest,
       });
 
-      latestContent = modelResult.content;
+      const directives = extractArtifactDirectives(modelResult.content);
+      latestContent = directives.cleanContent;
+
+      if (directives.artifactDecisions.length > 0) {
+        const decisionResult = await persistArtifactsFromAgentDecisions({
+          workContextUid: args.input.workContextId,
+          runId: args.runId,
+          pendingCandidates: pendingArtifactCandidates,
+          decisions: directives.artifactDecisions,
+        });
+
+        if (decisionResult.consumedCandidateIds.length > 0) {
+          const consumedSet = new Set(decisionResult.consumedCandidateIds);
+          pendingArtifactCandidates = pendingArtifactCandidates.filter(
+            (item) => !consumedSet.has(item.candidateId),
+          );
+        }
+      }
+
+      if (directives.declaredArtifacts.length > 0) {
+        await persistDeclaredArtifacts({
+          workContextUid: args.input.workContextId,
+          runId: args.runId,
+          declaredArtifacts: directives.declaredArtifacts,
+        });
+      }
+
       await db
         .update(agentRunSteps)
         .set({
-          content: modelResult.content,
+          content: directives.cleanContent,
           outputJson: jsonStringify({
             hasToolCalls: modelResult.toolCalls.length > 0,
             toolCallCount: modelResult.toolCalls.length,
+            artifactDecisionCount: directives.artifactDecisions.length,
+            declaredArtifactCount: directives.declaredArtifacts.length,
           }),
         })
         .where(eq(agentRunSteps.id, modelStep.id));
@@ -322,7 +363,7 @@ export class AgentRuntime {
         params: { ...modelDefaultParams, ...modelParamsOverride },
         requestSummary: { messageCount: messages.length, toolCount: toolManifest.length },
         responseSummary: {
-          hasContent: modelResult.content.length > 0,
+          hasContent: directives.cleanContent.length > 0,
           toolCallCount: modelResult.toolCalls.length,
         },
         promptContextSummary: summarizePromptContext(promptContext),
@@ -333,20 +374,32 @@ export class AgentRuntime {
       });
 
       if (modelResult.toolCalls.length === 0) {
+        if (pendingArtifactCandidates.length > 0) {
+          await persistArtifactsFromToolResult({
+            workContextUid: args.input.workContextId,
+            runId: args.runId,
+            toolResult: {
+              success: true,
+              artifactCandidates: pendingArtifactCandidates.map((item) => item.candidate),
+            },
+          });
+          pendingArtifactCandidates = [];
+        }
+
         await this.createStep({
           runId: args.runId,
           stepIndex: stepIndex++,
           stepType: "final",
-          content: modelResult.content,
-          output: { content: modelResult.content },
+          content: directives.cleanContent,
+          output: { content: directives.cleanContent },
         });
 
-        return { summary: modelResult.content || "Agent run completed.", stepsCount: stepIndex - 1 };
+        return { summary: directives.cleanContent || "Agent run completed.", stepsCount: stepIndex - 1 };
       }
 
       messages.push({
         role: "assistant",
-        content: modelResult.content,
+        content: directives.cleanContent,
         tool_calls: modelResult.toolCalls.map((toolCall) => ({
           id: toolCall.id,
           type: "function",
@@ -369,6 +422,18 @@ export class AgentRuntime {
         });
 
         const toolResult = await toolRuntime.execute(toolCall.name, toolCall.arguments);
+        const decoratedToolResult = attachCandidateIdsToToolResult({
+          toolName: toolCall.name,
+          toolCallId: toolCall.id,
+          toolResult,
+        });
+
+        if (decoratedToolResult.pendingCandidates.length > 0) {
+          pendingArtifactCandidates = [
+            ...pendingArtifactCandidates,
+            ...decoratedToolResult.pendingCandidates,
+          ];
+        }
 
         await this.createStep({
           runId: args.runId,
@@ -376,34 +441,63 @@ export class AgentRuntime {
           stepType: "tool_end",
           toolName: toolCall.name,
           toolCallId: toolCall.id,
-          toolStatus: toolResult.success ? "success" : "failed",
-          output: toolResult,
-        });
-
-        await persistArtifactsFromToolResult({
-          workContextUid: args.input.workContextId,
-          runId: args.runId,
-          toolResult,
+          toolStatus: decoratedToolResult.toolResult.success ? "success" : "failed",
+          output: decoratedToolResult.toolResult,
         });
 
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id,
-          content: jsonStringify(toolResult),
+          content: jsonStringify(decoratedToolResult.toolResult),
         });
       }
+    }
+
+    if (pendingArtifactCandidates.length > 0) {
+      await persistArtifactsFromToolResult({
+        workContextUid: args.input.workContextId,
+        runId: args.runId,
+        toolResult: {
+          success: true,
+          artifactCandidates: pendingArtifactCandidates.map((item) => item.candidate),
+        },
+      });
     }
 
     return { summary: latestContent || "Agent run reached max steps.", stepsCount: stepIndex - 1 };
   }
 
-  private renderSystemMessage(context: ReturnType<typeof buildPromptContext>): string {
-    return [
+  private renderSystemMessage(
+    context: ReturnType<typeof buildPromptContext>,
+    artifactDirectiveConfig: ArtifactDirectiveConfig,
+  ): string {
+    const sections = [
       context.systemPrompt,
       context.skillText ? `\nSkill:\n${context.skillText}` : "",
       context.handoffNote ? `\nHandoff note:\n${context.handoffNote}` : "",
-      "\nUse only the tools exposed in the tool manifest. Return a concise final answer when done.",
-    ].join("\n");
+      "\nUse only the tools exposed in the tool manifest.",
+      "\nReturn a concise final answer when done.",
+    ];
+
+    if (artifactDirectiveConfig.enabled) {
+      sections.push(
+        "\nArtifact directives are enabled for this agent version.",
+        "\nIf you want to preserve or discard tool-produced artifact candidates, you may add one machine-readable block anywhere in your reply using the exact tag <artifact_directives>...</artifact_directives>.",
+        '\nWithin that block, you may provide {"artifactDecisions":[{"candidateId":"toolcall:artifact:1","keep":true,"artifactRole":"reference","title":"Optional title override"}]}.',
+      );
+
+      if (artifactDirectiveConfig.mode === "full") {
+        sections.push(
+          '\nFull mode is enabled, so you may also declare new artifacts with {"declaredArtifacts":[{"artifactType":"text","artifactRole":"final","title":"Final summary","contentText":"..."}]}.',
+        );
+      }
+
+      sections.push(
+        "\nOnly include the block when you have artifact decisions or declared artifacts. Keep your normal user-facing answer outside the block.",
+      );
+    }
+
+    return sections.join("\n");
   }
 
   private async createStep(input: RunStepInsert) {

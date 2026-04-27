@@ -22,6 +22,7 @@ export type ArtifactRole =
   | "output";
 
 export type ToolArtifactCandidate = {
+  candidateId?: string;
   kind: ArtifactType;
   title?: string;
   contentText?: string;

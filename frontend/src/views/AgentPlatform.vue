@@ -522,8 +522,8 @@
                   <template v-else-if="selectedArtifact.artifactType === 'page'">
                     <div class="page-preview">
                       <div class="page-meta" v-if="getPageMeta(selectedArtifact)">
-                        <div class="page-url">{{ getPageMeta(selectedArtifact).url }}</div>
-                        <div class="page-title">{{ getPageMeta(selectedArtifact).title }}</div>
+                        <div class="page-url">{{ getPageMeta(selectedArtifact)?.url }}</div>
+                        <div class="page-title">{{ getPageMeta(selectedArtifact)?.title }}</div>
                       </div>
                       <iframe
                         v-if="selectedArtifact.uri"
@@ -555,8 +555,8 @@
                         <div class="placeholder-icon">🖼️</div>
                         <div class="placeholder-text">图片数据</div>
                         <div v-if="getImageMeta(selectedArtifact)" class="image-meta">
-                          <span>{{ getImageMeta(selectedArtifact).width }} x {{ getImageMeta(selectedArtifact).height }}</span>
-                          <span>{{ getImageMeta(selectedArtifact).format }}</span>
+                          <span>{{ getImageMeta(selectedArtifact)?.width }} x {{ getImageMeta(selectedArtifact)?.height }}</span>
+                          <span>{{ getImageMeta(selectedArtifact)?.format }}</span>
                         </div>
                       </div>
                     </div>
@@ -578,9 +578,9 @@
                         <div class="link-arrow">→</div>
                       </a>
                       <div v-if="getLinkMeta(selectedArtifact)" class="link-meta">
-                        <span class="meta-item">{{ getLinkMeta(selectedArtifact).siteName }}</span>
-                        <span class="meta-item" v-if="getLinkMeta(selectedArtifact).description">
-                          {{ getLinkMeta(selectedArtifact).description.slice(0, 100) }}...
+                        <span class="meta-item">{{ getLinkMeta(selectedArtifact)?.siteName }}</span>
+                        <span class="meta-item" v-if="getLinkMeta(selectedArtifact)?.description">
+                          {{ getLinkMeta(selectedArtifact)?.description?.slice(0, 100) }}...
                         </span>
                       </div>
                     </div>
@@ -1265,6 +1265,7 @@ async function loadAndSelectSessionWorkContext(sessionId: string) {
     if (workbench.selectedWorkContext) {
       selectedWorkContext.value = workbench.selectedWorkContext;
       workContextArtifacts.value = workbench.artifacts;
+      selectedArtifact.value = workbench.artifacts[0] || null;
       console.log(`[loadAndSelectSessionWorkContext] Selected work context: ${workbench.selectedWorkContext.workContextUid}`);
 
       // 加载该 workContext 的 runs
@@ -1273,6 +1274,8 @@ async function loadAndSelectSessionWorkContext(sessionId: string) {
       selectedWorkContext.value = null;
       workContextArtifacts.value = [];
       workContextRuns.value = [];
+      selectedArtifact.value = null;
+      selectedRun.value = null;
     }
   } catch (error) {
     console.error('[loadAndSelectSessionWorkContext] Failed to load workbench:', error);
@@ -1495,11 +1498,19 @@ function updateMessageContentByRunId(runId: string, content: string) {
 // 切换 Run 步骤展开/收起
 function toggleRunExpanded(runInfo: RunInfo) {
   runInfo.isExpanded = !runInfo.isExpanded;
+  if (runInfo.isExpanded) {
+    activeWorkspaceTab.value = "执行过程";
+    const matchedRun = workContextRuns.value.find((item) => item.runUid === runInfo.runId);
+    if (matchedRun) {
+      void selectRun(matchedRun);
+    }
+  }
 }
 
 // 选择 Run 并加载 Steps
 async function selectRun(run: AgentRunRecord) {
   selectedRun.value = run;
+  activeWorkspaceTab.value = "执行过程";
   try {
     const steps = await agentPlatformApi.listRunSteps(run.runUid);
     selectedRunSteps.value = steps || [];
@@ -1563,6 +1574,10 @@ async function onRunCompleted(runId: string) {
       // 5. 刷新选中 workContext 的 artifacts
       console.log('[onRunCompleted] Reloading artifacts for selected work context...');
       await reloadArtifactsForSelectedWorkContext();
+      const latestRun = workContextRuns.value.find((item) => item.runUid === runId);
+      if (latestRun) {
+        selectedRun.value = latestRun;
+      }
     }
     
     console.log('[onRunCompleted] Data refresh completed');
@@ -1589,6 +1604,12 @@ async function loadWorkContextRuns(workContextId: string) {
     const runs = await agentPlatformApi.listRuns({ workContextId, limit: 50 });
     console.log(`[loadWorkContextRuns] Loaded ${runs.length} runs for workContext ${workContextId}`);
     workContextRuns.value = runs;
+    if (selectedRun.value) {
+      const matchedRun = runs.find((run) => run.runUid === selectedRun.value?.runUid);
+      selectedRun.value = matchedRun || runs[0] || null;
+    } else {
+      selectedRun.value = runs[0] || null;
+    }
   } catch (error) {
     console.error('[loadWorkContextRuns] Failed to load runs:', error);
   }
@@ -1659,6 +1680,20 @@ async function reloadArtifactsForSelectedWorkContext() {
     workContextArtifacts.value = workbench.artifacts;
     // 更新 runs 列表
     workContextRuns.value = workbench.runs;
+    if (selectedArtifact.value) {
+      const matchedArtifact = workbench.artifacts.find(
+        (artifact) => artifact.artifactUid === selectedArtifact.value?.artifactUid,
+      );
+      selectedArtifact.value = matchedArtifact || workbench.artifacts[0] || null;
+    } else {
+      selectedArtifact.value = workbench.artifacts[0] || null;
+    }
+    if (selectedRun.value) {
+      const matchedRun = workbench.runs.find((run) => run.runUid === selectedRun.value?.runUid);
+      selectedRun.value = matchedRun || workbench.runs[0] || null;
+    } else {
+      selectedRun.value = workbench.runs[0] || null;
+    }
   } catch (error) {
     console.error('[reloadArtifactsForSelectedWorkContext] Failed to load workbench:', error);
   }
