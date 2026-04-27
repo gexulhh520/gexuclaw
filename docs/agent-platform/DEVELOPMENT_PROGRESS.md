@@ -1365,3 +1365,201 @@
 - Browser / extract 类 agent 优先使用 `decision_only`。
 - Writer / summarizer 类 agent 优先使用 `full`。
 - 后续如需做后台配置界面，再把该开关暴露到 AgentVersion 配置 UI 中。
+
+## 2026-04-27：收敛 BrowserAgent 能力插件化方向（内置插件 / 外部插件）
+
+本次目标：
+
+- 不再把 Playwright、bb-browser、OpenCLI 这类外部能力直接耦合进 BrowserAgent 本体。
+- 明确 BrowserAgent 后续应走“Agent 原生能力 + 插件扩展能力”的组织方式。
+- 明确内置插件与外部插件的差异、装载方式，以及插件工具输出必须统一适配到平台 `ToolResult` / Artifact 流程中的原则。
+
+设计结论：
+
+- 子 Agent 最终能力由两部分组成：
+  - Agent 自带能力
+    - `systemPrompt`
+    - `skillText`
+    - 原生 `allowedTools`
+    - 原生 `contextPolicy`
+  - 插件扩展能力
+    - 插件自带 `skill`
+    - 插件提供的 `tools`
+    - 插件补充的 `policy`
+
+- BrowserAgent 后续不应直接绑定具体执行技术，而应通过插件获得浏览器能力。
+
+- 浏览器能力插件后续分成两类：
+
+  - **内置插件（builtin plugins）**
+    - 平台自带
+    - 默认可信
+    - 当前阶段可默认装载到对应 Agent
+    - 适合作为基础能力
+
+  - **外部插件（external plugins）**
+    - 需要显式安装
+    - 需要显式挂载到 Agent / AgentVersion
+    - 适合接第三方浏览器生态或专项网站能力
+
+- 当前确定的插件装载策略：
+  - **当前阶段**
+    - 内置插件可以默认装载
+    - 外部插件按需显式挂载
+  - **后续后台管理阶段**
+    - 新增/编辑 Agent 时，可以选择内置插件或外部插件
+    - Agent 的最终能力由“原生能力 + 选中插件”共同决定
+
+浏览器相关插件讨论结论：
+
+- `Playwright`
+  - 更适合作为长期服务态、通用自动化、复杂交互与调试兜底能力
+  - 更适合做内置浏览器基础执行插件，例如：
+    - `builtin-browser-playwright`
+
+- `bb-browser`
+  - 更适合作为桌面态、已登录浏览器状态复用、站点 adapter 能力插件
+  - 更适合作为外部插件，例如：
+    - `browser-bb-browser`
+
+- `OpenCLI`
+  - 也可作为外部浏览器能力插件候选
+  - 但相较 `bb-browser`，当前对 BrowserAgent 的聚焦度稍弱，可作为备选路线保留
+
+插件命名与工具命名原则：
+
+- 插件名称用于标识能力包，例如：
+  - `builtin-browser-core`
+  - `builtin-browser-playwright`
+  - `browser-bb-browser`
+  - `browser-opencli`
+
+- 工具名称用于标识实际能力入口。
+- 后续推荐方向：
+  - 插件内部可以有 provider 自己的工具实现命名
+  - 平台对上应尽量收敛成统一 browser capability 协议
+  - 避免让 Agent 直接面对多套高度相似但命名不同的工具集合
+
+统一适配原则（已明确为平台约束）：
+
+- 无论插件是内置还是外部：
+  - 插件工具执行后的原始返回
+  - **都不能直接进入系统**
+  - 必须先适配为平台统一的 `ToolResult`
+
+- 当前统一目标对象为：
+  - `ToolResult.success`
+  - `ToolResult.data`
+  - `ToolResult.error`
+  - `ToolResult.meta`
+  - `ToolResult.artifactCandidates`
+
+- 任何外部插件如果产生可沉淀结果：
+  - 必须通过 `artifactCandidates`
+  - 交给平台统一走：
+    - `ArtifactBuilder`
+    - `ArtifactCoordinator`
+    - `WorkContext / Artifact / Run`
+  - 外部插件不应直接写库
+
+架构方向（后续实现目标）：
+
+- 平台层：
+  - 维护插件池
+  - 区分内置插件与外部插件
+
+- Agent / AgentVersion 层：
+  - 维护挂载的插件集合
+  - Agent 最终运行能力 = 原生能力 + 插件能力
+
+- Runtime 层：
+  - 合并 Agent 原生 skill / tools / policy
+  - 合并插件 skill / tools / policy
+  - 将插件工具返回统一适配为 `ToolResult`
+
+下一步建议：
+
+- 设计插件元数据结构：
+  - `pluginId`
+  - `pluginType`（builtin / external）
+  - `skillText`
+  - `tools`
+  - `policyPatch`
+  - `status`
+
+- 设计 Agent / AgentVersion 的插件挂载关系。
+- 设计插件工具适配层，确保 Playwright / bb-browser / OpenCLI 这类能力最终统一回到平台 `ToolResult` 和 Artifact 流程。
+
+## 2026-04-27：新增 MCP 风格插件系统设计草案
+
+本次目标：
+
+- 将前面关于 BrowserAgent 插件化、内置插件 / 外部插件、以及是否遵循 MCP 的讨论收敛成一份正式设计文档。
+- 明确插件系统应遵循 MCP 的能力分类思想（tools / resources / prompts），但继续保留平台自有 Runtime、ToolResult 与 Artifact 模型。
+
+修改文件：
+
+- `docs/agent-platform/MCP_STYLE_PLUGIN_SYSTEM_DESIGN.md`
+- `docs/agent-platform/DEVELOPMENT_PROGRESS.md`
+
+完成内容：
+
+- 新增《MCP 风格插件系统设计草案》文档。
+- 明确插件系统的设计原则：
+  - Agent 原生能力与插件扩展能力分离
+  - 插件分内置插件与外部插件
+  - Runtime 负责最终合并
+  - 外部插件结果必须统一适配为平台 `ToolResult`
+- 明确 MCP 风格映射：
+  - `tools`
+  - `resources`
+  - `prompts`
+- 明确 BrowserAgent 后续的插件定位：
+  - `builtin-browser-playwright`
+  - `browser-bb-browser`
+  - `browser-opencli`
+- 明确后台管理的后续方向：
+  - 新增/编辑 Agent 时可选择内置插件或外部插件
+  - Agent 最终能力 = 原生能力 + 已挂载插件能力
+
+下一步建议：
+
+- 开始细化插件元数据结构与挂载关系。
+- 开始设计后端插件注册表与 Runtime 装载流程。
+- 开始设计插件工具返回统一适配层，与当前 `ToolResult / artifactCandidates` 流程对接。
+
+## 2026-04-27：新增插件系统分阶段落地计划
+
+本次目标：
+
+- 将插件系统讨论从“概念方向”进一步推进到“按阶段可开发计划”。
+- 明确当前插件系统是在优化现有哪块能力，以及应该按什么顺序落地。
+
+修改文件：
+
+- `docs/agent-platform/PLUGIN_SYSTEM_PHASED_IMPLEMENTATION_PLAN.md`
+- `docs/agent-platform/DEVELOPMENT_PROGRESS.md`
+
+完成内容：
+
+- 新增《插件系统分阶段落地设计》文档。
+- 明确当前插件系统要优化的几块能力：
+  - Agent 原生能力与扩展能力仍然混在一起
+  - 插件内容无法按需查询
+  - 缺少统一插件查询工具
+  - Runtime 还没有插件能力合并模型
+- 明确分三个阶段推进：
+  - Phase 1：定义插件对象模型与目录查询机制
+  - Phase 2：接入 Runtime 合并逻辑
+  - Phase 3：做最小内置插件验证闭环
+- 明确当前建议实现顺序：
+  - 定 `AgentPlugin` 正式结构
+  - 定插件目录摘要注入格式
+  - 定 `plugin.read_item` schema
+  - 做 Runtime 合并逻辑
+  - 接最小内置插件验证链路
+
+下一步建议：
+
+- 直接开始 Phase 1 的类型定义与 schema 设计。
+- 先把 `AgentPlugin / PluginCatalogSummary / plugin.read_item` 这些对象定清楚，再开始写 Runtime 代码。
