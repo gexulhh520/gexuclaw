@@ -4,6 +4,7 @@ import { agentRunSteps, agentRuns, modelInvocations, modelProfiles, workContexts
 import { jsonParse, jsonStringify } from "../shared/json.js";
 import { makeUid } from "../shared/ids.js";
 import { nowIso } from "../shared/time.js";
+import { runEventBus } from "../shared/event-bus.js";
 import {
   buildPromptContext,
   selectedContextRefsForFirstPhase,
@@ -12,6 +13,34 @@ import {
 import type { ChatMessage } from "./model-client.js";
 import { ModelClient } from "./model-client.js";
 import { ToolRuntime } from "./tool-runtime.js";
+
+// 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
+type RunAgentInputExtended = {
+  agentRecord: {
+    id: number;
+    agentUid: string;
+    name: string;
+    type: string;
+  };
+  versionRecord: {
+    id: number;
+    version: number;
+    modelProfileId: number;
+    systemPrompt: string;
+    skillText: string;
+    allowedToolsJson: string;
+    contextPolicyJson: string;
+    modelParamsOverrideJson: string;
+    maxSteps: number;
+  };
+  userMessage: string;
+  handoffNote?: string;
+  userId?: string;
+  sessionId?: string;
+  workContextId?: string;
+  mode: "standalone" | "subagent" | "main";
+  runUid?: string; // 用于事件推送
+};
 
 type RunAgentInput = {
   agentRecord: {
@@ -36,6 +65,7 @@ type RunAgentInput = {
   userId?: string;
   sessionId?: string;
   workContextId?: string;
+  parentRunId?: number;  // 父 run 的 ID，用于关联主 Agent 和子 Agent
   mode: "standalone" | "subagent" | "main";
 };
 
@@ -54,6 +84,10 @@ type RunStepInsert = {
 
 export class AgentRuntime {
   private readonly modelClient = new ModelClient();
+  private currentRunUid: string = "";
+  private currentRunId: number = 0;
+  private parentRunId: number | undefined = undefined;
+  private agentName: string = "";
 
   async run(input: RunAgentInput) {
     const [profile] = await db
@@ -64,6 +98,11 @@ export class AgentRuntime {
     if (!profile) throw new Error("ModelProfile not found for AgentVersion");
 
     const now = nowIso();
+    const runUid = makeUid("run");
+    this.currentRunUid = runUid;
+    this.parentRunId = input.parentRunId;
+    this.agentName = input.agentRecord.name;
+
     // 每次运行都冻结一份快照，保证以后复盘时能知道当时看到的 Agent / Version / ModelProfile 配置。
     const snapshot = {
       agent: {
@@ -86,15 +125,17 @@ export class AgentRuntime {
       },
     };
 
+    console.log(`[AgentRuntime] Creating run with sessionId: ${input.sessionId}, workContextId: ${input.workContextId}, parentRunId: ${input.parentRunId}`);
     const [run] = await db
       .insert(agentRuns)
       .values({
-        runUid: makeUid("run"),
+        runUid,
         agentId: input.agentRecord.id,
         agentVersionId: input.versionRecord.id,
         userId: input.userId,
         sessionId: input.sessionId,
         workContextId: input.workContextId,
+        parentRunId: input.parentRunId,
         mode: input.mode,
         status: "running",
         userMessage: input.userMessage,
@@ -105,6 +146,8 @@ export class AgentRuntime {
         startedAt: now,
       })
       .returning();
+    this.currentRunId = run.id;
+    console.log(`[AgentRuntime] Run created: ${run.runUid} with sessionId: ${run.sessionId}, id=${run.id}`);
 
     if (input.workContextId) {
       await db
@@ -118,7 +161,7 @@ export class AgentRuntime {
 
     try {
       // AgentRun 先落库再执行主循环，这样即使模型或工具失败，也能留下失败轨迹。
-      const result = await this.executeRunLoop({ runId: run.id, profile, input });
+      const result = await this.executeRunLoop({ runId: run.id, runUid, profile, input });
       const finishedAt = nowIso();
 
       await db
@@ -131,6 +174,14 @@ export class AgentRuntime {
           updatedAt: finishedAt,
         })
         .where(eq(agentRuns.id, run.id));
+
+      // 发布 Run 完成事件
+      runEventBus.emitRunStatus(runUid, {
+        runId: runUid,
+        status: "success",
+        resultSummary: result.summary,
+        updatedAt: finishedAt,
+      });
 
       if (input.workContextId) {
         await db
@@ -152,12 +203,21 @@ export class AgentRuntime {
       const finishedAt = nowIso();
       const message = error instanceof Error ? error.message : String(error);
 
-      await this.createStep({
+      const errorStep = await this.createStep({
         runId: run.id,
         stepIndex: 9999,
         stepType: "error",
         content: message,
         output: { error: message },
+      });
+
+      // 发布错误步骤事件
+      runEventBus.emitRunStep(runUid, {
+        runId: runUid,
+        stepIndex: errorStep.stepIndex,
+        stepType: "error",
+        content: message,
+        createdAt: errorStep.createdAt,
       });
 
       await db
@@ -170,12 +230,21 @@ export class AgentRuntime {
         })
         .where(eq(agentRuns.id, run.id));
 
+      // 发布 Run 失败事件
+      runEventBus.emitRunStatus(runUid, {
+        runId: runUid,
+        status: "failed",
+        resultSummary: message,
+        updatedAt: finishedAt,
+      });
+
       throw error;
     }
   }
 
   private async executeRunLoop(args: {
     runId: number;
+    runUid: string;
     profile: typeof modelProfiles.$inferSelect;
     input: RunAgentInput;
   }) {
@@ -347,6 +416,45 @@ export class AgentRuntime {
         createdAt: nowIso(),
       })
       .returning();
+
+    // 发布步骤事件到事件总线（当前 run）
+    if (this.currentRunUid) {
+      runEventBus.emitRunStep(this.currentRunUid, {
+        runId: this.currentRunUid,
+        stepIndex: step.stepIndex,
+        stepType: step.stepType,
+        content: step.content ?? undefined,
+        toolName: step.toolName ?? undefined,
+        toolStatus: step.toolStatus ?? undefined,
+        input: input.input,
+        output: input.output,
+        createdAt: step.createdAt,
+        agentName: this.agentName,
+      });
+    }
+
+    // 如果有父 run，也发布到父 run（用于前端统一展示）
+    if (this.parentRunId) {
+      const [parentRun] = await db
+        .select({ runUid: agentRuns.runUid })
+        .from(agentRuns)
+        .where(eq(agentRuns.id, this.parentRunId));
+      
+      if (parentRun) {
+        runEventBus.emitRunStep(parentRun.runUid, {
+          runId: parentRun.runUid,
+          stepIndex: step.stepIndex,
+          stepType: step.stepType,
+          content: step.content ?? undefined,
+          toolName: step.toolName ?? undefined,
+          toolStatus: step.toolStatus ?? undefined,
+          input: input.input,
+          output: input.output,
+          createdAt: step.createdAt,
+          agentName: this.agentName,
+        });
+      }
+    }
 
     return step;
   }

@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const httpClient = axios.create({
   baseURL: '/api/agent-platform',
-  timeout: 15000,
+  timeout: 120000,
 })
 
 export type AgentRecord = {
@@ -76,6 +76,7 @@ export type AgentRunRecord = {
   contextPackageSummaryJson: string
   resultSummary: string | null
   outputJson: string
+  agentName?: string  // Agent 名称
   errorMessage: string | null
   startedAt: string | null
   finishedAt: string | null
@@ -208,6 +209,26 @@ export type CreateWorkContextInput = {
   metadata?: Record<string, unknown>
 }
 
+// Orchestration Types
+export type ChatRequestInput = {
+  sessionId: string
+  message: string
+  workContextId?: string
+  selectedAgentId?: string
+}
+
+export type ChatResponse = {
+  message: string
+  workContextId: string
+  runId?: string
+  agentId?: string
+  artifacts?: Array<{
+    id: string
+    type: string
+    title: string
+  }>
+}
+
 export type CreateArtifactInput = {
   runId?: number
   artifactType: string
@@ -323,9 +344,9 @@ export const agentPlatformApi = {
     return unwrap(data)
   },
 
-  async listRuns(agentUid?: string, limit = 20) {
+  async listRuns(agentUid?: string, limit = 20, sessionId?: string) {
     const { data } = await httpClient.get<ApiEnvelope<AgentRunRecord[]>>('/runs', {
-      params: { agentUid, limit },
+      params: { agentUid, limit, sessionId },
     })
     return unwrap(data)
   },
@@ -340,8 +361,117 @@ export const agentPlatformApi = {
     return unwrap(data)
   },
 
+  // 查询 Run 详情和步骤（新接口）
+  async getRunWithSteps(runUid: string) {
+    const { data } = await httpClient.get<ApiEnvelope<{
+      run: {
+        runId: string
+        agentId: string
+        status: string
+        resultSummary: string | null
+        userMessage: string
+        createdAt: string
+        updatedAt: string
+      }
+      steps: Array<{
+        stepIndex: number
+        stepType: string
+        content: string | null
+        toolName: string | null
+        toolStatus: string | null
+        input: unknown
+        output: unknown
+        createdAt: string
+        agentName: string | null
+      }>
+    }>>(`/runs/${runUid}/details`)
+    return unwrap(data)
+  },
+
+  // SSE 订阅 Run 实时步骤
+  subscribeRunSteps(
+    runUid: string,
+    callbacks: {
+      onStep?: (step: {
+        stepIndex: number
+        stepType: string
+        content?: string
+        toolName?: string
+        toolStatus?: string
+        input?: unknown
+        output?: unknown
+        createdAt: string
+      }) => void
+      onStatus?: (status: {
+        runId: string
+        status: string
+        resultSummary?: string | null
+        updatedAt: string
+      }) => void
+      onComplete?: (status: { status: string }) => void
+      onHeartbeat?: (data: { time: string }) => void
+      onError?: (error: Event) => void
+    }
+  ): () => void {
+    const eventSource = new EventSource(`/api/agent-platform/runs/${runUid}/stream`)
+
+    eventSource.addEventListener('step', (event) => {
+      try {
+        const step = JSON.parse(event.data)
+        callbacks.onStep?.(step)
+      } catch (e) {
+        console.error('Failed to parse step event:', e)
+      }
+    })
+
+    eventSource.addEventListener('status', (event) => {
+      try {
+        const status = JSON.parse(event.data)
+        callbacks.onStatus?.(status)
+      } catch (e) {
+        console.error('Failed to parse status event:', e)
+      }
+    })
+
+    eventSource.addEventListener('complete', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        callbacks.onComplete?.(data)
+        eventSource.close()
+      } catch (e) {
+        console.error('Failed to parse complete event:', e)
+      }
+    })
+
+    eventSource.addEventListener('heartbeat', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        callbacks.onHeartbeat?.(data)
+      } catch (e) {
+        console.error('Failed to parse heartbeat event:', e)
+      }
+    })
+
+    eventSource.onerror = (error) => {
+      console.error('SSE connection error:', error)
+      callbacks.onError?.(error)
+      eventSource.close()
+    }
+
+    // 返回取消订阅函数
+    return () => {
+      eventSource.close()
+    }
+  },
+
   async listRunModelInvocations(runUid: string) {
     const { data } = await httpClient.get<ApiEnvelope<ModelInvocationRecord[]>>(`/runs/${runUid}/model-invocations`)
+    return unwrap(data)
+  },
+
+  // Orchestration API - 主 Agent 智能委派
+  async chat(input: ChatRequestInput) {
+    const { data } = await httpClient.post<ApiEnvelope<ChatResponse>>('/orchestration/chat', input)
     return unwrap(data)
   },
 

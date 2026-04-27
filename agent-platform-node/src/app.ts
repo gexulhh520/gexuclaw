@@ -3,6 +3,7 @@ import Fastify from "fastify";
 import { ZodError } from "zod";
 import { registerAgentRoutes } from "./modules/agents/agent.routes.js";
 import { registerModelProfileRoutes } from "./modules/model-profiles/model-profile.routes.js";
+import { registerOrchestrationRoutes } from "./modules/orchestration/orchestration.routes.js";
 import { registerProjectRoutes } from "./modules/projects/project.routes.js";
 import { registerRunRoutes } from "./modules/runs/run.routes.js";
 import { registerSessionRoutes } from "./modules/sessions/session.routes.js";
@@ -27,6 +28,7 @@ export async function buildApp() {
   await registerRunRoutes(app);
   await registerProjectRoutes(app);
   await registerSessionRoutes(app);
+  await registerOrchestrationRoutes(app);
   await registerWorkContextRoutes(app);
 
   app.setErrorHandler((error, _request, reply) => {

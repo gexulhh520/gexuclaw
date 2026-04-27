@@ -148,50 +148,82 @@
               :class="message.role"
             >
               <div class="message-avatar">
-                {{ message.role === "assistant" ? primaryAgent.short : "我" }}
+                {{ message.role === "assistant" ? (message.run?.agentName ? getAgentShortName(message.run.agentName) : primaryAgent.short) : "我" }}
               </div>
               <div class="message-card">
                 <div class="message-meta">
-                  <span>{{ message.role === "assistant" ? primaryAgent.name : "我" }}</span>
+                  <span>{{ message.role === "assistant" ? (message.run?.agentName || primaryAgent.name) : "我" }}</span>
                   <span>{{ message.time }}</span>
                 </div>
                 <div class="message-content">{{ message.content }}</div>
+
+                <!-- 执行摘要和步骤 - 仅在有步骤的 run 时显示（子 Agent 执行） -->
+                <section v-if="message.run && message.run.steps && message.run.steps.length > 0" class="execution-summary">
+                  <div class="summary-head">
+                    <div>
+                      <div class="summary-title">
+                        <span v-if="message.run.agentName">{{ message.run.agentName }}</span>
+                        <span v-else>执行摘要</span>
+                        <span class="run-id-badge" @click="copyRunId(message.run.runId)">
+                          Run: {{ message.run.runId.slice(0, 8) }}...
+                        </span>
+                      </div>
+                      <div class="summary-subtitle">
+                        <span v-if="message.run.status === 'running'">智能体正在执行任务...</span>
+                        <span v-else-if="message.run.status === 'success'">执行完成</span>
+                        <span v-else>执行失败</span>
+                      </div>
+                    </div>
+                    <button class="ghost-mini" @click="toggleRunExpanded(message.run)">
+                      {{ message.run.isExpanded ? "收起步骤" : `查看步骤（${message.run.steps.length}）` }}
+                    </button>
+                  </div>
+
+                  <div class="summary-progress">
+                    <div class="progress-ring" :class="message.run.status">
+                      <span v-if="message.run.status === 'running'">
+                        <i class="loading-spinner"></i>
+                      </span>
+                      <span v-else-if="message.run.status === 'success'">✓</span>
+                      <span v-else>✗</span>
+                    </div>
+                    <div>
+                      <!-- 对于主 Agent 直接回复的消息，不显示 resultSummary 避免与消息内容重复 -->
+                      <div v-if="message.run.agentName !== 'AI Assistant'" class="summary-text">
+                        {{ message.run.resultSummary || message.run.steps[message.run.steps.length - 1]?.content || '执行中...' }}
+                      </div>
+                      <div class="summary-progress-meta">
+                        {{ getStepTypeSummary(message.run.steps) }}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-if="message.run.isExpanded" class="execution-steps">
+                    <div
+                      v-for="step in message.run.steps"
+                      :key="step.stepIndex"
+                      class="execution-step"
+                      :class="step.stepType"
+                    >
+                      <div class="execution-step-top">
+                        <div class="step-left">
+                          <span class="step-type-badge">{{ formatStepType(step.stepType) }}</span>
+                          <span v-if="step.agentName" class="step-agent-name">{{ step.agentName }}</span>
+                        </div>
+                        <span class="step-time">{{ formatTime(step.createdAt) }}</span>
+                      </div>
+                      <p v-if="step.content" class="step-content">{{ step.content }}</p>
+                      <p v-if="step.toolName" class="step-tool">
+                        <strong>工具:</strong> {{ step.toolName }}
+                        <span v-if="step.toolStatus" :class="['tool-status', step.toolStatus]">
+                          {{ step.toolStatus }}
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+                </section>
               </div>
             </article>
-
-            <section class="execution-summary">
-              <div class="summary-head">
-                <div>
-                  <div class="summary-title">执行摘要</div>
-                  <div class="summary-subtitle">智能体正在拆解任务、执行协作并持续推进</div>
-                </div>
-                <button class="ghost-mini" @click="executionExpanded = !executionExpanded">
-                  {{ executionExpanded ? "收起步骤" : `查看步骤（${executionSteps.length}）` }}
-                </button>
-              </div>
-
-              <div class="summary-progress">
-                <div class="progress-ring">
-                  <span>65%</span>
-                </div>
-                <div>
-                  <div class="summary-text">{{ executionSummary }}</div>
-                  <div class="summary-progress-meta">
-                    正在生成大纲、撰写正文、优化语句与结构表达
-                  </div>
-                </div>
-              </div>
-
-              <div v-if="executionExpanded" class="execution-steps">
-                <div v-for="step in executionSteps" :key="step.id" class="execution-step">
-                  <div class="execution-step-top">
-                    <span>{{ step.title }}</span>
-                    <span>{{ step.status }}</span>
-                  </div>
-                  <p>{{ step.detail }}</p>
-                </div>
-              </div>
-            </section>
           </div>
 
           <div v-if="false" class="conversation-collapsed-rail panel-card">
@@ -492,11 +524,35 @@ interface SidebarAgent {
   workspaceType: WorkspaceType;
 }
 
-interface ChatMessage {
+interface RunStep {
+  stepIndex: number;
+  stepType: string;
+  content?: string;
+  toolName?: string;
+  toolStatus?: string;
+  input?: unknown;
+  output?: unknown;
+  createdAt: string;
+  agentName?: string;
+}
+
+interface RunInfo {
+  runId: string;
+  agentId: string;
+  agentName?: string;
+  status: 'running' | 'success' | 'failed';
+  resultSummary?: string;
+  steps: RunStep[];
+  isExpanded: boolean;
+  isSubscribed: boolean;
+}
+
+interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   time: string;
+  run?: RunInfo;
 }
 
 interface SessionItem {
@@ -730,7 +786,7 @@ function handleProjectSelect(projectId: string) {
   selectProject(projectId);
 }
 
-function selectSession(projectId: string | undefined, sessionId: string) {
+async function selectSession(projectId: string | undefined, sessionId: string) {
   selectedProjectId.value = projectId || "";
   selectedSessionId.value = sessionId;
 
@@ -742,6 +798,77 @@ function selectSession(projectId: string | undefined, sessionId: string) {
 
   if (sourceSession?.agentIds?.length) {
     selectedAgentId.value = sourceSession.agentIds[0];
+  }
+
+  // 加载会话的消息历史
+  if (sourceSession) {
+    await loadSessionMessages(sourceSession);
+  }
+}
+
+async function loadSessionMessages(session: SessionItem) {
+  try {
+    console.log(`[loadSessionMessages] Loading messages for session: ${session.id}`);
+    // 获取该会话的所有 runs
+    const runs = await agentPlatformApi.listRuns(undefined, 50, session.id);
+    console.log(`[loadSessionMessages] Loaded ${runs.length} runs for session: ${session.id}`, runs);
+
+    // 将 runs 转换为消息
+    const messages: MessageItem[] = [];
+    for (const run of runs.reverse()) { // 按时间正序排列
+      // 添加用户消息
+      messages.push({
+        id: `msg-${run.runUid}-user`,
+        role: "user",
+        content: run.userMessage,
+        time: formatRunTime(run.createdAt),
+      });
+
+      // 添加助手消息（如果有结果）
+      if (run.resultSummary) {
+        // 加载该 run 的步骤（包括子 Agent 的步骤）
+        let steps: RunStep[] = [];
+        try {
+          const runWithSteps = await agentPlatformApi.getRunWithSteps(run.runUid);
+          steps = runWithSteps.steps.map(s => ({
+            stepIndex: s.stepIndex,
+            stepType: s.stepType,
+            content: s.content || undefined,
+            toolName: s.toolName || undefined,
+            toolStatus: s.toolStatus || undefined,
+            input: s.inputJson,
+            output: s.outputJson,
+            createdAt: s.createdAt,
+            agentName: s.agentName,
+          }));
+          console.log(`[loadSessionMessages] Loaded ${steps.length} steps for run: ${run.runUid}`);
+        } catch (e) {
+          console.warn(`[loadSessionMessages] Failed to load steps for run: ${run.runUid}`, e);
+        }
+
+        messages.push({
+          id: `msg-${run.runUid}-assistant`,
+          role: "assistant",
+          content: run.resultSummary,
+          time: formatRunTime(run.updatedAt || run.createdAt),
+          run: {
+            runId: run.runUid,
+            agentId: String(run.agentId),
+            agentName: run.agentName || primaryAgent.value?.name || 'AI Assistant',
+            status: run.status as 'running' | 'success' | 'failed',
+            resultSummary: run.resultSummary,
+            steps: steps,
+            isExpanded: false,
+            isSubscribed: false,
+          },
+        });
+      }
+    }
+
+    session.messages = messages;
+  } catch (error) {
+    console.error("Failed to load session messages:", error);
+    ElMessage.error("加载聊天记录失败");
   }
 }
 
@@ -766,18 +893,205 @@ function toggleWorkspaceFullscreen() {
   workspaceFullscreen.value = !workspaceFullscreen.value;
 }
 
-function sendMessage() {
+const activeSubscriptions = new Map<string, () => void>();
+
+async function sendMessage() {
   if (!draftMessage.value.trim() || !currentSession.value) return;
 
+  const messageContent = draftMessage.value.trim();
+
+  // 添加用户消息到界面
   currentSession.value.messages.push({
     id: `message-${Date.now()}`,
     role: "user",
-    content: draftMessage.value.trim(),
+    content: messageContent,
     time: "刚刚",
   });
 
   currentSession.value.updatedAt = "刚刚";
   draftMessage.value = "";
+
+  // 调用主 Agent 智能委派接口
+  try {
+    console.log("[sendMessage] Sending chat request:", { sessionId: currentSession.value.id, message: messageContent });
+    const response = await agentPlatformApi.chat({
+      sessionId: currentSession.value.id,
+      message: messageContent,
+      selectedAgentId: selectedAgentId.value,
+    });
+    console.log("[sendMessage] Chat response:", response);
+
+    // 创建助手回复消息
+    const assistantMessage: Message = {
+      id: `message-${Date.now()}-response`,
+      role: "assistant",
+      content: response.message || "正在处理您的请求...",
+      time: "刚刚",
+    };
+
+    // 如果有 runId，初始化 run 信息并订阅 SSE
+    if (response.runId) {
+      console.log("[sendMessage] Agent run started:", response.runId, "agentId:", response.agentId);
+
+      assistantMessage.run = {
+        runId: response.runId,
+        agentId: response.agentId || 'unknown',
+        agentName: response.agentId ? getAgentNameById(response.agentId) : undefined,
+        status: 'running',
+        steps: [],
+        isExpanded: false,
+        isSubscribed: true,
+      };
+
+      // 订阅 SSE 实时推送
+      subscribeToRunSteps(response.runId, assistantMessage.run, assistantMessage);
+    }
+
+    currentSession.value.messages.push(assistantMessage);
+  } catch (error) {
+    console.error("Failed to send message:", error);
+    currentSession.value.messages.push({
+      id: `message-${Date.now()}-error`,
+      role: "assistant",
+      content: "抱歉，处理您的请求时出现错误，请稍后重试。",
+      time: "刚刚",
+    });
+  }
+}
+
+// 订阅 Run 的 SSE 实时推送
+function subscribeToRunSteps(runId: string, runInfo: RunInfo) {
+  // 如果已有订阅，先取消
+  if (activeSubscriptions.has(runId)) {
+    activeSubscriptions.get(runId)!();
+  }
+
+  const unsubscribe = agentPlatformApi.subscribeRunSteps(runId, {
+    onStep: (step) => {
+      console.log(`[SSE] Step received for ${runId}:`, step);
+      // 添加新步骤
+      runInfo.steps.push(step);
+      // 按 stepIndex 排序
+      runInfo.steps.sort((a, b) => a.stepIndex - b.stepIndex);
+    },
+    onStatus: (status) => {
+      console.log(`[SSE] Status update for ${runId}:`, status);
+      runInfo.status = status.status as 'running' | 'success' | 'failed';
+      if (status.resultSummary) {
+        runInfo.resultSummary = status.resultSummary || undefined;
+        // 每次收到状态更新都更新消息内容
+        updateMessageContentByRunId(runId, status.resultSummary);
+      }
+    },
+    onComplete: (data) => {
+      console.log(`[SSE] Complete event for ${runId}:`, data);
+      runInfo.status = data.status as 'running' | 'success' | 'failed';
+      runInfo.isSubscribed = false;
+      activeSubscriptions.delete(runId);
+      console.log(`[SSE] Run ${runId} completed with status: ${data.status}`);
+    },
+    onError: (error) => {
+      console.error(`[SSE] Run ${runId} error:`, error);
+      runInfo.isSubscribed = false;
+      activeSubscriptions.delete(runId);
+    },
+  });
+
+  activeSubscriptions.set(runId, unsubscribe);
+}
+
+// 根据 runId 更新消息内容
+function updateMessageContentByRunId(runId: string, content: string) {
+  console.log(`[updateMessageContentByRunId] Looking for runId: ${runId}`);
+  if (!currentSession.value) return;
+  
+  for (const message of currentSession.value.messages) {
+    if (message.run?.runId === runId) {
+      console.log(`[updateMessageContentByRunId] Found message, updating content`);
+      message.content = content;
+      return;
+    }
+  }
+  console.log(`[updateMessageContentByRunId] Message not found for runId: ${runId}`);
+}
+
+// 切换 Run 步骤展开/收起
+function toggleRunExpanded(runInfo: RunInfo) {
+  runInfo.isExpanded = !runInfo.isExpanded;
+}
+
+// 复制 Run ID
+async function copyRunId(runId: string) {
+  try {
+    await navigator.clipboard.writeText(runId);
+    ElMessage.success('Run ID 已复制');
+  } catch {
+    ElMessage.error('复制失败');
+  }
+}
+
+// 获取 Agent 名称
+function getAgentNameById(agentId: string): string {
+  // 处理主 Agent
+  if (agentId === "main_agent") {
+    return "AI Assistant";
+  }
+  const agent = agentList.value.find(a => a.id === agentId);
+  return agent?.name || agentId;
+}
+
+// 根据 Agent 名称获取短名称
+function getAgentShortName(agentName: string): string {
+  if (agentName === "AI Assistant" || agentName === "main_agent") {
+    return "AI";
+  }
+  if (agentName.includes("Browser") || agentName.includes("浏览器")) {
+    return "浏";
+  }
+  if (agentName.includes("Research") || agentName.includes("研究")) {
+    return "研";
+  }
+  if (agentName.includes("Video") || agentName.includes("视频")) {
+    return "剪";
+  }
+  if (agentName.includes("Writing") || agentName.includes("写作")) {
+    return "写";
+  }
+  return agentName.slice(0, 1);
+}
+
+// 格式化步骤类型
+function formatStepType(stepType: string): string {
+  const typeMap: Record<string, string> = {
+    'model_call': '模型调用',
+    'tool_start': '工具开始',
+    'tool_end': '工具完成',
+    'observation': '观察',
+    'final': '完成',
+    'error': '错误',
+  };
+  return typeMap[stepType] || stepType;
+}
+
+// 格式化时间
+function formatTime(timeStr: string): string {
+  const date = new Date(timeStr);
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// 获取步骤类型摘要
+function getStepTypeSummary(steps: RunStep[]): string {
+  const counts: Record<string, number> = {};
+  steps.forEach(step => {
+    counts[step.stepType] = (counts[step.stepType] || 0) + 1;
+  });
+
+  const parts: string[] = [];
+  if (counts['model_call']) parts.push(`${counts['model_call']} 次模型调用`);
+  if (counts['tool_start']) parts.push(`${counts['tool_start']} 次工具调用`);
+  if (counts['final']) parts.push('已完成');
+
+  return parts.join('、') || '执行中...';
 }
 
 async function createSession() {
@@ -920,18 +1234,30 @@ function getProjectIcon(source: string): string {
   return iconMap[source] || iconMap.default;
 }
 
-async function loadRuns() {
+async function loadPersonalSessions() {
   isLoadingSessions.value = true;
   try {
-    const runs = await agentPlatformApi.listRuns(undefined, 50);
-    personalSessions.value = runs.map(mapRunToSession);
+    const sessions = await agentPlatformApi.listSessions({ personal: true, limit: 50 });
+    personalSessions.value = sessions.map(mapSessionRecordToSessionItem);
   } catch (error) {
-    ElMessage.error("加载运行记录失败");
-    console.error("Failed to load runs:", error);
+    ElMessage.error("加载会话失败");
+    console.error("Failed to load sessions:", error);
     personalSessions.value = [];
   } finally {
     isLoadingSessions.value = false;
   }
+}
+
+function mapSessionRecordToSessionItem(session: import("../api/agentPlatform").SessionRecord): SessionItem {
+  const agentIds = parseAgentIds(session.agentIdsJson);
+  return {
+    id: session.sessionUid,
+    title: session.title,
+    description: session.description || undefined,
+    updatedAt: formatRunTime(session.createdAt),
+    agentIds,
+    messages: [], // 会话初始时没有消息，需要通过其他方式加载
+  };
 }
 
 function mapRunToSession(run: AgentRunRecord): SessionItem {
@@ -1034,10 +1360,10 @@ onMounted(async () => {
   await Promise.all([
     loadAgentProfiles(),
     loadProjects(),
-    loadRuns(),
+    loadPersonalSessions(),
   ]);
 
-  const preferredAgent = typeof route.query.agent === "string" ? route.query.agent : "";
+  const preferredAgent = route?.query?.agent && typeof route.query.agent === "string" ? route.query.agent : "";
   if (!preferredAgent) return;
 
   const matched = agentList.value.find((agent) => agent.id === preferredAgent);
@@ -1567,7 +1893,7 @@ onMounted(async () => {
 .conversation-panel {
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: 1fr auto;
   overflow: hidden;
   padding: 18px;
 }
@@ -1666,6 +1992,27 @@ onMounted(async () => {
   background: linear-gradient(180deg, rgba(26, 37, 57, 0.94), rgba(21, 31, 48, 0.96));
 }
 
+.simple-run-info {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid rgba(113, 128, 150, 0.1);
+  margin-top: 8px;
+}
+
+.simple-run-info .run-id-badge {
+  font-size: 11px;
+  color: #8ea0bd;
+  opacity: 0.7;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.simple-run-info .run-id-badge:hover {
+  opacity: 1;
+  color: #5b6dff;
+}
+
 .summary-head {
   gap: 16px;
 }
@@ -1729,6 +2076,141 @@ onMounted(async () => {
   margin: 10px 0 0;
   color: #8ea0bd;
   line-height: 1.7;
+}
+
+/* Run 步骤相关样式 */
+.run-id-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(91, 109, 255, 0.15);
+  color: #8ea0bd;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.run-id-badge:hover {
+  background: rgba(91, 109, 255, 0.25);
+}
+
+.progress-ring.running {
+  background:
+    radial-gradient(circle at center, #162133 56%, transparent 57%),
+    conic-gradient(#5b6dff 0 100%, rgba(91, 109, 255, 0.16) 100% 100%);
+  animation: spin 2s linear infinite;
+}
+
+.progress-ring.success {
+  background:
+    radial-gradient(circle at center, #162133 56%, transparent 57%),
+    conic-gradient(#22c55e 0 100%, rgba(34, 197, 94, 0.16) 100% 100%);
+}
+
+.progress-ring.failed {
+  background:
+    radial-gradient(circle at center, #162133 56%, transparent 57%),
+    conic-gradient(#ef4444 0 100%, rgba(239, 68, 68, 0.16) 100% 100%);
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.loading-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(91, 109, 255, 0.3);
+  border-top-color: #5b6dff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.step-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(91, 109, 255, 0.15);
+  color: #c7d2e7;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.step-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-agent-name {
+  font-size: 11px;
+  color: #8ea0bd;
+  opacity: 0.8;
+}
+
+.step-time {
+  color: #6b7a90;
+  font-size: 11px;
+}
+
+.step-content {
+  color: #dbe6fb;
+  font-size: 13px;
+}
+
+.step-tool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tool-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.tool-status.success {
+  background: rgba(34, 197, 94, 0.2);
+  color: #22c55e;
+}
+
+.tool-status.failed {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.tool-status.running {
+  background: rgba(91, 109, 255, 0.2);
+  color: #5b6dff;
+}
+
+.execution-step.model_call {
+  border-left: 3px solid rgba(91, 109, 255, 0.5);
+}
+
+.execution-step.tool_start,
+.execution-step.tool_end {
+  border-left: 3px solid rgba(14, 165, 233, 0.5);
+}
+
+.execution-step.final {
+  border-left: 3px solid rgba(34, 197, 94, 0.5);
+}
+
+.execution-step.error {
+  border-left: 3px solid rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.1);
 }
 
 .composer {

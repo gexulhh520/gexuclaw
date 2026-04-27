@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { agentRunSteps, agentRuns, agents, modelInvocations } from "../../db/schema.js";
 import { AgentRuntime } from "../../runtime/agent-runtime.js";
@@ -35,31 +35,72 @@ export async function getRunByUid(runUid: string) {
   return run;
 }
 
-export async function listRuns(input?: { agentUid?: string; workContextId?: string; limit?: number }) {
+export async function listRuns(input?: { agentUid?: string; workContextId?: string; sessionId?: string; limit?: number }) {
   const limit = Math.min(Math.max(input?.limit ?? 20, 1), 100);
 
   if (input?.agentUid) {
     const [agent] = await db.select().from(agents).where(eq(agents.agentUid, input.agentUid));
     if (!agent) throw notFound("Agent not found", { agentUid: input.agentUid });
 
-    return db
-      .select()
+    const runs = await db
+      .select({
+        run: agentRuns,
+        agentName: agents.name,
+      })
       .from(agentRuns)
+      .innerJoin(agents, eq(agentRuns.agentId, agents.id))
       .where(eq(agentRuns.agentId, agent.id))
       .orderBy(desc(agentRuns.id))
       .limit(limit);
+    
+    return runs.map(r => ({ ...r.run, agentName: r.agentName }));
   }
 
   if (input?.workContextId) {
-    return db
-      .select()
+    const runs = await db
+      .select({
+        run: agentRuns,
+        agentName: agents.name,
+      })
       .from(agentRuns)
+      .innerJoin(agents, eq(agentRuns.agentId, agents.id))
       .where(eq(agentRuns.workContextId, input.workContextId))
       .orderBy(desc(agentRuns.id))
       .limit(limit);
+    
+    return runs.map(r => ({ ...r.run, agentName: r.agentName }));
   }
 
-  return db.select().from(agentRuns).orderBy(desc(agentRuns.id)).limit(limit);
+  if (input?.sessionId) {
+    console.log(`[RunService] Querying runs with sessionId: ${input.sessionId}`);
+    const runs = await db
+      .select({
+        run: agentRuns,
+        agentName: agents.name,
+      })
+      .from(agentRuns)
+      .innerJoin(agents, eq(agentRuns.agentId, agents.id))
+      .where(and(
+        eq(agentRuns.sessionId, input.sessionId),
+        isNull(agentRuns.parentRunId)  // 只返回主 Agent 的 runs，过滤掉子 Agent 的 runs
+      ))
+      .orderBy(desc(agentRuns.id))
+      .limit(limit);
+    console.log(`[RunService] Found ${runs.length} runs for sessionId: ${input.sessionId}`);
+    return runs.map(r => ({ ...r.run, agentName: r.agentName }));
+  }
+
+  const runs = await db
+    .select({
+      run: agentRuns,
+      agentName: agents.name,
+    })
+    .from(agentRuns)
+    .innerJoin(agents, eq(agentRuns.agentId, agents.id))
+    .orderBy(desc(agentRuns.id))
+    .limit(limit);
+  
+  return runs.map(r => ({ ...r.run, agentName: r.agentName }));
 }
 
 export async function listRunSteps(runUid: string) {

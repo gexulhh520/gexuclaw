@@ -39,6 +39,7 @@
 - 工具集、prompt、skill、运行策略都要版本化。
 - 正在运行的任务使用启动时快照，不受后台配置变更影响。
 - Agent 之间协作时尽量使用结构化任务协议，而不是只靠自然语言转述。
+- 会话内可用 Agent 不应固定死：当主 Agent 发现当前会话缺少能力时，可以查询 Agent Registry，向用户推荐额外子 Agent，并在用户确认后动态加入当前会话。
 
 ## 3. Agent 类型
 
@@ -88,11 +89,14 @@ Builtin Agent 由系统内置。
 flowchart TD
     U["用户"] --> H["主应用 Host"]
     H --> M["主 Agent / Orchestrator"]
+    M --> R["Agent Registry"]
     H --> C["Custom Agent Studio"]
     H --> B["Builtin Agent Workspace"]
 
     M --> A1["Custom Agent"]
     M --> A2["Builtin Agent"]
+    R --> A1
+    R --> A2
 
     C --> CA["配置名称 / 描述 / Prompt / Skill"]
     C --> CT["选择工具集"]
@@ -136,6 +140,7 @@ AgentManifest 描述一个 Agent 当前可运行的定义。
   "tool_profile_id": "profile_123",
   "memory_policy": "agent_session",
   "max_steps": 10,
+  "input_request_schema": null,
   "output_schema": {},
   "created_by": 1
 }
@@ -153,9 +158,16 @@ AgentManifest 描述一个 Agent 当前可运行的定义。
   "subagent_enabled": true,
   "ui_mode": "custom",
   "ui_route": "/agents/video-editor",
-  "tool_profile_id": "video_editor_default"
+  "tool_profile_id": "video_editor_default",
+  "input_request_schema": {
+    "supported": true,
+    "trigger_modes": ["standalone", "subagent"],
+    "default_panel": "advanced_upload"
+  }
 }
 ```
+
+`input_request_schema` 是 Agent 可选声明，用于描述该 Agent 在执行前可能需要的结构化输入。它不是把 Agent 降级成固定函数参数，而是给主 Agent、运行时和前端一个共同协议：当子 Agent 判断当前上下文缺少关键素材或配置时，可以返回结构化输入请求，前端据此动态展示上传和参数面板。
 
 ### 5.2 ToolProfile
 
@@ -298,9 +310,83 @@ Builtin Agent 可以拥有专属工作台。
 - 产物入口。
 - 跳转到独立工作台的入口。
 
+### 6.4 意图触发的高级参数上传
+
+用户在主聊天窗口上传附件并描述目标时，不应依赖用户是否已经手动切换到某个专职 Agent。页面应支持由主 Agent 或子 Agent 的结构化反馈触发高级参数上传面板。
+
+典型场景：
+
+- 用户只在主聊天中上传了一张图片，并说“帮我生成一个视频”。
+- 主 Agent 判断当前任务适合委派给图文生视频 Agent。
+- 图文生视频 Agent 或其 manifest 返回本任务需要的输入字段，例如首帧、尾帧、中间帧、时长、比例、运动强度。
+- 前端在当前聊天区域直接浮出“视频生成参数”面板，而不是要求用户先切换会话 Agent。
+
+交互原则：
+
+- 高级参数面板绑定“当前任务所选 Agent 的输入需求”，不绑定“当前 UI 选中的 Agent”。
+- 已上传附件应先由主 Agent 或运行时尝试自动映射到字段，例如把用户已上传图片映射为 `first_frame`。
+- 面板只突出缺失或可选补充项，避免让用户重复上传已经识别的素材。
+- 用户补齐参数后，主 Agent 将结构化输入挂回当前 WorkContext，再启动或继续子 Agent run。
+- 如果用户忽略可选项，子 Agent 可以使用默认值继续执行；缺少必填项时保持 WorkContext `waiting_user` 状态。
+
+前端渲染可以由统一 UI Action 驱动：
+
+```json
+{
+  "type": "ui_action",
+  "name": "show_advanced_upload_panel",
+  "agent_id": "builtin_image_to_video",
+  "work_context_id": "wc_video_001",
+  "title": "视频生成参数",
+  "reason": "检测到你想生成视频，需要补充关键帧和视频设置。",
+  "resolved_inputs": {
+    "first_frame": "artifact_uploaded_001"
+  },
+  "missing_required_fields": [],
+  "schema": {
+    "fields": [
+      {
+        "key": "first_frame",
+        "label": "首帧图片",
+        "input_type": "image",
+        "required": true,
+        "accept": ["image/png", "image/jpeg"]
+      },
+      {
+        "key": "last_frame",
+        "label": "尾帧图片",
+        "input_type": "image",
+        "required": false
+      },
+      {
+        "key": "middle_frames",
+        "label": "中间帧",
+        "input_type": "image",
+        "required": false,
+        "multiple": true
+      },
+      {
+        "key": "duration",
+        "label": "视频时长",
+        "input_type": "select",
+        "required": false,
+        "options": ["5s", "10s", "15s"]
+      },
+      {
+        "key": "aspect_ratio",
+        "label": "画面比例",
+        "input_type": "select",
+        "required": false,
+        "options": ["16:9", "9:16", "1:1"]
+      }
+    ]
+  }
+}
+```
+
 ## 7. Agent 协作协议
 
-主 Agent 委派子 Agent 时，建议使用轻量 DelegateEnvelope。第一版不强制每个 Agent 额外维护 input contract；Agent 的 description 和 skill 负责说明它能做什么、如何理解任务、需要什么上下文、缺失时如何处理。
+主 Agent 委派子 Agent 时，建议使用轻量 DelegateEnvelope。第一版不强制每个 Agent 额外维护完整 input contract；Agent 的 description 和 skill 负责说明它能做什么、如何理解任务、需要什么上下文、缺失时如何处理。对于图文生视频、剪辑、定时任务等强参数任务，可以额外维护轻量 `input_request_schema`，用于在缺少素材或配置时向上反馈 UI 可渲染的输入请求。
 
 主 Agent 委派前应读取候选 Agent 的 description 和 skill，判断是否应该交给该 Agent。主 Agent 不把任务拆成目标 Agent 的完整工具参数；子 Agent 接到委派后，通过自己的 LLM 和 ContextPolicy 理解用户目标、读取上下文、判断是否缺少关键参数。
 
@@ -564,11 +650,12 @@ ContextBuilder 需要做的事：
 持久化建议：
 
 - `main_sessions`：保存一次主会话入口、最近 work_context refs、最近 run refs、最近 artifact refs 和当前 UI 选择。
+- `main_session_agents`：保存当前主会话已启用 Agent，包括创建会话时选择的 Agent 和中途经用户确认动态加入的 Agent。
 - `chat_messages`：保存用户消息、assistant 回复、系统提示、澄清问题和用户确认等原始对话事件。
 - `conversation_summaries`：保存滚动摘要，可按 session、时间窗口或消息范围生成。
 - `model_invocations`：保存本次模型调用的 request / response 摘要、PromptContext 摘要和 selected_context_refs。
 
-这些表不要求第一阶段全部实现。第一阶段可以先通过 `agent_runs.session_id` 和 `model_invocations` 记录最小闭环，等主 Agent 会话产品化时再补 `main_sessions`、`chat_messages` 和 `conversation_summaries`。
+这些表不要求第一阶段全部实现。第一阶段可以先通过 `agent_runs.session_id` 和 `model_invocations` 记录最小闭环，等主 Agent 会话产品化时再补 `main_sessions`、`main_session_agents`、`chat_messages` 和 `conversation_summaries`。
 
 这套机制与 Codex 类 Agent 的处理方式一致：完整历史持久化，模型调用前动态构造上下文；长历史靠摘要承接，任务状态靠 WorkContext 承接，执行事实靠 RunTrace 承接，长期经验靠 Memory 承接。
 
@@ -613,6 +700,7 @@ SubAgent PromptContext
 - 复用 WorkContext、创建新 WorkContext，还是需要澄清。
 - 是否委派子 Agent。
 - 委派给哪个 Agent。
+- 当前会话已启用 Agent 是否具备所需能力；如果没有，是否需要查询 Agent Registry 推荐额外子 Agent。
 - 给子 Agent 什么自然语言交接说明。
 - 子 Agent 返回后如何面向用户总结或追问。
 
@@ -783,7 +871,100 @@ ContextRef 只用于更精确的授权或跨边界引用：
 
 即使传递 ContextRef，它也只是授权和定位线索，不是把子 Agent 降级成函数调用。
 
-### 9.7 不同 Agent 的 Context Policy
+### 9.7 能力缺口发现与动态加入子 Agent
+
+主 Agent 不应假设当前会话已启用的 Agent 覆盖所有用户目标。当用户提出“帮我从网上查询相关图片并设置进去”这类需求时，主 Agent 应先判断当前会话 Agent 列表和自身工具能力是否足够。如果缺少浏览器、图片搜索、素材采集等能力，应查询系统注册的 Agent Registry，而不是直接失败。
+
+推荐流程：
+
+```mermaid
+flowchart TD
+    U["用户提出新能力需求"] --> M["主 Agent 分析任务"]
+    M --> C{"当前会话 Agent 或主 Agent 能力是否足够"}
+    C -->|足够| D["直接委派已启用子 Agent 或自行处理"]
+    C -->|不足| R["查询 Agent Registry"]
+    R --> F{"是否找到候选 Agent"}
+    F -->|未找到| N["向用户说明缺少该能力"]
+    F -->|找到| P["向用户展示可加入的额外子 Agent"]
+    P --> S["用户选择并确认"]
+    S --> A["将子 Agent 动态加入当前会话"]
+    A --> W["更新 MainSession / WorkContext / 可委派 Agent 列表"]
+    W --> D
+```
+
+候选 Agent 推荐响应示例：
+
+```json
+{
+  "type": "ui_action",
+  "name": "suggest_additional_agents",
+  "session_id": "sess_001",
+  "work_context_id": "wc_video_001",
+  "reason": "当前会话没有可执行网页图片搜索的 Agent。",
+  "requested_capability": {
+    "intent": "search_web_images",
+    "keywords": ["网上查询", "相关图片", "设置进去"],
+    "required_capabilities": ["web_search", "image_search", "artifact_import"]
+  },
+  "candidates": [
+    {
+      "agent_id": "builtin_browser_agent",
+      "name": "浏览器 Agent",
+      "description": "负责网页访问、搜索、页面信息采集和素材下载。",
+      "matched_capabilities": ["web_search", "artifact_import"],
+      "confidence": 0.86
+    },
+    {
+      "agent_id": "builtin_image_search_agent",
+      "name": "图片搜索 Agent",
+      "description": "负责按主题搜索图片、筛选可用素材并生成图片 Artifact。",
+      "matched_capabilities": ["image_search", "artifact_import"],
+      "confidence": 0.93
+    }
+  ],
+  "selection_mode": "single_or_multiple",
+  "confirm_action": "add_agents_to_session"
+}
+```
+
+用户确认后的会话变更事件示例：
+
+```json
+{
+  "type": "orchestration_event",
+  "event_type": "session_agents_added",
+  "session_id": "sess_001",
+  "work_context_id": "wc_video_001",
+  "added_agent_ids": ["builtin_image_search_agent"],
+  "source": "user_confirmed_agent_suggestion",
+  "reason": "用户需要从网上查询相关图片作为视频素材。",
+  "resume_action": {
+    "type": "delegate",
+    "target_agent_id": "builtin_image_search_agent",
+    "expected_result": "image_artifacts_or_clarification"
+  }
+}
+```
+
+主 Agent 处理规则：
+
+- 能力判断优先看当前 MainSession 已启用 Agent、当前 Agent Registry 摘要、主 Agent 自身工具能力。
+- 只有当当前会话缺能力或现有 Agent 明显不适合时，才向用户推荐额外子 Agent。
+- 推荐时必须说明为什么需要额外 Agent，以及每个候选 Agent 能帮什么。
+- 用户确认前，不自动把新 Agent 加入当前会话；只可展示候选项。
+- 用户确认后，将选中的 Agent 写入当前会话的可用 Agent 列表，并记录 `session_agents_added` 事件。
+- 动态加入 Agent 后，本轮任务继续使用同一个 WorkContext，避免丢失用户刚才上传的附件、已解析参数和对话意图。
+- 如果推荐 Agent 需要额外权限，例如联网、下载图片、访问外部页面，应在确认面板中同时展示权限说明。
+
+前端处理规则：
+
+- 在聊天流中展示“可添加协作 Agent”选择面板。
+- 候选 Agent 可以单选或多选，由后端 `selection_mode` 决定。
+- 确认后，侧边栏或会话 Agent 区应即时显示新增 Agent。
+- 新增 Agent 应标记为“本任务加入”或“会话中新增”，让用户知道它不是一开始就启用的。
+- 如果用户取消选择，主 Agent 应回到普通澄清或说明当前无法完成该能力。
+
+### 9.8 不同 Agent 的 Context Policy
 
 Browser Agent：
 
@@ -811,7 +992,106 @@ Knowledge Agent：
 - 需要引用策略。
 - 不需要 UI 操作轨迹。
 
-### 9.8 上下文资源与记忆边界
+### 9.8.1 子 Agent 向上反馈输入请求
+
+子 Agent 判断缺少关键参数时，不只返回自然语言澄清问题，还可以返回结构化 `input_request`。主 Agent 收到后负责把它转换成面向用户的 UI Action，并保持当前 WorkContext 处于 `waiting_user`。
+
+第一版可以把 `input_request` 视为 `needs_clarification` 的结构化子类型：`agent_runs.status` 仍可使用 `needs_clarification`，具体面板信息放在 `output_json` 或 orchestration event payload 中。后续如果输入收集成为高频核心流程，再单独增加 `needs_input` 运行状态。
+
+这个机制解决的问题是：用户在主聊天中发起任务但没有主动切换到对应专职 Agent 时，页面仍然能显示该 Agent 所需的高级上传和参数面板。
+
+推荐链路：
+
+```mermaid
+flowchart TD
+    U["用户在主聊天上传附件并描述目标"] --> M["主 Agent 识别任务意图"]
+    M --> R["选择候选子 Agent"]
+    R --> D["生成 DelegateEnvelope"]
+    D --> S["子 Agent 读取 WorkContext 和已有 Artifact"]
+    S --> J{"输入是否充足"}
+    J -->|充足| X["执行子 Agent run"]
+    J -->|缺少关键输入| Q["返回 input_request"]
+    Q --> A["主 Agent 转换为 UI Action"]
+    A --> P["前端展示高级参数上传面板"]
+    P --> W["用户补齐参数"]
+    W --> C["写回 WorkContext / Artifact"]
+    C --> X
+```
+
+`input_request` 示例：
+
+```json
+{
+  "status": "needs_input",
+  "type": "input_request",
+  "agent_id": "builtin_image_to_video",
+  "work_context_id": "wc_video_001",
+  "title": "视频生成参数",
+  "reason": "生成视频前需要确认关键帧和视频设置。",
+  "resolved_inputs": {
+    "first_frame": "artifact_uploaded_001"
+  },
+  "missing_required_fields": [],
+  "fields": [
+    {
+      "key": "first_frame",
+      "label": "首帧图片",
+      "input_type": "image",
+      "required": true,
+      "accept": ["image/png", "image/jpeg"],
+      "artifact_role": "video_first_frame"
+    },
+    {
+      "key": "last_frame",
+      "label": "尾帧图片",
+      "input_type": "image",
+      "required": false,
+      "artifact_role": "video_last_frame"
+    },
+    {
+      "key": "middle_frames",
+      "label": "中间帧",
+      "input_type": "image",
+      "required": false,
+      "multiple": true,
+      "artifact_role": "video_middle_frame"
+    },
+    {
+      "key": "duration",
+      "label": "视频时长",
+      "input_type": "select",
+      "required": false,
+      "default": "5s",
+      "options": ["5s", "10s", "15s"]
+    },
+    {
+      "key": "aspect_ratio",
+      "label": "画面比例",
+      "input_type": "select",
+      "required": false,
+      "default": "16:9",
+      "options": ["16:9", "9:16", "1:1"]
+    }
+  ]
+}
+```
+
+主 Agent 处理规则：
+
+- 如果子 Agent 返回 `needs_input`，主 Agent 不直接继续委派执行，而是生成 `show_advanced_upload_panel`。
+- 主 Agent 可以基于用户已上传附件、当前 WorkContext Artifact 和字段 `artifact_role` 做自动映射。
+- 自动映射结果写入 `resolved_inputs`，缺失的必填字段写入 `missing_required_fields`。
+- 用户补齐输入后，新素材作为 Artifact 保存，并按字段 key / role 挂到当前 WorkContext。
+- 子 Agent 再次运行时，应优先读取这些结构化输入和 Artifact，而不是要求用户重复说明。
+
+前端处理规则：
+
+- 面板在当前聊天窗口或任务卡片中展示，不要求用户切换 Agent。
+- 面板标题、字段、是否必填、文件类型、是否多选都来自 `input_request` 或主 Agent 转换后的 UI Action。
+- 已解析字段展示为已完成状态，允许用户替换。
+- 必填字段未完成时，发送按钮应进入“补齐参数后继续”的状态。
+
+### 9.9 上下文资源与记忆边界
 
 记忆不应该是所有 Agent 自动共享的单一大池子。
 

@@ -58,6 +58,42 @@ export class ModelClient {
     return this.invokeOpenAICompatible(input);
   }
 
+  // 简化版调用（用于主 Agent 决策，不需要工具）
+  async complete(input: {
+    systemPrompt: string;
+    userMessage: string;
+    temperature?: number;
+  }): Promise<{ content: string }> {
+    // 使用 mock provider 或从环境获取默认配置
+    const provider = process.env.DEFAULT_MODEL_PROVIDER || "mock";
+    // 根据 provider 选择正确的默认模型
+    let modelName: string;
+    if (provider === "kimi") {
+      modelName = process.env.KIMI_DEFAULT_MODEL || "moonshot-v1-8k";
+    } else if (provider === "openai") {
+      modelName = process.env.OPENAI_DEFAULT_MODEL || "gpt-4o-mini";
+    } else {
+      modelName = "mock-model";
+    }
+
+    // kimi-k2.5 模型只支持 temperature=1
+    const isKimiK25 = modelName === "kimi-k2.5";
+    const temperature = isKimiK25 ? 1 : (input.temperature ?? 0.7);
+
+    const result = await this.invoke({
+      provider,
+      modelName,
+      params: { temperature },
+      messages: [
+        { role: "system", content: input.systemPrompt },
+        { role: "user", content: input.userMessage },
+      ],
+      tools: [],
+    });
+
+    return { content: result.content };
+  }
+
   private async invokeOpenAICompatible(input: ModelClientInput): Promise<ModelClientResult> {
     const apiKey = this.getApiKey(input.provider);
     const baseUrl = input.baseUrl ?? this.getBaseUrl(input.provider);
