@@ -1,17 +1,17 @@
-import type { AgentPlugin, AgentVersionPluginBinding } from "./plugin.schema.js";
+import type { AgentPlugin, AgentPluginBinding } from "./plugin.schema.js";
 
 /**
  * 插件注册表
- * 管理插件的注册、查询和 AgentVersion 挂载关系
+ * 管理插件的注册、查询和 Agent 挂载关系
  * 
- * 当前阶段使用内存存储，后续可扩展为数据库存储
+ * 绑定关系改为 Agent 级别，一个 Agent 的所有版本共享相同的插件
  */
 export class PluginRegistry {
   // 插件存储: pluginId -> AgentPlugin
   private plugins: Map<string, AgentPlugin> = new Map();
 
-  // AgentVersion 挂载关系: agentVersionId -> PluginBinding[]
-  private bindings: Map<number, AgentVersionPluginBinding[]> = new Map();
+  // Agent 挂载关系: agentId -> PluginBinding[]
+  private bindings: Map<number, AgentPluginBinding[]> = new Map();
 
   /**
    * 注册插件
@@ -66,11 +66,11 @@ export class PluginRegistry {
   }
 
   /**
-   * 添加 AgentVersion 与插件的挂载关系
+   * 添加 Agent 与插件的挂载关系
    * @param binding 挂载关系
    */
-  addBinding(binding: AgentVersionPluginBinding): void {
-    const existing = this.bindings.get(binding.agentVersionId) ?? [];
+  addBinding(binding: AgentPluginBinding): void {
+    const existing = this.bindings.get(binding.agentId) ?? [];
     // 检查是否已存在
     const index = existing.findIndex(
       (b) => b.pluginId === binding.pluginId
@@ -80,33 +80,33 @@ export class PluginRegistry {
     } else {
       existing.push(binding);
     }
-    this.bindings.set(binding.agentVersionId, existing);
+    this.bindings.set(binding.agentId, existing);
     console.log(
-      `[PluginRegistry] 挂载插件: ${binding.pluginId} -> AgentVersion ${binding.agentVersionId}`
+      `[PluginRegistry] 挂载插件: ${binding.pluginId} -> Agent ${binding.agentId}`
     );
   }
 
   /**
-   * 移除 AgentVersion 与插件的挂载关系
-   * @param agentVersionId AgentVersion ID
+   * 移除 Agent 与插件的挂载关系
+   * @param agentId Agent ID
    * @param pluginId 插件 ID
    */
-  removeBinding(agentVersionId: number, pluginId: string): void {
-    const existing = this.bindings.get(agentVersionId) ?? [];
+  removeBinding(agentId: number, pluginId: string): void {
+    const existing = this.bindings.get(agentId) ?? [];
     const filtered = existing.filter((b) => b.pluginId !== pluginId);
-    this.bindings.set(agentVersionId, filtered);
+    this.bindings.set(agentId, filtered);
     console.log(
-      `[PluginRegistry] 移除挂载: ${pluginId} -> AgentVersion ${agentVersionId}`
+      `[PluginRegistry] 移除挂载: ${pluginId} -> Agent ${agentId}`
     );
   }
 
   /**
-   * 获取 AgentVersion 挂载的所有插件
-   * @param agentVersionId AgentVersion ID
+   * 获取 Agent 挂载的所有插件
+   * @param agentId Agent ID
    * @returns 挂载的插件列表
    */
-  getPluginsForAgentVersion(agentVersionId: number): AgentPlugin[] {
-    const bindings = this.bindings.get(agentVersionId) ?? [];
+  getPluginsForAgent(agentId: number): AgentPlugin[] {
+    const bindings = this.bindings.get(agentId) ?? [];
     const enabledBindings = bindings.filter((b) => b.enabled);
 
     // 按优先级排序
@@ -124,77 +124,54 @@ export class PluginRegistry {
   }
 
   /**
-   * 检查插件是否已挂载到 AgentVersion
-   * @param agentVersionId AgentVersion ID
-   * @param pluginId 插件 ID
-   * @returns 是否已挂载且启用
+   * 获取 Agent 的绑定列表
+   * @param agentId Agent ID
+   * @returns 绑定列表
    */
-  isPluginAttached(agentVersionId: number, pluginId: string): boolean {
-    const bindings = this.bindings.get(agentVersionId) ?? [];
+  getBindingsForAgent(agentId: number): AgentPluginBinding[] {
+    return this.bindings.get(agentId) ?? [];
+  }
+
+  /**
+   * 检查插件是否已挂载到 Agent
+   * @param agentId Agent ID
+   * @param pluginId 插件 ID
+   * @returns 是否已挂载
+   */
+  isPluginAttached(agentId: number, pluginId: string): boolean {
+    const bindings = this.bindings.get(agentId) ?? [];
     return bindings.some((b) => b.pluginId === pluginId && b.enabled);
   }
 
   /**
-   * 获取 AgentVersion 的挂载关系
-   * @param agentVersionId AgentVersion ID
-   * @returns 挂载关系列表
-   */
-  getBindingsForAgentVersion(agentVersionId: number): AgentVersionPluginBinding[] {
-    return this.bindings.get(agentVersionId) ?? [];
-  }
-
-  /**
-   * 根据 Agent 类型获取默认建议挂载的插件
-   * @param agentType Agent 类型
-   * @returns 建议挂载的插件列表
+   * 获取指定 Agent 类型的默认插件列表
+   * @param agentType Agent 类型 (builtin, chat, workflow)
+   * @returns 默认应挂载的插件列表
    */
   getDefaultPluginsForAgentType(agentType: string): AgentPlugin[] {
-    return this.getActivePlugins().filter((p) =>
-      p.defaultAttachTargets?.includes(agentType)
+    return this.getActivePlugins().filter((plugin) =>
+      plugin.defaultAttachTargets?.includes(agentType)
     );
   }
 
   /**
-   * 加载内置插件
-   * 从内置插件目录加载所有 builtin 类型插件
-   */
-  async loadBuiltinPlugins(): Promise<void> {
-    // 当前阶段: 内置插件通过代码直接注册
-    // 后续可扩展为从文件系统或数据库加载
-    console.log("[PluginRegistry] 加载内置插件...");
-    // 具体加载逻辑在 bootstrap 中实现
-  }
-
-  /**
    * 获取注册表统计信息
+   * @returns 统计信息
    */
   getStats(): {
     totalPlugins: number;
     activePlugins: number;
-    builtinPlugins: number;
-    externalPlugins: number;
     totalBindings: number;
   } {
-    const allPlugins = this.getAllPlugins();
-    return {
-      totalPlugins: allPlugins.length,
-      activePlugins: this.getActivePlugins().length,
-      builtinPlugins: allPlugins.filter((p) => p.pluginType === "builtin").length,
-      externalPlugins: allPlugins.filter((p) => p.pluginType === "external").length,
-      totalBindings: Array.from(this.bindings.values()).reduce(
-        (sum, b) => sum + b.length,
-        0
-      ),
-    };
-  }
+    const totalBindings = Array.from(this.bindings.values()).reduce(
+      (sum, bindings) => sum + bindings.length,
+      0
+    );
 
-  /**
-   * 清空注册表
-   * 主要用于测试
-   */
-  clear(): void {
-    this.plugins.clear();
-    this.bindings.clear();
-    console.log("[PluginRegistry] 已清空");
+    return {
+      totalPlugins: this.plugins.size,
+      activePlugins: this.getActivePlugins().length,
+      totalBindings,
+    };
   }
 }

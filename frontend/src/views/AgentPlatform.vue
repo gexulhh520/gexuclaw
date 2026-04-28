@@ -1450,6 +1450,16 @@ function subscribeToRunSteps(runId: string, runInfo: RunInfo) {
       console.log(`[SSE] Step received for ${runId}:`, step);
       // 添加新步骤 - 使用新数组触发响应式更新
       runInfo.steps = [...runInfo.steps, step].sort((a, b) => a.stepIndex - b.stepIndex);
+      
+      // 实时显示执行状态（简洁版）
+      if (step.stepType === 'model_call') {
+        // 模型调用步骤，显示思考状态
+        updateMessageContentByRunId(runId, step.content || '🤔 正在思考...');
+      } else if (step.stepType === 'tool_start') {
+        updateMessageContentByRunId(runId, `🔧 正在执行: ${step.toolName}...`);
+      } else if (step.stepType === 'tool_end' && step.toolStatus === 'success') {
+        updateMessageContentByRunId(runId, `✅ 工具执行完成: ${step.toolName}`);
+      }
     },
     onStatus: (status) => {
       console.log(`[SSE] Status update for ${runId}:`, status);

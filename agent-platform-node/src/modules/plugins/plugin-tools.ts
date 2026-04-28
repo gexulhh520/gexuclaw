@@ -7,9 +7,11 @@ import type { PluginRegistry } from "./plugin-registry.js";
 /**
  * plugin.read_item 工具定义
  * 用于 LLM 按需查询插件的具体内容
+ * 注意：工具名使用 plugin_read_item（下划线）而非 plugin.read_item（点号），
+ * 因为部分模型（如 Kimi）要求函数名只能包含字母、数字、下划线和破折号
  */
 export const pluginReadItemToolDefinition = {
-  name: "plugin.read_item",
+  name: "plugin_read_item",
   description:
     "读取已装载插件的具体内容（prompt 或 resource）。当需要了解某个插件工具的详细用法、参考模板或资源内容时使用。",
   inputSchema: {

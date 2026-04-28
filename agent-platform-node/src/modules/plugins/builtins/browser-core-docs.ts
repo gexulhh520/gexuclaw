@@ -200,8 +200,116 @@ a img[src]
     },
   ],
 
-  // 默认挂载到 browser 类型 Agent
-  defaultAttachTargets: ["browser"],
+  // 插件工具集
+  tools: [
+    {
+      toolId: "browser_open",
+      name: "打开网页",
+      description: "打开指定 URL 并返回页面摘要信息，包括标题、主要内容等",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "要打开的网页 URL" },
+          waitFor: { type: "string", description: "可选，等待特定元素出现（CSS 选择器）" },
+        },
+        required: ["url"],
+      },
+    },
+    {
+      toolId: "browser_get_page_info",
+      name: "获取页面信息",
+      description: "获取当前页面的元数据，包括标题、URL、描述等",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+    {
+      toolId: "browser_find_element",
+      name: "查找页面元素",
+      description: "使用 CSS 选择器查找页面元素，返回元素文本内容",
+      inputSchema: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "CSS 选择器" },
+          multiple: { type: "boolean", description: "是否返回多个匹配元素" },
+        },
+        required: ["selector"],
+      },
+    },
+    {
+      toolId: "browser_click",
+      name: "点击元素",
+      description: "点击页面上的指定元素",
+      inputSchema: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "要点击的元素的 CSS 选择器" },
+          waitForNavigation: { type: "boolean", description: "是否等待页面导航完成" },
+        },
+        required: ["selector"],
+      },
+    },
+    {
+      toolId: "browser_input_text",
+      name: "输入文本",
+      description: "在表单输入框中输入文本",
+      inputSchema: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "输入框的 CSS 选择器" },
+          text: { type: "string", description: "要输入的文本" },
+          clearFirst: { type: "boolean", description: "是否先清空现有内容" },
+        },
+        required: ["selector", "text"],
+      },
+    },
+    {
+      toolId: "browser_screenshot",
+      name: "页面截图",
+      description: "截取当前页面或指定元素的截图",
+      inputSchema: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "可选，要截图的特定元素选择器" },
+          fullPage: { type: "boolean", description: "是否截取整个页面" },
+        },
+      },
+    },
+    {
+      toolId: "browser_scroll",
+      name: "滚动页面",
+      description: "滚动页面到指定位置",
+      inputSchema: {
+        type: "object",
+        properties: {
+          direction: { type: "string", enum: ["up", "down", "left", "right"], description: "滚动方向" },
+          amount: { type: "number", description: "滚动距离（像素）" },
+          toElement: { type: "string", description: "可选，滚动到指定元素" },
+        },
+        required: ["direction"],
+      },
+    },
+    {
+      toolId: "browser_extract_data",
+      name: "提取数据",
+      description: "根据模式从页面提取结构化数据",
+      inputSchema: {
+        type: "object",
+        properties: {
+          schema: {
+            type: "object",
+            description: "数据提取模式，定义要提取的字段和对应的选择器",
+          },
+          listSelector: { type: "string", description: "可选，列表容器的选择器（用于提取列表数据）" },
+        },
+        required: ["schema"],
+      },
+    },
+  ],
+
+  // 默认挂载到 builtin 类型 Agent（browser agent 的 type 是 builtin）
+  defaultAttachTargets: ["builtin"],
 
   status: "active",
   createdAt: nowIso(),

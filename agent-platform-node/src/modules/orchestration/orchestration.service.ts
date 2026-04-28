@@ -11,10 +11,11 @@ import { ContextBuilder } from "./context-builder.js";
 import { MainAgent } from "./main-agent.js";
 import { runEventBus } from "../../shared/event-bus.js";
 import { updateWorkContextRunBinding } from "../work-contexts/work-context.service.js";
+import { pluginRegistry } from "../plugins/plugin-registry-instance.js";
 import type { ChatRequestInput, ChatResponse, OrchestrationDecision, DelegateEnvelope } from "./orchestration.schema.js";
 import type { AgentCapabilitySummary } from "./context-builder.js";
 
-const runtime = new AgentRuntime();
+const runtime = new AgentRuntime({ pluginRegistry });
 const contextBuilder = new ContextBuilder();
 const mainAgent = new MainAgent();
 
@@ -29,12 +30,22 @@ async function getAvailableAgents(): Promise<AgentCapabilitySummary[]> {
 
   return agents.map((agent) => {
     const capabilities = jsonParse<string[]>(agent.capabilitiesJson, []);
+    
+    // 获取该 Agent 挂载的插件信息
+    const attachedPlugins = pluginRegistry.getPluginsForAgent(agent.id);
+    const plugins = attachedPlugins.map((p) => ({
+      pluginId: p.pluginId,
+      name: p.name,
+      description: p.description,
+    }));
+    
     return {
       agentId: agent.agentUid,
       name: agent.name,
       description: agent.description,
       type: agent.type,
       capabilities,
+      plugins: plugins.length > 0 ? plugins : undefined,
     };
   });
 }

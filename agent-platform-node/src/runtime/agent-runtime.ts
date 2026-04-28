@@ -277,18 +277,45 @@ export class AgentRuntime {
     );
     const modelDefaultParams = jsonParse<Record<string, unknown>>(args.profile.defaultParamsJson, {});
 
-    // 获取挂载的插件
-    const attachedPlugins = this.pluginRegistry?.getPluginsForAgentVersion(
-      args.input.versionRecord.id
+    // Kimi k2.5 不需要传入 temperature 参数，使用模型默认值
+    const isKimiK25 = args.profile.modelName === "kimi-k2.5";
+    if (isKimiK25) {
+      delete modelDefaultParams.temperature;
+      delete modelParamsOverride.temperature;
+    }
+
+    // 获取挂载的插件（Agent 级别，所有版本共享）
+    const attachedPlugins = this.pluginRegistry?.getPluginsForAgent(
+      args.input.agentRecord.id
     ) ?? [];
 
-    // 合并插件工具
-    const pluginToolIds = attachedPlugins.flatMap((p) => p.tools?.map((t) => t.toolId) ?? []);
+    // 合并插件工具，工具名称格式为: pluginId__toolId
+    const pluginToolIds = attachedPlugins.flatMap((p) =>
+      p.tools?.map((t) => `${p.pluginId}__${t.toolId}`) ?? []
+    );
     const mergedAllowedTools = [...new Set([...allowedTools, ...pluginToolIds])];
 
-    const toolRuntime = new ToolRuntime(mergedAllowedTools);
+    // 工具组装日志已禁用，如需调试可取消注释
+    // if (attachedPlugins.length > 0 || pluginToolIds.length > 0) {
+    //   console.log(`[AgentRuntime] ========== TOOL ASSEMBLY ==========`);
+    //   console.log(`[AgentRuntime] Agent: ${args.input.agentRecord.agentUid} (ID: ${args.input.agentRecord.id})`);
+    //   console.log(`[AgentRuntime] AgentVersion: ${args.input.versionRecord.id}`);
+    //   console.log(`[AgentRuntime] 挂载插件数: ${attachedPlugins.length}`);
+    //   attachedPlugins.forEach(p => {
+    //     console.log(`[AgentRuntime]   - ${p.pluginId}: ${p.tools?.length ?? 0} 个工具`);
+    //     p.tools?.forEach(t => console.log(`[AgentRuntime]     * ${p.pluginId}__${t.toolId}`));
+    //   });
+    //   console.log(`[AgentRuntime] Version 允许工具: ${allowedTools.length} 个`);
+    //   allowedTools.forEach(t => console.log(`[AgentRuntime]   - ${t}`));
+    //   console.log(`[AgentRuntime] 插件工具: ${pluginToolIds.length} 个`);
+    //   pluginToolIds.forEach(t => console.log(`[AgentRuntime]   - ${t}`));
+    //   console.log(`[AgentRuntime] 合并后总工具: ${mergedAllowedTools.length} 个`);
+    //   console.log(`[AgentRuntime] ======================================`);
+    // }
 
-    // 注册 plugin.read_item 工具
+    const toolRuntime = new ToolRuntime(mergedAllowedTools, this.pluginRegistry);
+
+    // 注册 plugin_read_item 工具
     if (this.pluginRegistry) {
       registerPluginReadItemTool(toolRuntime, this.pluginRegistry);
     }
@@ -317,8 +344,29 @@ export class AgentRuntime {
       ? buildPluginCatalogInjection(attachedPlugins)
       : "";
 
+    const systemMessage = this.renderSystemMessage(promptContext, artifactDirectiveConfig, pluginCatalogInjection);
+
+    // 打印插件目录注入日志（用于验证）
+    if (pluginCatalogInjection) {
+      console.log("\n========== PLUGIN CATALOG INJECTION ==========");
+      console.log(pluginCatalogInjection);
+      console.log("========== END PLUGIN CATALOG ==========\n");
+    } else {
+      console.log("[AgentRuntime] No plugins attached to this AgentVersion");
+    }
+
+    // 打印 systemMessage 内容用于调试
+    console.log("\n========== SYSTEM MESSAGE ==========");
+    console.log(systemMessage);
+    console.log("========== END SYSTEM MESSAGE ==========\n");
+
+    // 打印用户消息用于调试
+    console.log("\n========== USER MESSAGE ==========");
+    console.log(args.input.userMessage);
+    console.log("========== END USER MESSAGE ==========\n");
+
     const messages: ChatMessage[] = [
-      { role: "system", content: this.renderSystemMessage(promptContext, artifactDirectiveConfig, pluginCatalogInjection) },
+      { role: "system", content: systemMessage },
       { role: "user", content: args.input.userMessage },
     ];
 
@@ -328,11 +376,12 @@ export class AgentRuntime {
 
     // 第一阶段的主循环故意保持小：先验证模型调用、工具白名单和运行轨迹。
     for (let turn = 0; turn < args.input.versionRecord.maxSteps; turn += 1) {
+      console.log(`[AgentRuntime] 开始第 ${turn + 1} 轮模型调用，当前消息数:`, messages.length);
       const modelStep = await this.createStep({
         runId: args.runId,
         stepIndex: stepIndex++,
         stepType: "model_call",
-        input: { messageCount: messages.length, toolNames: toolManifest.map((tool) => tool.name) },
+        input: { messageCount: messages.length, toolNames: toolManifest.map((tool) => tool.function.name) },
       });
 
       const started = Date.now();
@@ -426,18 +475,46 @@ export class AgentRuntime {
         return { summary: directives.cleanContent || "Agent run completed.", stepsCount: stepIndex - 1 };
       }
 
-      messages.push({
+      // 构建 assistant 消息，包含 tool_calls
+      // 对于支持 thinking 的模型（如 Kimi k2.5），需要添加 reasoning_content 字段
+      const assistantMessage: {
+        role: "assistant";
+        content: string;
+        tool_calls: Array<{
+          id: string;
+          type: "function";
+          function: { name: string; arguments: string };
+        }>;
+        reasoning_content?: string;
+      } = {
         role: "assistant",
         content: directives.cleanContent,
         tool_calls: modelResult.toolCalls.map((toolCall) => ({
           id: toolCall.id,
-          type: "function",
+          type: "function" as const,
           function: {
             name: toolCall.name,
             arguments: jsonStringify(toolCall.arguments),
           },
         })),
-      });
+      };
+      // 如果模型返回了 reasoning_content，则包含它
+      // 对于支持 thinking 的模型（如 Kimi k2.5），所有 assistant 消息都必须包含 reasoning_content
+      const rawResponse = modelResult.raw as Record<string, unknown> | undefined;
+      const rawChoices = rawResponse?.choices as Array<Record<string, unknown>> | undefined;
+      const rawMessage = rawChoices?.[0]?.message as Record<string, unknown> | undefined;
+      console.log("[AgentRuntime] rawMessage keys:", rawMessage ? Object.keys(rawMessage) : "undefined");
+      console.log("[AgentRuntime] rawMessage.reasoning_content:", rawMessage?.reasoning_content);
+      // 对于 Kimi k2.5，始终添加 reasoning_content（即使为空字符串）
+      if (args.profile.modelName === "kimi-k2.5") {
+        const reasoningContent = typeof rawMessage?.reasoning_content === "string" ? rawMessage.reasoning_content : "";
+        assistantMessage.reasoning_content = reasoningContent;
+        console.log("[AgentRuntime] 添加 reasoning_content 到 assistant 消息:", reasoningContent ? "有内容" : "空字符串");
+      } else if (typeof rawMessage?.reasoning_content === "string") {
+        assistantMessage.reasoning_content = rawMessage.reasoning_content;
+      }
+      messages.push(assistantMessage);
+      console.log("[AgentRuntime] Assistant 消息已添加，tool_calls 数量:", assistantMessage.tool_calls.length);
 
       for (const toolCall of modelResult.toolCalls) {
         await this.createStep({
@@ -480,6 +557,7 @@ export class AgentRuntime {
           content: jsonStringify(decoratedToolResult.toolResult),
         });
       }
+      console.log(`[AgentRuntime] 第 ${turn + 1} 轮完成，消息数:`, messages.length);
     }
 
     if (pendingArtifactCandidates.length > 0) {

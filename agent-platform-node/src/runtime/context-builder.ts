@@ -56,7 +56,7 @@ export function summarizePromptContext(context: PromptContext) {
     hasSkillText: context.skillText.length > 0,
     hasHandoffNote: Boolean(context.handoffNote),
     toolCount: context.toolManifest.length,
-    toolNames: context.toolManifest.map((tool) => tool.name),
+    toolNames: context.toolManifest.map((tool) => tool.function.name),
     tokenBudget: context.tokenBudget,
   };
 }

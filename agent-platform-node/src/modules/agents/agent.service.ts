@@ -99,3 +99,20 @@ export async function getCurrentAgentVersion(agentUid: string) {
 
   return { agent, version };
 }
+
+/**
+ * 获取所有 Agent 的所有版本
+ * 用于 Bootstrap 时为所有版本挂载插件
+ */
+export async function getAllAgentVersions(): Promise<Array<{ id: number; agentType: string; agentUid: string }>> {
+  const result = await db
+    .select({
+      id: agentVersions.id,
+      agentType: agents.type,
+      agentUid: agents.agentUid,
+    })
+    .from(agentVersions)
+    .innerJoin(agents, eq(agentVersions.agentId, agents.id));
+
+  return result;
+}

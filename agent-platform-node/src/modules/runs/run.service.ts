@@ -5,9 +5,10 @@ import { AgentRuntime } from "../../runtime/agent-runtime.js";
 import { notFound } from "../../shared/errors.js";
 import { getCurrentAgentVersion } from "../agents/agent.service.js";
 import { getWorkContextByUid } from "../work-contexts/work-context.service.js";
+import { pluginRegistry } from "../plugins/plugin-registry-instance.js";
 import type { RunAgentInput } from "./run.schema.js";
 
-const runtime = new AgentRuntime();
+const runtime = new AgentRuntime({ pluginRegistry });
 
 export async function runAgent(agentUid: string, input: RunAgentInput) {
   // run API 默认取当前发布版本，不要求调用方自己传 version id。

@@ -12,6 +12,8 @@ export type ChatMessage = {
       arguments: string;
     };
   }>;
+  // 支持 thinking 的模型（如 Kimi k2.5）需要此字段
+  reasoning_content?: string;
 };
 
 export type ModelToolCall = {
@@ -102,6 +104,9 @@ export class ModelClient {
       throw new Error(`Missing API key for provider: ${input.provider}`);
     }
 
+    // Kimi k2.5 不需要特殊处理 temperature 参数
+    // 使用传入的参数，不强制覆盖
+
     // Kimi、OpenAI 这类兼容 Chat Completions 的 provider 先共用同一套请求格式。
     // 后续如果某个厂商字段不同，只在这里做适配，不污染 AgentRuntime。
     const body = {
@@ -111,15 +116,9 @@ export class ModelClient {
         content: message.content,
         tool_call_id: message.tool_call_id,
         tool_calls: message.tool_calls,
+        reasoning_content: message.reasoning_content,
       })),
-      tools: input.tools.map((tool) => ({
-        type: "function",
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters,
-        },
-      })),
+      tools: input.tools,
       ...input.params,
     };
 
@@ -158,7 +157,7 @@ export class ModelClient {
     const systemMessage = input.messages.find((message) => message.role === "system")?.content ?? "";
     const artifactDirectivesEnabled = systemMessage.includes("Artifact directives are enabled for this agent version.");
 
-    // mock 模型看到“百度 / baidu / http”时主动发起 browser.open，
+    // mock 模型看到"百度 / baidu / http"时主动发起 browser_open，
     // 用来验证 tool call、allowed_tools 校验和 agent_run_steps 记录。
     // 一旦已经拿到 tool 结果，就返回最终总结，避免在 phase one 里重复死循环调用同一个工具。
     if (latestTool) {
@@ -204,13 +203,13 @@ export class ModelClient {
       };
     }
 
-    if (input.tools.some((tool) => tool.name === "browser.open") && /baidu|百度|http/i.test(latestUser)) {
+    if (input.tools.some((tool) => tool.function.name.includes("browser_open")) && /baidu|百度|http/i.test(latestUser)) {
       return {
         content: "I will open the requested page with the browser tool.",
         toolCalls: [
           {
             id: "mock_tool_call_browser_open",
-            name: "browser.open",
+            name: "browser_open",
             arguments: { url: latestUser.includes("百度") ? "https://www.baidu.com" : "https://example.com" },
           },
         ],

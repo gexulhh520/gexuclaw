@@ -119,7 +119,21 @@ export async function registerOrchestrationRoutes(app: FastifyInstance) {
       const unsubscribeStep = runEventBus.subscribeToRunSteps(runId, (step) => {
         if (isConnectionClosed) return;
         reply.raw.write(`event: step\n`);
-        reply.raw.write(`data: ${JSON.stringify(step)}\n\n`);
+        reply.raw.write(`data: ${JSON.stringify({
+          stepIndex: step.stepIndex,
+          stepType: step.stepType,
+          content: step.content,
+          toolName: step.toolName,
+          toolStatus: step.toolStatus,
+          input: step.input,
+          output: step.output,
+          createdAt: step.createdAt,
+          agentName: step.agentName,
+        })}\n\n`);
+        // 立即刷新缓冲区，确保数据实时发送
+        if (typeof (reply.raw as NodeJS.WritableStream & { flush?: () => void }).flush === 'function') {
+          (reply.raw as NodeJS.WritableStream & { flush?: () => void }).flush?.();
+        }
       });
 
       const unsubscribeStatus = runEventBus.subscribeToRunStatus(runId, (status) => {

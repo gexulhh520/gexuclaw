@@ -103,7 +103,7 @@ export const agentPluginSchema = z.object({
 
 export type AgentPlugin = z.infer<typeof agentPluginSchema>;
 
-// AgentVersion 与插件的挂载关系
+// AgentVersion 与插件的挂载关系（已废弃，改为 Agent 级别绑定）
 export const agentVersionPluginBindingSchema = z.object({
   bindingId: z.string(),
   agentVersionId: z.number(),
@@ -116,6 +116,20 @@ export const agentVersionPluginBindingSchema = z.object({
 });
 
 export type AgentVersionPluginBinding = z.infer<typeof agentVersionPluginBindingSchema>;
+
+// Agent 与插件的挂载关系（新版本）
+export const agentPluginBindingSchema = z.object({
+  bindingId: z.string(),
+  agentId: z.number(), // Agent ID（关联 agents 表）
+  pluginId: z.string(),
+  enabled: z.boolean(),
+  priority: z.number().optional(), // 加载优先级
+  configOverride: z.record(z.any()).optional(), // 插件配置覆盖
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export type AgentPluginBinding = z.infer<typeof agentPluginBindingSchema>;
 
 // plugin.read_item 输入
 export const pluginReadItemInputSchema = z.object({

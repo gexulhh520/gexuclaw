@@ -1,12 +1,13 @@
 import { desc, eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { agentArtifacts, agentRuns, workContexts } from "../../db/schema.js";
+import { agentArtifacts, agentRuns, workContexts, sessions } from "../../db/schema.js";
 import { jsonParse } from "../../shared/json.js";
 
 // PromptContext 类型定义
 export type PromptContext = {
   contextRole: "main_orchestration" | "subagent_execution";
   sessionId: string;
+  sessionDescription?: string;
   userMessage: string;
   workContexts: WorkContextBrief[];
   selectedWorkContext?: WorkContextSummary;
@@ -66,12 +67,19 @@ export type RunTraceSummary = {
   createdAt: string;
 };
 
+export type AgentPluginInfo = {
+  pluginId: string;
+  name: string;
+  description: string;
+};
+
 export type AgentCapabilitySummary = {
   agentId: string;
   name: string;
   description: string;
   type: string;
   capabilities: string[];
+  plugins?: AgentPluginInfo[];
 };
 
 // ContextBuilder - 构建主 Agent 的上下文
@@ -83,25 +91,47 @@ export class ContextBuilder {
   }): Promise<PromptContext> {
     const { sessionId, userMessage, workContextId } = params;
 
-    // 1. 获取当前 Session 下的 WorkContext 列表（简要信息）
+    // 1. 获取当前 Session 的信息（包括协作描述）
+    const sessionInfo = await this.getSessionInfo(sessionId);
+
+    // 2. 获取当前 Session 下的 WorkContext 列表（简要信息）
     const workContextList = await this.getSessionWorkContexts(sessionId);
 
-    // 2. 如果指定了 workContextId，获取详细信息
+    // 3. 如果指定了 workContextId，获取详细信息
     let selectedWorkContext: WorkContextSummary | undefined;
     if (workContextId) {
       selectedWorkContext = await this.getWorkContextSummary(workContextId);
     }
 
-    // 3. 获取最近的 RunTrace
+    // 4. 获取最近的 RunTrace
     const recentRuns = await this.getRecentRuns(sessionId, 5);
 
     return {
       contextRole: "main_orchestration",
       sessionId,
+      sessionDescription: sessionInfo?.description,
       userMessage,
       workContexts: workContextList,
       selectedWorkContext,
       recentRuns,
+    };
+  }
+
+  // 获取 Session 信息
+  private async getSessionInfo(sessionId: string): Promise<{ title: string; description: string } | undefined> {
+    const [session] = await db
+      .select({
+        title: sessions.title,
+        description: sessions.description,
+      })
+      .from(sessions)
+      .where(eq(sessions.sessionUid, sessionId));
+
+    if (!session) return undefined;
+
+    return {
+      title: session.title,
+      description: session.description,
     };
   }
 

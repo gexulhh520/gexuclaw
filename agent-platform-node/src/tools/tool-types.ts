@@ -1,4 +1,20 @@
+/**
+ * OpenAI 标准格式的工具定义
+ * 用于发送给 LLM
+ */
 export type ToolDefinition = {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+};
+
+/**
+ * 内部工具定义格式（用于注册）
+ */
+export type InternalToolDefinition = {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
@@ -43,6 +59,6 @@ export type ToolResult = {
 
 export type ToolHandler = (input: unknown) => Promise<ToolResult>;
 
-export type RegisteredTool = ToolDefinition & {
+export type RegisteredTool = InternalToolDefinition & {
   handler: ToolHandler;
 };

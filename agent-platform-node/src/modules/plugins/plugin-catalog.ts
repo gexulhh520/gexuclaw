@@ -69,6 +69,7 @@ export function buildPluginCatalogInjection(plugins: AgentPlugin[]): string {
     const catalog = plugin.catalog ?? buildSinglePluginCatalog(plugin);
 
     sections.push(`### ${plugin.name}`);
+    sections.push(`**插件ID**: \`${plugin.pluginId}\``);
     if (plugin.description) {
       sections.push(plugin.description);
     }
@@ -80,7 +81,7 @@ export function buildPluginCatalogInjection(plugins: AgentPlugin[]): string {
       sections.push("**可用工具**:");
       for (const item of toolItems) {
         const desc = item.description ? ` - ${item.description}` : "";
-        sections.push(`- ${item.itemId}: ${item.title}${desc}`);
+        sections.push(`- \`${item.itemId}\`: ${item.title}${desc}`);
       }
       sections.push("");
     }
@@ -91,7 +92,7 @@ export function buildPluginCatalogInjection(plugins: AgentPlugin[]): string {
       sections.push("**可用资源**:");
       for (const item of resourceItems) {
         const desc = item.description ? ` - ${item.description}` : "";
-        sections.push(`- ${item.itemId}: ${item.title}${desc}`);
+        sections.push(`- \`${item.itemId}\`: ${item.title}${desc}`);
       }
       sections.push("");
     }
@@ -102,7 +103,7 @@ export function buildPluginCatalogInjection(plugins: AgentPlugin[]): string {
       sections.push("**可用提示**:");
       for (const item of promptItems) {
         const desc = item.description ? ` - ${item.description}` : "";
-        sections.push(`- ${item.itemId}: ${item.title}${desc}`);
+        sections.push(`- \`${item.itemId}\`: ${item.title}${desc}`);
       }
       sections.push("");
     }
@@ -110,11 +111,7 @@ export function buildPluginCatalogInjection(plugins: AgentPlugin[]): string {
 
   // 添加使用说明
   sections.push("---");
-  sections.push("如需查看插件的具体内容（提示词或资源），请使用 `plugin.read_item` 工具查询。");
-  sections.push("参数说明:");
-  sections.push("- `pluginId`: 插件 ID（如上所示）");
-  sections.push("- `itemType`: 条目类型，`prompt` 或 `resource`");
-  sections.push("- `itemId`: 条目 ID（如上所示）");
+  sections.push("使用 `plugin_read_item` 工具查看插件详情，参数：`pluginId`（见上）、`itemType`（prompt/resource）、`itemId`（见上）");
   sections.push("");
 
   return sections.join("\n");

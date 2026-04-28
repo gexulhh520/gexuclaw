@@ -81,9 +81,14 @@ export class MainAgent {
   private buildFirstStepSystemPrompt(availableAgents: AgentCapabilitySummary[]): string {
     const agentDescriptions = availableAgents
       .map(
-        (agent) => `- ${agent.agentId}: ${agent.name}
+        (agent) => {
+          const pluginsInfo = agent.plugins && agent.plugins.length > 0
+            ? `\n    拥有插件: ${agent.plugins.map((p) => `${p.name}(${p.pluginId})`).join(", ")}`
+            : "";
+          return `- ${agent.agentId}: ${agent.name}
     描述: ${agent.description}
-    能力: ${agent.capabilities.join(", ")}`
+    能力: ${agent.capabilities.join(", ")}${pluginsInfo}`;
+        }
       )
       .join("\n");
 
@@ -123,9 +128,15 @@ ${agentDescriptions}
       )
       .join("\n");
 
+    // 会话协作描述
+    const sessionCollaboration = context.sessionDescription
+      ? `## 当前会话的协作目标\n${context.sessionDescription}\n`
+      : "";
+
     return `## 用户消息
 """${context.userMessage}"""
 
+${sessionCollaboration}
 ## 当前 Session 的 WorkContext 列表
 ${workContextsInfo || "暂无 WorkContext"}
 
@@ -171,9 +182,14 @@ ${context.selectedWorkContext ? `- ${context.selectedWorkContext.workContextId}:
   private buildSecondStepSystemPrompt(availableAgents: AgentCapabilitySummary[]): string {
     const agentDescriptions = availableAgents
       .map(
-        (agent) => `- ${agent.agentId}: ${agent.name}
+        (agent) => {
+          const pluginsInfo = agent.plugins && agent.plugins.length > 0
+            ? `\n    拥有插件: ${agent.plugins.map((p) => `${p.name}(${p.pluginId}) - ${p.description}`).join("\n             ")}`
+            : "";
+          return `- ${agent.agentId}: ${agent.name}
     描述: ${agent.description}
-    能力: ${agent.capabilities.join(", ")}`
+    能力: ${agent.capabilities.join(", ")}${pluginsInfo}`;
+        }
       )
       .join("\n");
 
@@ -253,10 +269,15 @@ ${agentDescriptions}
       )
       .join("\n") || "无产物";
 
+    // 会话协作描述
+    const sessionCollaboration = context.sessionDescription
+      ? `## 当前会话的协作目标\n${context.sessionDescription}\n`
+      : "";
+
     return `## 用户消息
 """${context.userMessage}"""
 
-## 确认的 WorkContext 详情
+${sessionCollaboration}## 确认的 WorkContext 详情
 - ID: ${workContextDetail.workContextId}
 - 标题: ${workContextDetail.title}
 - 目标: ${workContextDetail.goal}

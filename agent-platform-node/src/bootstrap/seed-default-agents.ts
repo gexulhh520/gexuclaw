@@ -2,8 +2,8 @@ import "dotenv/config";
 import { ensureDatabaseSchema } from "../db/migrate.js";
 import { createAgent, createAgentVersion, getAgentByUid } from "../modules/agents/agent.service.js";
 import { createModelProfile, getModelProfileByUid } from "../modules/model-profiles/model-profile.service.js";
-import { PluginRegistry } from "../modules/plugins/plugin-registry.js";
-import { seedBuiltinPlugins, attachDefaultPluginsToAgentVersions } from "./seed-plugins.js";
+import { pluginRegistry } from "../modules/plugins/plugin-registry-instance.js";
+import { seedBuiltinPlugins, attachDefaultPluginsToAgents, attachDefaultPluginsToAllAgents } from "./seed-plugins.js";
 
 await ensureDatabaseSchema();
 
@@ -19,10 +19,14 @@ async function ensureModelProfile(input: {
   const existing = await getModelProfileByUid(input.profileUid);
   if (existing) return existing;
 
+  // Kimi k2.5 不需要传入 temperature 参数，使用模型默认值
+  const isKimiK25 = input.modelName === "kimi-k2.5";
+  const defaultParams = isKimiK25 ? {} : { temperature: 0.2 };
+
   return createModelProfile({
     ...input,
     capability: { tool_calling: true },
-    defaultParams: { temperature: 0.2 },
+    defaultParams,
     maxContextTokens: 32000,
   });
 }
@@ -66,34 +70,42 @@ async function main() {
     });
   }
 
-  // 初始化插件系统（在创建 AgentVersion 之前）
-  const pluginRegistry = new PluginRegistry();
+  // 初始化插件系统（使用全局 pluginRegistry）
   await seedBuiltinPlugins(pluginRegistry);
 
   if (!browserAgent.currentVersionId) {
     // 第一版 BrowserAgent 绑定 mock 模型和 mock browser 工具，
     // 目标是先验证 AgentRun / Step / ModelInvocation 是否完整落库。
-    const version = await createAgentVersion("builtin_browser_agent", {
+    await createAgentVersion("builtin_browser_agent", {
       modelProfileUid: "local_mock_default",
       systemPrompt: "You are a browser automation agent. Use browser tools only when they are exposed.",
       skillText: "Open pages, inspect mock page information, and return a concise summary.",
-      allowedTools: ["browser.open", "browser.get_page_info"],
+      allowedTools: [
+        // 插件工具（格式: pluginId__toolId）
+        "builtin-browser-core-docs__browser_open",
+        "builtin-browser-core-docs__browser_get_page_info",
+        "builtin-browser-core-docs__browser_find_element",
+        "builtin-browser-core-docs__browser_click",
+        "builtin-browser-core-docs__browser_input_text",
+        "builtin-browser-core-docs__browser_screenshot",
+        "builtin-browser-core-docs__browser_scroll",
+        "builtin-browser-core-docs__browser_extract_data",
+      ],
       contextPolicy: { include_work_context_summary: false },
       modelParamsOverride: {},
       outputSchema: {},
       maxSteps: 4,
     });
 
-    // 使用刚创建的 version.id 挂载插件
-    await attachDefaultPluginsToAgentVersions(pluginRegistry, [
-      { id: version.id, agentType: browserAgent.type },
-    ]);
-  } else {
-    // 已有版本，直接挂载
-    await attachDefaultPluginsToAgentVersions(pluginRegistry, [
-      { id: browserAgent.currentVersionId, agentType: browserAgent.type },
+    // 为 Agent 挂载插件（Agent 级别，所有版本共享）
+    await attachDefaultPluginsToAgents(pluginRegistry, [
+      { id: browserAgent.id, type: browserAgent.type, agentUid: browserAgent.agentUid },
     ]);
   }
+
+  // 为数据库中所有 Agent 挂载默认插件
+  // 确保即使之前创建的 Agent 也能获得插件绑定
+  await attachDefaultPluginsToAllAgents(pluginRegistry);
 
   console.log("Agent Platform bootstrap completed.");
   console.log(`Plugin stats: ${JSON.stringify(pluginRegistry.getStats())}`);
