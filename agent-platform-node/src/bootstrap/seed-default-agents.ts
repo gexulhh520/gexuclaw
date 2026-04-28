@@ -2,6 +2,8 @@ import "dotenv/config";
 import { ensureDatabaseSchema } from "../db/migrate.js";
 import { createAgent, createAgentVersion, getAgentByUid } from "../modules/agents/agent.service.js";
 import { createModelProfile, getModelProfileByUid } from "../modules/model-profiles/model-profile.service.js";
+import { PluginRegistry } from "../modules/plugins/plugin-registry.js";
+import { seedBuiltinPlugins, attachDefaultPluginsToAgentVersions } from "./seed-plugins.js";
 
 await ensureDatabaseSchema();
 
@@ -64,10 +66,14 @@ async function main() {
     });
   }
 
+  // 初始化插件系统（在创建 AgentVersion 之前）
+  const pluginRegistry = new PluginRegistry();
+  await seedBuiltinPlugins(pluginRegistry);
+
   if (!browserAgent.currentVersionId) {
     // 第一版 BrowserAgent 绑定 mock 模型和 mock browser 工具，
     // 目标是先验证 AgentRun / Step / ModelInvocation 是否完整落库。
-    await createAgentVersion("builtin_browser_agent", {
+    const version = await createAgentVersion("builtin_browser_agent", {
       modelProfileUid: "local_mock_default",
       systemPrompt: "You are a browser automation agent. Use browser tools only when they are exposed.",
       skillText: "Open pages, inspect mock page information, and return a concise summary.",
@@ -77,9 +83,20 @@ async function main() {
       outputSchema: {},
       maxSteps: 4,
     });
+
+    // 使用刚创建的 version.id 挂载插件
+    await attachDefaultPluginsToAgentVersions(pluginRegistry, [
+      { id: version.id, agentType: browserAgent.type },
+    ]);
+  } else {
+    // 已有版本，直接挂载
+    await attachDefaultPluginsToAgentVersions(pluginRegistry, [
+      { id: browserAgent.currentVersionId, agentType: browserAgent.type },
+    ]);
   }
 
   console.log("Agent Platform bootstrap completed.");
+  console.log(`Plugin stats: ${JSON.stringify(pluginRegistry.getStats())}`);
 }
 
 await main();

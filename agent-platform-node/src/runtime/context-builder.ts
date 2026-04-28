@@ -15,6 +15,8 @@ export type PromptContext = {
     maxContextTokens: number;
     reservedOutputTokens: number;
   };
+  // 插件目录注入（可选）
+  pluginCatalog?: string;
 };
 
 export type PromptContextBuildInput = {

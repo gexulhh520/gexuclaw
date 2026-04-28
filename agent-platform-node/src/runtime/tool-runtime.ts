@@ -1,5 +1,5 @@
 import { validationError } from "../shared/errors.js";
-import { getTool, listTools } from "../tools/tool-registry.js";
+import { getTool, listTools, registerTool } from "../tools/tool-registry.js";
 
 export class ToolRuntime {
   constructor(private readonly allowedToolNames: string[]) {}
@@ -22,5 +22,23 @@ export class ToolRuntime {
     }
 
     return tool.handler(input);
+  }
+
+  /**
+   * 注册动态工具（如插件工具）
+   * @param tool 工具定义
+   */
+  registerTool(tool: { name: string; description: string; handler: (input: unknown) => Promise<import("../tools/tool-types.js").ToolResult> }): void {
+    // 注册到全局工具注册表
+    registerTool({
+      name: tool.name,
+      description: tool.description,
+      parameters: { type: "object", properties: {} }, // 简化 schema
+      handler: tool.handler,
+    });
+    // 添加到允许列表
+    if (!this.allowedToolNames.includes(tool.name)) {
+      this.allowedToolNames.push(tool.name);
+    }
   }
 }

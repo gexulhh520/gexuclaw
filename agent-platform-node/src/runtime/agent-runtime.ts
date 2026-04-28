@@ -25,6 +25,9 @@ import {
   persistDeclaredArtifacts,
   type PendingArtifactCandidate,
 } from "../modules/artifacts/artifact-coordinator.js";
+import { PluginRegistry } from "../modules/plugins/plugin-registry.js";
+import { buildPluginCatalogInjection } from "../modules/plugins/plugin-catalog.js";
+import { registerPluginReadItemTool } from "../modules/plugins/plugin-tools.js";
 
 // 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
 type RunAgentInputExtended = {
@@ -100,6 +103,11 @@ export class AgentRuntime {
   private currentRunId: number = 0;
   private parentRunId: number | undefined = undefined;
   private agentName: string = "";
+  private pluginRegistry?: PluginRegistry;
+
+  constructor(options?: { pluginRegistry?: PluginRegistry }) {
+    this.pluginRegistry = options?.pluginRegistry;
+  }
 
   async run(input: RunAgentInput) {
     const [profile] = await db
@@ -268,7 +276,23 @@ export class AgentRuntime {
       {},
     );
     const modelDefaultParams = jsonParse<Record<string, unknown>>(args.profile.defaultParamsJson, {});
-    const toolRuntime = new ToolRuntime(allowedTools);
+
+    // 获取挂载的插件
+    const attachedPlugins = this.pluginRegistry?.getPluginsForAgentVersion(
+      args.input.versionRecord.id
+    ) ?? [];
+
+    // 合并插件工具
+    const pluginToolIds = attachedPlugins.flatMap((p) => p.tools?.map((t) => t.toolId) ?? []);
+    const mergedAllowedTools = [...new Set([...allowedTools, ...pluginToolIds])];
+
+    const toolRuntime = new ToolRuntime(mergedAllowedTools);
+
+    // 注册 plugin.read_item 工具
+    if (this.pluginRegistry) {
+      registerPluginReadItemTool(toolRuntime, this.pluginRegistry);
+    }
+
     const toolManifest = toolRuntime.getToolManifest();
 
     // 第一阶段 PromptContext 还不读取 WorkContext / RunTrace / Memory，
@@ -288,8 +312,13 @@ export class AgentRuntime {
       .set({ contextPackageSummaryJson: jsonStringify(summarizePromptContext(promptContext)) })
       .where(eq(agentRuns.id, args.runId));
 
+    // 构建插件目录注入文本
+    const pluginCatalogInjection = attachedPlugins.length > 0
+      ? buildPluginCatalogInjection(attachedPlugins)
+      : "";
+
     const messages: ChatMessage[] = [
-      { role: "system", content: this.renderSystemMessage(promptContext, artifactDirectiveConfig) },
+      { role: "system", content: this.renderSystemMessage(promptContext, artifactDirectiveConfig, pluginCatalogInjection) },
       { role: "user", content: args.input.userMessage },
     ];
 
@@ -470,14 +499,23 @@ export class AgentRuntime {
   private renderSystemMessage(
     context: ReturnType<typeof buildPromptContext>,
     artifactDirectiveConfig: ArtifactDirectiveConfig,
+    pluginCatalogInjection?: string,
   ): string {
     const sections = [
       context.systemPrompt,
       context.skillText ? `\nSkill:\n${context.skillText}` : "",
       context.handoffNote ? `\nHandoff note:\n${context.handoffNote}` : "",
+    ];
+
+    // 注入插件目录摘要
+    if (pluginCatalogInjection) {
+      sections.push("\n" + pluginCatalogInjection);
+    }
+
+    sections.push(
       "\nUse only the tools exposed in the tool manifest.",
       "\nReturn a concise final answer when done.",
-    ];
+    );
 
     if (artifactDirectiveConfig.enabled) {
       sections.push(
