@@ -100,7 +100,7 @@ export const filesystemCorePlugin: AgentPlugin = {
     {
       toolId: "fs_write",
       name: "写入文件",
-      description: "在工作空间中创建或覆盖文件",
+      description: "在工作空间中创建或覆盖文件  path 必传 content 必传",
       inputSchema: {
         type: "object",
         properties: {
