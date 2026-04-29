@@ -29,6 +29,7 @@ export const ArtifactRoleEnum = z.enum([
   "draft",
   "final",
   "output",
+  "pending_write",
 ]);
 
 export const createArtifactSchema = z.object({

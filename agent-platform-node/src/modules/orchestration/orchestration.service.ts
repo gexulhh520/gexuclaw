@@ -12,12 +12,23 @@ import { MainAgent } from "./main-agent.js";
 import { runEventBus } from "../../shared/event-bus.js";
 import { updateWorkContextRunBinding } from "../work-contexts/work-context.service.js";
 import { pluginRegistry } from "../plugins/plugin-registry-instance.js";
+import { SessionRuntimeSnapshotBuilder } from "./session-runtime-snapshot-builder.js";
+import { SessionContextIndexBuilder } from "./session-context-index-builder.js";
+import { DecisionContractValidator } from "./decision-contract-validator.js";
+import { ExecutionPlanCompiler } from "./execution-plan-compiler.js";
+import { TaskEnvelopeBuilder } from "./task-envelope-builder.js";
+import { renderTaskEnvelopeForAgent } from "./task-envelope-renderer.js";
 import type { ChatRequestInput, ChatResponse, OrchestrationDecision, DelegateEnvelope } from "./orchestration.schema.js";
 import type { AgentCapabilitySummary } from "./context-builder.js";
 
 const runtime = new AgentRuntime({ pluginRegistry });
 const contextBuilder = new ContextBuilder();
 const mainAgent = new MainAgent();
+const snapshotBuilder = new SessionRuntimeSnapshotBuilder();
+const contextIndexBuilder = new SessionContextIndexBuilder();
+const decisionValidator = new DecisionContractValidator();
+const planCompiler = new ExecutionPlanCompiler();
+const taskEnvelopeBuilder = new TaskEnvelopeBuilder();
 
 // 最大链式委派深度，防止无限循环
 const MAX_DELEGATION_DEPTH = 5;
@@ -36,13 +47,13 @@ async function getAvailableAgents(): Promise<AgentCapabilitySummary[]> {
     const plugins = attachedPlugins.map((p) => ({
       pluginId: p.pluginId,
       name: p.name,
-      description: p.description,
+      description: p.description || "",
     }));
     
     return {
       agentId: agent.agentUid,
       name: agent.name,
-      description: agent.description,
+      description: agent.description || "",
       type: agent.type,
       capabilities,
       plugins: plugins.length > 0 ? plugins : undefined,
@@ -291,10 +302,162 @@ export async function handleChat(input: ChatRequestInput): Promise<ChatResponse>
 // 异步处理完整的聊天流程（主 Agent 决策 + 子 Agent 执行）
 async function processChatAsync(input: ChatRequestInput, mainRunId: string): Promise<void> {
   const { sessionId, message, workContextId, selectedAgentId } = input;
-  
+
   // 声明在函数顶部，确保 catch 块可以访问
   let finalWorkContextId: string | undefined;
-  
+
+  try {
+    // ===== 新流程：基于 SessionRuntimeSnapshot + SessionContextIndex =====
+    console.log("[processChatAsync] 尝试新结构化决策流程...");
+
+    const snapshot = await snapshotBuilder.build({
+      sessionId,
+      userMessage: message,
+      selectedWorkContextUid: workContextId,
+    });
+
+    const contextIndex = contextIndexBuilder.build(snapshot);
+
+    const mainDecision = await mainAgent.decideWithSessionIndex({
+      userMessage: message,
+      snapshot,
+      contextIndex,
+    });
+
+    const validation = decisionValidator.validate({
+      decision: mainDecision,
+      snapshot,
+      contextIndex,
+    });
+
+    if (!validation.valid) {
+      console.log("[processChatAsync] Decision validation failed, fallback to ask_user");
+      await updateMainAgentRun(
+        mainRunId,
+        validation.fallbackDecision.ambiguity?.question || "我需要确认一下你要继续处理哪一项。",
+        "success",
+        mainDecision.targetWorkContextUid ?? undefined
+      );
+      return;
+    }
+
+    const plan = planCompiler.compile({
+      decision: validation.normalizedDecision,
+      snapshot,
+      contextIndex,
+    });
+
+    console.log(`[processChatAsync] ExecutionPlan mode: ${plan.mode}, steps: ${plan.steps.length}`);
+
+    // 根据 plan mode 执行
+    switch (plan.mode) {
+      case "direct_response": {
+        await updateMainAgentRun(
+          mainRunId,
+          validation.normalizedDecision.response || "我已收到您的消息",
+          "success",
+          plan.workContextUid
+        );
+        return;
+      }
+
+      case "single_agent":
+      case "sequential_agents": {
+        await updateMainAgentRun(mainRunId, "正在委派任务给子 Agent...", "running", plan.workContextUid);
+        await executePlanAsync(plan, sessionId, message, mainRunId, contextIndex);
+        return;
+      }
+
+      default: {
+        // fallback 到旧流程
+        console.log("[processChatAsync] Plan mode not handled, fallback to old flow");
+        await processChatAsyncOld(input, mainRunId);
+        return;
+      }
+    }
+  } catch (error) {
+    console.error("[processChatAsync] New flow error:", error);
+    // fallback 到旧流程
+    console.log("[processChatAsync] Fallback to old flow due to error");
+    await processChatAsyncOld(input, mainRunId);
+  }
+}
+
+// 执行计划（新流程）
+async function executePlanAsync(
+  plan: import("./orchestration.types.js").ExecutionPlan,
+  sessionId: string,
+  originalUserMessage: string,
+  mainRunId: string,
+  contextIndex: import("./orchestration.types.js").SessionContextIndex
+): Promise<void> {
+  const [mainRun] = await db.select({ id: agentRuns.id }).from(agentRuns).where(eq(agentRuns.runUid, mainRunId));
+  if (!mainRun) {
+    console.error(`[executePlanAsync] Main run not found: ${mainRunId}`);
+    return;
+  }
+
+  let finalWorkContextId = plan.workContextUid;
+
+  for (const step of plan.steps) {
+    try {
+      console.log(`[executePlanAsync] Executing step: ${step.stepUid}, agent: ${step.targetAgentUid}`);
+
+      const { agent, version } = await getCurrentAgentVersion(step.targetAgentUid);
+
+      const taskEnvelope = taskEnvelopeBuilder.build({
+        step,
+        plan,
+        contextIndex,
+        parentRunUid: mainRunId,
+        originalUserMessage,
+      });
+
+      const run = await runtime.run({
+        agentRecord: agent,
+        versionRecord: version,
+        userMessage: originalUserMessage,
+        originalUserMessage,
+        taskEnvelope,
+        sessionId,
+        workContextId: plan.workContextUid || "",
+        parentRunId: mainRun.id,
+        mode: "subagent",
+      });
+
+      console.log(`[executePlanAsync] Step completed: ${run.runUid}, status: ${run.status}`);
+
+      if (plan.workContextUid) {
+        finalWorkContextId = plan.workContextUid;
+      }
+    } catch (error) {
+      console.error(`[executePlanAsync] Step failed:`, error);
+      await updateMainAgentRun(
+        mainRunId,
+        `执行失败：${error instanceof Error ? error.message : "未知错误"}`,
+        "failed",
+        finalWorkContextId
+      );
+      return;
+    }
+  }
+
+  // 所有步骤完成
+  await updateMainAgentRun(
+    mainRunId,
+    "任务执行完成",
+    "success",
+    finalWorkContextId
+  );
+}
+
+// 旧流程（fallback）
+async function processChatAsyncOld(input: ChatRequestInput, mainRunId: string): Promise<void> {
+  const { sessionId, message, workContextId, selectedAgentId } = input;
+
+  // 声明在函数顶部，确保 catch 块可以访问
+  let finalWorkContextId: string | undefined;
+
   try {
     // 获取可用 Agent 列表
     const availableAgents = await getAvailableAgents();
@@ -376,7 +539,7 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       }
     }
   } catch (error) {
-    console.error("[processChatAsync] Error:", error);
+    console.error("[processChatAsyncOld] Error:", error);
     await updateMainAgentRun(mainRunId, `处理失败：${error instanceof Error ? error.message : "未知错误"}`, "failed", finalWorkContextId);
   }
 }

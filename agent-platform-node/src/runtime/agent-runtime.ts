@@ -28,6 +28,8 @@ import {
 import { PluginRegistry } from "../modules/plugins/plugin-registry.js";
 import { buildPluginCatalogInjection } from "../modules/plugins/plugin-catalog.js";
 import { registerPluginReadItemTool } from "../modules/plugins/plugin-tools.js";
+import { renderTaskEnvelopeForAgent } from "../modules/orchestration/task-envelope-renderer.js";
+import type { TaskEnvelope } from "./task-envelope.js";
 
 // 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
 type RunAgentInputExtended = {
@@ -50,6 +52,8 @@ type RunAgentInputExtended = {
   };
   userMessage: string;
   handoffNote?: string;
+  originalUserMessage?: string;
+  taskEnvelope?: TaskEnvelope;
   userId?: string;
   sessionId?: string;
   workContextId?: string;
@@ -77,6 +81,8 @@ type RunAgentInput = {
   };
   userMessage: string;
   handoffNote?: string;
+  originalUserMessage?: string;
+  taskEnvelope?: TaskEnvelope;
   userId?: string;
   sessionId?: string;
   workContextId?: string;
@@ -145,6 +151,17 @@ export class AgentRuntime {
       },
     };
 
+    // 计算 effectiveUserMessage
+    const effectiveUserMessage =
+      input.mode === "subagent" && input.taskEnvelope
+        ? input.taskEnvelope.objective
+        : input.originalUserMessage || input.userMessage;
+
+    // 渲染 taskEnvelopePrompt
+    const taskEnvelopePrompt = input.taskEnvelope
+      ? renderTaskEnvelopeForAgent(input.taskEnvelope)
+      : undefined;
+
     console.log(`[AgentRuntime] Creating run with sessionId: ${input.sessionId}, workContextId: ${input.workContextId}, parentRunId: ${input.parentRunId}`);
     const [run] = await db
       .insert(agentRuns)
@@ -158,8 +175,9 @@ export class AgentRuntime {
         parentRunId: input.parentRunId,
         mode: input.mode,
         status: "running",
-        userMessage: input.userMessage,
-        handoffNote: input.handoffNote,
+        userMessage: input.originalUserMessage || input.userMessage,
+        handoffNote: undefined,
+        delegateEnvelopeJson: input.taskEnvelope ? jsonStringify(input.taskEnvelope) : undefined,
         snapshotJson: jsonStringify(snapshot),
         createdAt: now,
         updatedAt: now,
@@ -184,10 +202,17 @@ export class AgentRuntime {
       const result = await this.executeRunLoop({ runId: run.id, runUid, profile, input });
       const finishedAt = nowIso();
 
+      // 根据工具执行结果计算最终状态
+      const finalStatus = result.hasFailedTool
+        ? "failed"
+        : result.hasUnverifiedSideEffect
+          ? "partial_success"
+          : "success";
+
       await db
         .update(agentRuns)
         .set({
-          status: "success",
+          status: finalStatus,
           resultSummary: result.summary,
           outputJson: jsonStringify(result),
           finishedAt,
@@ -293,7 +318,13 @@ export class AgentRuntime {
     const pluginToolIds = attachedPlugins.flatMap((p) =>
       p.tools?.map((t) => `${p.pluginId}__${t.toolId}`) ?? []
     );
-    const mergedAllowedTools = [...new Set([...allowedTools, ...pluginToolIds])];
+    const baseAllowedTools = [...new Set([...allowedTools, ...pluginToolIds])];
+
+    // 与 TaskEnvelope.allowedTools 取交集
+    const envelopeAllowedTools = args.input.taskEnvelope?.allowedTools;
+    const mergedAllowedTools = envelopeAllowedTools
+      ? baseAllowedTools.filter((tool) => envelopeAllowedTools.includes(tool))
+      : baseAllowedTools;
 
     // 工具组装日志已禁用，如需调试可取消注释
     // if (attachedPlugins.length > 0 || pluginToolIds.length > 0) {
@@ -324,11 +355,21 @@ export class AgentRuntime {
 
     // 第一阶段 PromptContext 还不读取 WorkContext / RunTrace / Memory，
     // 但仍然通过 ContextBuilder 统一入口组装，避免后续阶段改 Runtime 主流程。
+    // 计算 effectiveUserMessage
+    const effectiveUserMessage =
+      args.input.mode === "subagent" && args.input.taskEnvelope
+        ? args.input.taskEnvelope.objective
+        : args.input.originalUserMessage || args.input.userMessage;
+
+    const taskEnvelopePrompt = args.input.taskEnvelope
+      ? renderTaskEnvelopeForAgent(args.input.taskEnvelope)
+      : undefined;
+
     const promptContext = buildPromptContext({
       systemPrompt: args.input.versionRecord.systemPrompt,
       skillText: args.input.versionRecord.skillText,
-      userMessage: args.input.userMessage,
-      handoffNote: args.input.handoffNote,
+      userMessage: effectiveUserMessage,
+      handoffNote: undefined,
       toolManifest,
       contextPolicy,
       maxContextTokens: args.profile.maxContextTokens,
@@ -344,7 +385,7 @@ export class AgentRuntime {
       ? buildPluginCatalogInjection(attachedPlugins)
       : "";
 
-    const systemMessage = this.renderSystemMessage(promptContext, artifactDirectiveConfig, pluginCatalogInjection);
+    const systemMessage = this.renderSystemMessage(promptContext, artifactDirectiveConfig, pluginCatalogInjection, taskEnvelopePrompt);
 
     // 打印插件目录注入日志（用于验证）
     if (pluginCatalogInjection) {
@@ -367,12 +408,14 @@ export class AgentRuntime {
 
     const messages: ChatMessage[] = [
       { role: "system", content: systemMessage },
-      { role: "user", content: args.input.userMessage },
+      { role: "user", content: effectiveUserMessage },
     ];
 
     let stepIndex = 1;
     let latestContent = "";
     let pendingArtifactCandidates: PendingArtifactCandidate[] = [];
+    let hasFailedTool = false;
+    let hasUnverifiedSideEffect = false;
 
     // 第一阶段的主循环故意保持小：先验证模型调用、工具白名单和运行轨迹。
     for (let turn = 0; turn < args.input.versionRecord.maxSteps; turn += 1) {
@@ -472,7 +515,12 @@ export class AgentRuntime {
           output: { content: directives.cleanContent },
         });
 
-        return { summary: directives.cleanContent || "Agent run completed.", stepsCount: stepIndex - 1 };
+        return {
+          summary: directives.cleanContent || "Agent run completed.",
+          stepsCount: stepIndex - 1,
+          hasFailedTool,
+          hasUnverifiedSideEffect,
+        };
       }
 
       // 构建 assistant 消息，包含 tool_calls
@@ -517,14 +565,22 @@ export class AgentRuntime {
       console.log("[AgentRuntime] Assistant 消息已添加，tool_calls 数量:", assistantMessage.tool_calls.length);
 
       for (const toolCall of modelResult.toolCalls) {
-        await this.createStep({
+        // tool_start 轻量化：只存 summary + inputRefs，不存大 content
+      const toolStartMetadata = {
+        inputRefs: [],
+        omittedFields: ["content"],
+        recordLevel: "summary",
+      };
+
+      await this.createStep({
           runId: args.runId,
           stepIndex: stepIndex++,
           stepType: "tool_start",
           toolName: toolCall.name,
           toolCallId: toolCall.id,
           toolStatus: "running",
-          input: toolCall.arguments,
+          input: { toolName: toolCall.name, argsKeys: Object.keys(toolCall.arguments) },
+          metadata: toolStartMetadata,
         });
 
         const toolResult = await toolRuntime.execute(toolCall.name, toolCall.arguments);
@@ -534,12 +590,30 @@ export class AgentRuntime {
           toolResult,
         });
 
+        // 累计工具执行状态
+        if (!decoratedToolResult.toolResult.success) {
+          hasFailedTool = true;
+        }
+        if (decoratedToolResult.toolResult.verification?.status === "unverified") {
+          hasUnverifiedSideEffect = true;
+        }
+
         if (decoratedToolResult.pendingCandidates.length > 0) {
           pendingArtifactCandidates = [
             ...pendingArtifactCandidates,
             ...decoratedToolResult.pendingCandidates,
           ];
         }
+
+        // tool_end 存 ToolResult + metadata，包含 operation/sideEffects/verification
+        const toolEndMetadata = {
+          inputRefs: [],
+          operation: decoratedToolResult.toolResult.operation,
+          sideEffects: decoratedToolResult.toolResult.sideEffects,
+          verification: decoratedToolResult.toolResult.verification,
+          outputRefs: decoratedToolResult.toolResult.outputRefs,
+          recordLevel: "result",
+        };
 
         await this.createStep({
           runId: args.runId,
@@ -549,6 +623,7 @@ export class AgentRuntime {
           toolCallId: toolCall.id,
           toolStatus: decoratedToolResult.toolResult.success ? "success" : "failed",
           output: decoratedToolResult.toolResult,
+          metadata: toolEndMetadata,
         });
 
         messages.push({
@@ -571,18 +646,25 @@ export class AgentRuntime {
       });
     }
 
-    return { summary: latestContent || "Agent run reached max steps.", stepsCount: stepIndex - 1 };
+    return {
+      summary: latestContent || "Agent run reached max steps.",
+      stepsCount: stepIndex - 1,
+      hasFailedTool,
+      hasUnverifiedSideEffect,
+    };
   }
 
   private renderSystemMessage(
     context: ReturnType<typeof buildPromptContext>,
     artifactDirectiveConfig: ArtifactDirectiveConfig,
     pluginCatalogInjection?: string,
+    taskEnvelopePrompt?: string,
   ): string {
     const sections = [
       context.systemPrompt,
       context.skillText ? `\nSkill:\n${context.skillText}` : "",
       context.handoffNote ? `\nHandoff note:\n${context.handoffNote}` : "",
+      taskEnvelopePrompt ? `\nTask Envelope:\n${taskEnvelopePrompt}` : "",
     ];
 
     // 注入插件目录摘要

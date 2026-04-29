@@ -2,6 +2,8 @@ import { ModelClient } from "../../runtime/model-client.js";
 import { makeUid } from "../../shared/ids.js";
 import type { OrchestrationDecision, DelegateEnvelope } from "./orchestration.schema.js";
 import type { PromptContext, AgentCapabilitySummary, WorkContextDetail } from "./context-builder.js";
+import { mainDecisionSchema } from "./main-decision.schema.js";
+import type { SessionRuntimeSnapshot, SessionContextIndex, MainDecision, MainDecisionInput } from "./orchestration.types.js";
 
 // 主 Agent - 负责编排和委派
 export class MainAgent {
@@ -9,6 +11,192 @@ export class MainAgent {
 
   constructor() {
     this.modelClient = new ModelClient();
+  }
+
+  /**
+   * 基于 SessionRuntimeSnapshot + SessionContextIndex 做结构化决策
+   * 输出 MainDecision JSON
+   */
+  async decideWithSessionIndex(input: {
+    userMessage: string;
+    snapshot: SessionRuntimeSnapshot;
+    contextIndex: SessionContextIndex;
+  }): Promise<MainDecision> {
+    console.log(`[MainAgent] decideWithSessionIndex 开始`);
+    console.log(`[MainAgent] 用户消息: ${input.userMessage.slice(0, 100)}...`);
+    console.log(`[MainAgent] WorkContext数量: ${input.snapshot.workContexts.length}`);
+    console.log(`[MainAgent] Refs数量: ${input.contextIndex.refs.length}`);
+
+    const systemPrompt = this.buildMainDecisionSystemPrompt();
+    const decisionInput = this.buildMainDecisionInput(input);
+
+    const raw = await this.modelClient.complete({
+      systemPrompt,
+      userMessage: JSON.stringify(decisionInput, null, 2),
+      temperature: 0.1,
+    });
+
+    const decision = await this.parseMainDecision(raw.content);
+
+    console.log(`[MainAgent] 决策完成: ${decision.decisionType}`);
+    console.log(`[MainAgent] Confidence: ${decision.confidence}`);
+    console.log(`[MainAgent] Reasoning: ${decision.reasoning.slice(0, 200)}...`);
+
+    return decision;
+  }
+
+  private buildMainDecisionInput(input: {
+    userMessage: string;
+    snapshot: SessionRuntimeSnapshot;
+    contextIndex: SessionContextIndex;
+  }): MainDecisionInput {
+    return {
+      userMessage: input.userMessage,
+      selectedWorkContextUid: input.snapshot.selectedWorkContextUid ?? null,
+      workContexts: input.snapshot.workContexts.map((wc) => ({
+        workContextUid: wc.workContextUid,
+        title: wc.title,
+        summary: wc.summary || wc.goal || "",
+        signals: {
+          selectedInUI: wc.signals.selectedInUI,
+          recentlyActive: wc.signals.recentlyActive,
+          hasFailedRun: wc.signals.hasFailedRun,
+          hasRecentArtifact: wc.signals.hasRecentArtifact,
+        },
+      })),
+      refs: input.contextIndex.refs,
+      relations: input.contextIndex.relations,
+      availableAgents: input.snapshot.availableAgents.map((agent) => ({
+        agentUid: agent.agentUid,
+        name: agent.name,
+        description: agent.description,
+        capabilities: agent.capabilities,
+      })),
+    };
+  }
+
+  private buildMainDecisionSystemPrompt(): string {
+    return `你是主 Agent 的结构化决策器，不是执行器。
+
+你会收到：
+1. 用户消息
+2. 当前 Session 下多个 WorkContext 卡片
+3. ContextRefs
+4. ContextRelations
+5. 可用 Agent 列表
+
+你必须输出一个合法 MainDecision JSON。
+不要输出 Markdown。
+不要输出代码块。
+不要输出解释性文字。
+不要编造不存在的 workContextUid、refId、agentUid。
+
+决策规则：
+1. 你必须从 ContextRefs 中选择 primaryRefs / secondaryRefs。
+2. primaryRefs 是本轮主要处理对象。
+3. secondaryRefs 是相关但本轮不主要处理的对象。
+4. primaryRefs、secondaryRefs、plan.steps[].inputRefIds 必须来自输入 refs[].refId。
+5. targetAgentUid、plan.steps[].targetAgentUid 必须来自 availableAgents[].agentUid。
+6. targetWorkContextUid 必须来自 workContexts[].workContextUid，除非 decisionType=create_work_context 或 ask_user。
+7. 如果用户表达执行失败、报错、没生效、没写入，优先关注 tags/status/evidence 中包含 failed、error、unverified、write_failed 的 refs。
+8. 如果用户表达内容不满意、方案不对、设计不行，优先关注 artifact、document、plan、architecture 相关 refs。
+9. selectedInUI 只是提示，不是绝对依据。
+10. 如果当前 UI 选中的 WorkContext 与其他 refs 的强证据冲突，以证据更强者为准。
+11. 如果多个候选都强且无法判断主次，decisionType 必须是 ask_user。
+12. answer_directly 必须填写 response。
+13. ask_user 必须填写 ambiguity.question。
+14. delegate、recover_execution、verify_execution、multi_step_plan 必须填写 plan.steps。
+15. reasoning 只写简短内部理由，不要超过 300 字。`;
+  }
+
+  private async parseMainDecision(content: string): Promise<MainDecision> {
+    const json = this.extractJsonObject(content);
+    const parsed = mainDecisionSchema.safeParse(json);
+
+    if (parsed.success) {
+      return parsed.data;
+    }
+
+    console.warn(`[MainAgent] MainDecision 解析失败，尝试 repair: ${parsed.error.message}`);
+
+    return this.repairMainDecision(content, parsed.error);
+  }
+
+  private extractJsonObject(content: string): unknown {
+    const trimmed = content.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        // 尝试提取 JSON 块
+      }
+    }
+
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch {
+        // 解析失败
+      }
+    }
+
+    return null;
+  }
+
+  private async repairMainDecision(
+    badOutput: string,
+    zodError: import("zod").ZodError
+  ): Promise<MainDecision> {
+    const repairPrompt = `你的上一次输出不是合法 MainDecision JSON。
+请只修复 JSON，不要改变决策意图。
+不要输出 Markdown。
+不要输出解释。
+
+错误信息如下：
+${zodError.message}
+
+原始输出：
+${badOutput}
+
+必须符合 MainDecision schema。`;
+
+    try {
+      const repairResult = await this.modelClient.complete({
+        systemPrompt: repairPrompt,
+        userMessage: "请修复上面的 JSON。",
+        temperature: 0.1,
+      });
+
+      const json = this.extractJsonObject(repairResult.content);
+      const repaired = mainDecisionSchema.safeParse(json);
+
+      if (repaired.success) {
+        console.log("[MainAgent] Repair 成功");
+        return repaired.data;
+      }
+    } catch {
+      // repair 失败，降级
+    }
+
+    console.warn("[MainAgent] Repair 失败，降级为 ask_user");
+
+    return {
+      decisionType: "ask_user",
+      targetWorkContextUid: null,
+      primaryRefs: [],
+      secondaryRefs: [],
+      targetAgentUid: null,
+      plan: null,
+      response: null,
+      ambiguity: {
+        candidateWorkContextUids: [],
+        candidateRefIds: [],
+        question: "我需要确认一下你要继续处理哪一项。",
+      },
+      confidence: "low",
+      reasoning: "MainDecision JSON parse failed after repair.",
+    };
   }
 
   // 第一步：初步判断用户意图和可能匹配的 WorkContext

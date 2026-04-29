@@ -193,6 +193,51 @@ export async function persistDeclaredArtifacts(params: {
   return createdArtifacts;
 }
 
+/**
+ * 写入失败时保存 pending_write artifact
+ * 用于保留待写入的内容，后续可以重试
+ */
+export async function savePendingWriteArtifact(params: {
+  workContextUid?: string;
+  runId: number;
+  targetPath: string;
+  content: string;
+  failedRunUid?: string;
+  failedStepRef?: string;
+}) {
+  const { workContextUid, runId, targetPath, content, failedRunUid, failedStepRef } = params;
+
+  if (!workContextUid) return null;
+
+  const input: CreateArtifactInput = {
+    runId,
+    sourceRunId: runId,
+    sourceArtifactIds: [],
+    artifactType: "file",
+    artifactRole: "pending_write",
+    title: `Pending write: ${targetPath.split("/").pop() || targetPath}`,
+    mimeType: "text/plain",
+    contentText: content,
+    contentJson: {},
+    uri: targetPath,
+    status: "pending_write",
+    metadata: {
+      targetPath,
+      failedRunUid,
+      failedStepRef,
+      savedAt: new Date().toISOString(),
+    },
+  };
+
+  const artifact = await createArtifact(workContextUid, input);
+
+  await appendRunOutputArtifactIds(runId, [artifact.artifactUid]);
+
+  console.log(`[ArtifactCoordinator] Saved pending_write artifact: ${artifact.artifactUid} for ${targetPath}`);
+
+  return artifact;
+}
+
 export async function loadRunOutputArtifacts(runId: number) {
   const [run] = await db
     .select({ outputArtifactIdsJson: agentRuns.outputArtifactIdsJson })

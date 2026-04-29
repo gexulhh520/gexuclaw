@@ -3,13 +3,13 @@ import { ArtifactRoleEnum, ArtifactTypeEnum } from "../work-contexts/work-contex
 export type AgentArtifactDecision = {
   candidateId: string;
   keep: boolean;
-  artifactRole?: "input" | "reference" | "intermediate" | "draft" | "final" | "output";
+  artifactRole?: "input" | "reference" | "intermediate" | "draft" | "final" | "output" | "pending_write";
   title?: string;
 };
 
 export type AgentDeclaredArtifact = {
   artifactType: "text" | "structured_data" | "page" | "image" | "link" | "file" | "collection";
-  artifactRole: "input" | "reference" | "intermediate" | "draft" | "final" | "output";
+  artifactRole: "input" | "reference" | "intermediate" | "draft" | "final" | "output" | "pending_write";
   title: string;
   contentText?: string;
   contentJson?: Record<string, unknown> | unknown[];

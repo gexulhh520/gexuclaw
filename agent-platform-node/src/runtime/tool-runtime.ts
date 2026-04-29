@@ -359,16 +359,46 @@ export class ToolRuntime {
           };
       }
 
+      // 包装为 ToolResult，保留 operation/sideEffects/verification
+      const baseResult = result as Record<string, unknown>;
       return {
         success: true,
         data: result,
         meta: { plugin: "builtin-filesystem-core", tool: toolId },
+        operation: baseResult.operation as import("../tools/tool-types.js").ToolOperation | undefined,
+        sideEffects: baseResult.sideEffects as import("../tools/tool-types.js").ToolSideEffect[] | undefined,
+        verification: baseResult.verification as import("../tools/tool-types.js").ToolVerification | undefined,
       };
     } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const toolError: import("../tools/tool-types.js").ToolError = {
+        code: "FILESYSTEM_ERROR",
+        message: err.message,
+        retryable: true,
+        category: "runtime",
+      };
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: toolError,
         meta: { plugin: "builtin-filesystem-core", tool: toolId },
+        operation: {
+          type: "write" as const,
+          target: (input as Record<string, unknown>)?.path as string | undefined,
+          targetKind: "file" as const,
+        },
+        sideEffects: [
+          {
+            type: "file_write" as const,
+            target: String((input as Record<string, unknown>)?.path || ""),
+            status: "attempted" as const,
+          },
+        ],
+        verification: {
+          required: true,
+          status: "failed" as const,
+          method: "exception",
+          evidence: { error: err.message },
+        },
       };
     }
   }

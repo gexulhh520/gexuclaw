@@ -208,6 +208,24 @@ export function createWriteTool(options: FilesystemToolOptions) {
       ok: true,
       path: input.path,
       bytes: size,
+      operation: {
+        type: "write" as const,
+        target: input.path,
+        targetKind: "file" as const,
+      },
+      sideEffects: [
+        {
+          type: "file_write" as const,
+          target: input.path,
+          status: "created" as const,
+        },
+      ],
+      verification: {
+        required: true,
+        status: "verified" as const,
+        method: "fs_stat",
+        evidence: { path: input.path, bytes: size },
+      },
     };
   };
 }
@@ -240,6 +258,24 @@ export function createAppendTool(options: FilesystemToolOptions) {
       ok: true,
       path: input.path,
       bytes: size,
+      operation: {
+        type: "append" as const,
+        target: input.path,
+        targetKind: "file" as const,
+      },
+      sideEffects: [
+        {
+          type: "file_append" as const,
+          target: input.path,
+          status: "modified" as const,
+        },
+      ],
+      verification: {
+        required: true,
+        status: "verified" as const,
+        method: "fs_stat",
+        evidence: { path: input.path, appendedBytes: size },
+      },
     };
   };
 }
@@ -292,6 +328,24 @@ export function createEditTool(options: FilesystemToolOptions) {
       occurrences,
       replaced: input.replaceAll ? occurrences : 1,
       bytes: updatedBytes,
+      operation: {
+        type: "edit" as const,
+        target: input.path,
+        targetKind: "file" as const,
+      },
+      sideEffects: [
+        {
+          type: "file_edit" as const,
+          target: input.path,
+          status: "modified" as const,
+        },
+      ],
+      verification: {
+        required: true,
+        status: "verified" as const,
+        method: "fs_stat",
+        evidence: { path: input.path, replaced: input.replaceAll ? occurrences : 1 },
+      },
     };
   };
 }
@@ -318,6 +372,22 @@ export function createApplyPatchTool(options: FilesystemToolOptions) {
       ok: true,
       changedFiles: [...new Set(input.patches.map((patch) => patch.path))],
       results,
+      operation: {
+        type: "edit" as const,
+        target: input.patches.map((p) => p.path).join(", "),
+        targetKind: "file" as const,
+      },
+      sideEffects: results.map((r: Record<string, unknown>) => ({
+        type: "file_edit" as const,
+        target: String(r.path),
+        status: "modified" as const,
+      })),
+      verification: {
+        required: true,
+        status: "verified" as const,
+        method: "fs_stat",
+        evidence: { changedFiles: [...new Set(input.patches.map((patch) => patch.path))] },
+      },
     };
   };
 }
