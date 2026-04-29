@@ -154,7 +154,7 @@ export class AgentRuntime {
     // 计算 effectiveUserMessage
     const effectiveUserMessage =
       input.mode === "subagent" && input.taskEnvelope
-        ? input.taskEnvelope.objective
+        ? renderTaskEnvelopeForAgent(input.taskEnvelope)
         : input.originalUserMessage || input.userMessage;
 
     // 渲染 taskEnvelopePrompt
@@ -358,7 +358,7 @@ export class AgentRuntime {
     // 计算 effectiveUserMessage
     const effectiveUserMessage =
       args.input.mode === "subagent" && args.input.taskEnvelope
-        ? args.input.taskEnvelope.objective
+        ? renderTaskEnvelopeForAgent(args.input.taskEnvelope)
         : args.input.originalUserMessage || args.input.userMessage;
 
     const taskEnvelopePrompt = args.input.taskEnvelope

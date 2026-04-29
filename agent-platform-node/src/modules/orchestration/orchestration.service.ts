@@ -30,6 +30,8 @@ const decisionValidator = new DecisionContractValidator();
 const planCompiler = new ExecutionPlanCompiler();
 const taskEnvelopeBuilder = new TaskEnvelopeBuilder();
 
+const ENABLE_LEGACY_FALLBACK = process.env.ENABLE_LEGACY_FALLBACK === "true";
+
 // 最大链式委派深度，防止无限循环
 const MAX_DELEGATION_DEPTH = 5;
 
@@ -341,8 +343,26 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       return;
     }
 
+    const normalizedDecision = validation.normalizedDecision;
+
+    let effectiveWorkContextUid = normalizedDecision.targetWorkContextUid;
+
+    if (!effectiveWorkContextUid && normalizedDecision.createWorkContext) {
+      const created = await createWorkContext(
+        sessionId,
+        normalizedDecision.createWorkContext.title,
+        normalizedDecision.createWorkContext.goal
+      );
+      effectiveWorkContextUid = created.workContextUid;
+    }
+
+    const effectiveDecision = {
+      ...normalizedDecision,
+      targetWorkContextUid: effectiveWorkContextUid,
+    };
+
     const plan = planCompiler.compile({
-      decision: validation.normalizedDecision,
+      decision: effectiveDecision,
       snapshot,
       contextIndex,
     });
@@ -369,17 +389,35 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       }
 
       default: {
-        // fallback 到旧流程
-        console.log("[processChatAsync] Plan mode not handled, fallback to old flow");
-        await processChatAsyncOld(input, mainRunId);
+        if (ENABLE_LEGACY_FALLBACK) {
+          console.log("[processChatAsync] Plan mode not handled, fallback to old flow");
+          await processChatAsyncOld(input, mainRunId);
+        } else {
+          await updateMainAgentRun(
+            mainRunId,
+            `新编排流程暂不支持 plan mode: ${plan.mode}`,
+            "failed",
+            plan.workContextUid
+          );
+        }
         return;
       }
     }
   } catch (error) {
     console.error("[processChatAsync] New flow error:", error);
-    // fallback 到旧流程
-    console.log("[processChatAsync] Fallback to old flow due to error");
-    await processChatAsyncOld(input, mainRunId);
+
+    if (ENABLE_LEGACY_FALLBACK) {
+      console.log("[processChatAsync] Fallback to old flow due to error");
+      await processChatAsyncOld(input, mainRunId);
+      return;
+    }
+
+    await updateMainAgentRun(
+      mainRunId,
+      `新编排流程执行失败：${error instanceof Error ? error.message : "未知错误"}`,
+      "failed",
+      finalWorkContextId
+    );
   }
 }
 
@@ -398,6 +436,15 @@ async function executePlanAsync(
   }
 
   let finalWorkContextId = plan.workContextUid;
+  let runningContextIndex = contextIndex;
+
+  const stepResults: Array<{
+    stepUid: string;
+    agentUid: string;
+    runUid: string;
+    status: string;
+    summary: string;
+  }> = [];
 
   for (const step of plan.steps) {
     try {
@@ -408,7 +455,7 @@ async function executePlanAsync(
       const taskEnvelope = taskEnvelopeBuilder.build({
         step,
         plan,
-        contextIndex,
+        contextIndex: runningContextIndex,
         parentRunUid: mainRunId,
         originalUserMessage,
       });
@@ -427,6 +474,22 @@ async function executePlanAsync(
 
       console.log(`[executePlanAsync] Step completed: ${run.runUid}, status: ${run.status}`);
 
+      stepResults.push({
+        stepUid: step.stepUid,
+        agentUid: step.targetAgentUid,
+        runUid: run.runUid,
+        status: run.status,
+        summary: run.summary || "",
+      });
+
+      runningContextIndex = appendRunResultRefs(runningContextIndex, {
+        runUid: run.runUid,
+        agentUid: step.targetAgentUid,
+        summary: run.summary,
+        status: run.status,
+        workContextUid: plan.workContextUid,
+      });
+
       if (plan.workContextUid) {
         finalWorkContextId = plan.workContextUid;
       }
@@ -442,13 +505,78 @@ async function executePlanAsync(
     }
   }
 
-  // 所有步骤完成
+  const finalMessage = composeExecutionResult(stepResults);
+
   await updateMainAgentRun(
     mainRunId,
-    "任务执行完成",
-    "success",
+    finalMessage,
+    stepResults.some((r) => r.status === "failed") ? "failed" : "success",
     finalWorkContextId
   );
+}
+
+function composeExecutionResult(results: Array<{
+  stepUid: string;
+  agentUid: string;
+  runUid: string;
+  status: string;
+  summary: string;
+}>): string {
+  if (results.length === 0) return "任务执行完成。";
+
+  if (results.length === 1) {
+    return results[0].summary || "任务执行完成。";
+  }
+
+  return results
+    .map((r, index) => {
+      const title = `${index + 1}. ${r.agentUid}：${r.status}`;
+      return `${title}\n${r.summary || "无摘要"}`;
+    })
+    .join("\n\n");
+}
+
+function appendRunResultRefs(
+  index: import("./orchestration.types.js").SessionContextIndex,
+  input: {
+    runUid: string;
+    agentUid: string;
+    summary?: string;
+    status: string;
+    workContextUid?: string;
+  }
+): import("./orchestration.types.js").SessionContextIndex {
+  const runRefId = `run:${input.runUid}`;
+
+  return {
+    refs: [
+      ...index.refs,
+      {
+        refId: runRefId,
+        kind: "run" as const,
+        title: `${input.agentUid} run`,
+        summary: input.summary || "",
+        workContextUid: input.workContextUid,
+        status: input.status,
+        source: {
+          table: "agent_runs" as const,
+          uid: input.runUid,
+          runUid: input.runUid,
+        },
+        tags: ["run", input.status, input.agentUid],
+      },
+    ],
+    relations: input.workContextUid
+      ? [
+          ...index.relations,
+          {
+            fromRefId: runRefId,
+            toRefId: `wc:${input.workContextUid}`,
+            relation: "belongs_to" as const,
+          },
+        ]
+      : index.relations,
+  };
 }
 
 // 旧流程（fallback）

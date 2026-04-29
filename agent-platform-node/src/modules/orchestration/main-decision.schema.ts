@@ -9,6 +9,11 @@ export const planStepDraftSchema = z.object({
   requireVerification: z.boolean(),
 });
 
+const createWorkContextSchema = z.object({
+  title: z.string().min(1),
+  goal: z.string().min(1),
+});
+
 export const mainDecisionSchema = z.object({
   decisionType: z.enum([
     "answer_directly",
@@ -24,6 +29,8 @@ export const mainDecisionSchema = z.object({
   ]),
 
   targetWorkContextUid: z.string().nullable().default(null),
+
+  createWorkContext: createWorkContextSchema.nullable().default(null),
 
   primaryRefs: z.array(z.string()).default([]),
   secondaryRefs: z.array(z.string()).default([]),

@@ -249,6 +249,11 @@ export type MainDecision = {
 
   targetWorkContextUid: string | null;
 
+  createWorkContext: {
+    title: string;
+    goal: string;
+  } | null;
+
   primaryRefs: string[];
   secondaryRefs: string[];
 

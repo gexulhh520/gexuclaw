@@ -9,7 +9,7 @@ import { db } from "../../db/client.js";
 import { sessions, workContexts, agentArtifacts, agents, agentRuns } from "../../db/schema.js";
 import { jsonParse } from "../../shared/json.js";
 import { LedgerReader } from "./ledger-reader.js";
-import type { SessionRuntimeSnapshot, WorkContextCard } from "./orchestration.types.js";
+import type { SessionRuntimeSnapshot, WorkContextCard, ContextRef } from "./orchestration.types.js";
 
 export class SessionRuntimeSnapshotBuilder {
   private ledgerReader = new LedgerReader();
@@ -75,6 +75,7 @@ export class SessionRuntimeSnapshotBuilder {
     return contexts.map((ctx) => {
       const metadata = jsonParse<Record<string, unknown>>(ctx.metadataJson, {});
       const updatedTime = new Date(ctx.updatedAt).getTime();
+      const projection = metadata.projection as Record<string, unknown> | undefined;
 
       return {
         workContextUid: ctx.workContextUid,
@@ -82,18 +83,19 @@ export class SessionRuntimeSnapshotBuilder {
         goal: ctx.goal,
         status: ctx.status,
         summary: metadata.summary as string | undefined,
-        progressSummary: metadata.progressSummary as string | undefined,
-        currentStage: metadata.currentStage as string | undefined,
+        progressSummary: (projection?.progressSummary as string | undefined) ?? (metadata.progressSummary as string | undefined),
+        currentStage: (projection?.currentStage as string | undefined) ?? (metadata.currentStage as string | undefined),
         nextAction: metadata.nextAction as string | undefined,
         updatedAt: ctx.updatedAt,
         signals: {
           selectedInUI: ctx.workContextUid === selectedWorkContextUid,
           recentlyActive: updatedTime > oneHourAgo,
-          hasFailedRun: false,
-          hasOpenIssue: false,
-          hasRecentArtifact: false,
+          hasFailedRun: !!(projection?.lastFailedRunUid),
+          hasOpenIssue: Array.isArray(projection?.openIssues) && (projection?.openIssues as Array<{ status?: string }>).some((x) => x.status === "open"),
+          hasRecentArtifact: Array.isArray(projection?.recentRefs) && (projection?.recentRefs as string[]).some((ref) => String(ref).startsWith("artifact:")),
           hasUnverifiedSideEffect: false,
         },
+        topRefs: buildTopRefsFromProjection(ctx.workContextUid, projection),
       };
     });
   }
@@ -152,4 +154,55 @@ export class SessionRuntimeSnapshotBuilder {
       };
     });
   }
+}
+
+function buildTopRefsFromProjection(
+  workContextUid: string,
+  projection?: Record<string, unknown>
+): ContextRef[] {
+  if (!projection) return [];
+
+  const refs: ContextRef[] = [];
+
+  const currentFocus = projection.currentFocus as { refId?: string; kind?: string; title?: string } | undefined;
+  if (currentFocus?.refId) {
+    refs.push({
+      refId: currentFocus.refId,
+      kind: (currentFocus.kind || "artifact") as ContextRef["kind"],
+      title: currentFocus.title || currentFocus.refId,
+      summary: (projection.progressSummary as string) || "",
+      workContextUid,
+      status: "current_focus",
+      source: { uid: currentFocus.refId },
+      tags: ["current_focus"],
+    });
+  }
+
+  for (const refId of (projection.recentRefs as string[] | undefined) ?? []) {
+    if (refs.some((r) => r.refId === refId)) continue;
+
+    const kind =
+      refId.startsWith("file:")
+        ? "file"
+        : refId.startsWith("artifact:")
+          ? "artifact"
+          : refId.startsWith("run:")
+            ? "run"
+            : refId.startsWith("step:")
+              ? "step"
+              : "artifact";
+
+    refs.push({
+      refId,
+      kind: kind as ContextRef["kind"],
+      title: refId,
+      summary: "来自 WorkContext projection.recentRefs",
+      workContextUid,
+      status: "recent",
+      source: { uid: refId },
+      tags: ["recent"],
+    });
+  }
+
+  return refs.slice(0, 10);
 }

@@ -91,6 +91,52 @@ export class MainAgent {
 不要输出解释性文字。
 不要编造不存在的 workContextUid、refId、agentUid。
 
+输出格式必须是以下 JSON Schema 的实例：
+
+{
+  "decisionType": "delegate | multi_step_plan | answer_directly | ask_user | create_work_context | use_existing_work_context | switch_work_context | explain_trace | verify_execution | recover_execution",
+  "targetWorkContextUid": "来自输入 workContexts[].workContextUid 的已有 ID，或 null",
+  "createWorkContext": {
+    "title": "新任务标题",
+    "goal": "新任务目标描述"
+  },
+  "primaryRefs": ["refId1", "refId2"],
+  "secondaryRefs": ["refId3"],
+  "targetAgentUid": "来自 availableAgents[].agentUid",
+  "plan": {
+    "steps": [
+      {
+        "targetAgentUid": "来自 availableAgents[].agentUid",
+        "objective": "步骤目标描述",
+        "inputRefIds": ["refId1"],
+        "expectedResultKind": "answer | artifact | file_change | diagnosis | verification",
+        "requireVerification": false
+      }
+    ]
+  },
+  "response": "当 decisionType=answer_directly 时的直接回复内容",
+  "ambiguity": {
+    "candidateWorkContextUids": [],
+    "candidateRefIds": [],
+    "question": "当 decisionType=ask_user 时的澄清问题"
+  },
+  "confidence": "high | medium | low",
+  "reasoning": "简短内部理由，不超过300字"
+}
+
+字段说明：
+- decisionType: 决策类型
+- targetWorkContextUid: 目标 WorkContext 的 UID，必须为 null 如果要新建
+- createWorkContext: 当 targetWorkContextUid 为 null 且需要执行时必填，包含 title 和 goal
+- primaryRefs: 主要相关 refId 列表，必须来自输入 refs
+- secondaryRefs: 次要相关 refId 列表，必须来自输入 refs
+- targetAgentUid: 目标 Agent 的 UID，执行型决策必填
+- plan: 执行计划，delegate/multi_step_plan/recover_execution/verify_execution/create_work_context 必填
+- response: answer_directly 必填
+- ambiguity: ask_user 必填
+- confidence: 置信度
+- reasoning: 推理过程
+
 决策规则：
 1. 你必须从 ContextRefs 中选择 primaryRefs / secondaryRefs。
 2. primaryRefs 是本轮主要处理对象。
@@ -106,7 +152,16 @@ export class MainAgent {
 12. answer_directly 必须填写 response。
 13. ask_user 必须填写 ambiguity.question。
 14. delegate、recover_execution、verify_execution、multi_step_plan 必须填写 plan.steps。
-15. reasoning 只写简短内部理由，不要超过 300 字。`;
+15. reasoning 只写简短内部理由，不要超过 300 字。
+16. 你不能生成新的 workContextUid。
+17. targetWorkContextUid 只能来自输入 workContexts[].workContextUid。
+18. 如果这是新任务，或者输入 workContexts 中没有合适对象：
+    - targetWorkContextUid 必须为 null
+    - createWorkContext 必须填写 title 和 goal
+    - decisionType 可以是 create_work_context、delegate 或 multi_step_plan
+    - 真实 workContextUid 由系统代码创建，不由你生成
+19. 任何形如 wc_xxx、work_context_xxx 的新 ID 都禁止由你生成。
+20. 如果需要执行任务但 targetWorkContextUid 为 null，必须填写 createWorkContext。 `;
   }
 
   private async parseMainDecision(content: string): Promise<MainDecision> {
@@ -184,6 +239,7 @@ ${badOutput}
     return {
       decisionType: "ask_user",
       targetWorkContextUid: null,
+      createWorkContext: null,
       primaryRefs: [],
       secondaryRefs: [],
       targetAgentUid: null,

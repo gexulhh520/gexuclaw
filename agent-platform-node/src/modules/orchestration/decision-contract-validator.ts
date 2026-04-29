@@ -66,10 +66,15 @@ export class DecisionContractValidator {
     }
 
     // 6. decisionType 必填字段校验
-    const needsPlan = ["delegate", "multi_step_plan", "recover_execution", "verify_execution"].includes(
-      decision.decisionType
-    );
-    if (needsPlan && (!decision.plan || decision.plan.steps.length === 0)) {
+    const needsExecution = [
+      "delegate",
+      "multi_step_plan",
+      "recover_execution",
+      "verify_execution",
+      "create_work_context",
+    ].includes(decision.decisionType);
+
+    if (needsExecution && (!decision.plan || decision.plan.steps.length === 0)) {
       issues.push(`${decision.decisionType} 需要 plan.steps`);
     }
 
@@ -81,11 +86,28 @@ export class DecisionContractValidator {
       issues.push("ask_user 需要 ambiguity.question");
     }
 
+    if (decision.targetWorkContextUid && !validWorkContextUids.has(decision.targetWorkContextUid)) {
+      issues.push(`targetWorkContextUid ${decision.targetWorkContextUid} 不存在，LLM 可能编造了 WorkContextUid`);
+    }
+
+    if (needsExecution && !decision.targetWorkContextUid) {
+      if (!decision.createWorkContext?.title || !decision.createWorkContext?.goal) {
+        issues.push("需要执行任务但没有 targetWorkContextUid，也没有 createWorkContext.title/goal");
+      }
+    }
+
+    if (decision.decisionType === "create_work_context") {
+      if (decision.targetWorkContextUid !== null) {
+        issues.push("create_work_context 不允许携带 targetWorkContextUid");
+      }
+    }
+
     // 7. 如果校验失败，返回 fallback
     if (issues.length > 0) {
       const fallbackDecision: MainDecision = {
         decisionType: "ask_user",
-        targetWorkContextUid: decision.targetWorkContextUid ?? null,
+        targetWorkContextUid: null,
+        createWorkContext: null,
         primaryRefs: [],
         secondaryRefs: [],
         targetAgentUid: null,
