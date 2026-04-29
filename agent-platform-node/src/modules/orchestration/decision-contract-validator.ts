@@ -23,35 +23,28 @@ export class DecisionContractValidator {
     const validRefIds = new Set(contextIndex.refs.map((ref) => ref.refId));
     const validAgentUids = new Set(snapshot.availableAgents.map((a) => a.agentUid));
 
-    // 1. targetWorkContextUid 校验
-    if (decision.targetWorkContextUid) {
-      if (!validWorkContextUids.has(decision.targetWorkContextUid)) {
-        issues.push(`targetWorkContextUid ${decision.targetWorkContextUid} 不存在`);
-      }
-    }
-
-    // 2. primaryRefs 校验
+    // 1. primaryRefs 校验
     for (const refId of decision.primaryRefs) {
       if (!validRefIds.has(refId)) {
         issues.push(`primaryRef ${refId} 不存在`);
       }
     }
 
-    // 3. secondaryRefs 校验
+    // 2. secondaryRefs 校验
     for (const refId of decision.secondaryRefs) {
       if (!validRefIds.has(refId)) {
         issues.push(`secondaryRef ${refId} 不存在`);
       }
     }
 
-    // 4. targetAgentUid 校验
+    // 3. targetAgentUid 校验
     if (decision.targetAgentUid) {
       if (!validAgentUids.has(decision.targetAgentUid)) {
         issues.push(`targetAgentUid ${decision.targetAgentUid} 不存在`);
       }
     }
 
-    // 5. plan.steps 校验
+    // 4. plan.steps 校验
     if (decision.plan?.steps) {
       for (const step of decision.plan.steps) {
         if (!validAgentUids.has(step.targetAgentUid)) {
@@ -65,7 +58,7 @@ export class DecisionContractValidator {
       }
     }
 
-    // 6. decisionType 必填字段校验
+    // 5. decisionType 必填字段校验
     const needsExecution = [
       "delegate",
       "multi_step_plan",

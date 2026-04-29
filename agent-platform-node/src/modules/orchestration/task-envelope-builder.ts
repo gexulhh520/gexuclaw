@@ -5,7 +5,7 @@
 
 import { makeUid } from "../../shared/ids.js";
 import type { ExecutionPlan, SessionContextIndex } from "./orchestration.types.js";
-import type { TaskEnvelope, LedgerSlice, ArtifactSlice, FileSlice } from "../../runtime/task-envelope.js";
+import type { TaskEnvelope, LedgerSlice, ArtifactSlice, FileSlice } from "./task-envelope.types.js";
 
 export class TaskEnvelopeBuilder {
   build(input: {

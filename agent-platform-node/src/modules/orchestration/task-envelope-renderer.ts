@@ -4,7 +4,7 @@
  * 这是代码渲染，不是 LLM 调用
  */
 
-import type { TaskEnvelope } from "../../runtime/task-envelope.js";
+import type { TaskEnvelope } from "./task-envelope.types.js";
 
 export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
   const lines: string[] = [];

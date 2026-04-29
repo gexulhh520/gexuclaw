@@ -1,114 +1,133 @@
 /**
  * WorkContextProjectionService
- * 从 ledger/artifacts 更新 WorkContext 的投影字段
- * Phase 2 可选
+ * 增量更新 work_contexts.metadataJson.projection
  */
 
-import { eq, desc } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { workContexts, agentRuns, agentArtifacts } from "../../db/schema.js";
+import { workContexts } from "../../db/schema.js";
 import { jsonParse, jsonStringify } from "../../shared/json.js";
 import { nowIso } from "../../shared/time.js";
 
-export class WorkContextProjectionService {
-  /**
-   * 更新 WorkContext 的投影字段
-   */
-  async project(workContextUid: string): Promise<void> {
-    const [workContext] = await db
-      .select()
-      .from(workContexts)
-      .where(eq(workContexts.workContextUid, workContextUid))
-      .limit(1);
+export type WorkContextProjection = {
+  currentStage:
+    | "created"
+    | "planning"
+    | "executing"
+    | "waiting_user"
+    | "recovering"
+    | "completed"
+    | "blocked";
 
-    if (!workContext) return;
+  progressSummary: string;
 
-    const runs = await db
-      .select()
-      .from(agentRuns)
-      .where(eq(agentRuns.workContextId, workContextUid))
-      .orderBy(desc(agentRuns.id))
-      .limit(10);
+  currentFocus?: {
+    refId: string;
+    kind: "file" | "artifact" | "run" | "step" | "repo" | "patch" | "log";
+    title: string;
+  } | null;
 
-    const lastRun = runs[0];
-    const lastSuccessfulRun = runs.find((r) => r.status === "success");
-    const lastFailedRun = runs.find((r) => r.status === "failed");
+  recentRefs: string[];
 
-    const artifacts = await db
-      .select()
-      .from(agentArtifacts)
-      .where(eq(agentArtifacts.workContextId, workContext.id))
-      .orderBy(desc(agentArtifacts.id))
-      .limit(5);
+  openIssues: Array<{
+    refId?: string;
+    summary: string;
+    severity: "low" | "medium" | "high";
+    status: "open" | "resolved";
+  }>;
 
-    const metadata = jsonParse<Record<string, unknown>>(workContext.metadataJson, {});
+  lastRunUid?: string;
+  lastSuccessfulRunUid?: string | null;
+  lastFailedRunUid?: string | null;
+};
 
-    // 计算 currentStage
-    let currentStage = metadata.currentStage as string | undefined;
-    if (lastRun) {
-      if (lastRun.status === "running") {
-        currentStage = "executing";
-      } else if (lastRun.status === "failed") {
-        currentStage = "recovering";
-      } else if (lastRun.status === "partial_success") {
-        currentStage = "recovering";
-      } else if (lastRun.status === "success") {
-        currentStage = "completed";
-      }
-    }
+function mapRunStatusToStage(status: string): WorkContextProjection["currentStage"] {
+  if (status === "failed") return "blocked";
+  if (status === "partial_success") return "waiting_user";
+  return "completed";
+}
 
-    // 计算 openIssues
-    const openIssues: Array<{ type: string; message: string; severity: "low" | "medium" | "high" }> = [];
-    if (lastFailedRun) {
-      openIssues.push({
-        type: "run_failed",
-        message: lastFailedRun.errorMessage || "Run failed",
-        severity: "high",
-      });
-    }
+export async function updateWorkContextProjection(input: {
+  workContextUid: string;
+  runUid: string;
+  status: string;
+  summary: string;
+  producedArtifactRefs?: Array<{
+    refId: string;
+    title: string;
+  }>;
+  touchedRefs?: string[];
+  openIssues?: Array<{
+    refId?: string;
+    summary: string;
+    severity?: "low" | "medium" | "high";
+  }>;
+}) {
+  const [record] = await db
+    .select({
+      id: workContexts.id,
+      metadataJson: workContexts.metadataJson,
+    })
+    .from(workContexts)
+    .where(eq(workContexts.workContextUid, input.workContextUid))
+    .limit(1);
 
-    // 计算 progressSummary
-    const progressSummary = this.buildProgressSummary(runs, artifacts);
-
-    // 计算 recentRefs
-    const recentRefs = runs.slice(0, 3).map((r) => `run:${r.runUid}`);
-    if (artifacts.length > 0) {
-      recentRefs.push(`artifact:${artifacts[0].artifactUid}`);
-    }
-
-    const updatedMetadata = {
-      ...metadata,
-      currentStage,
-      progressSummary,
-      recentRefs,
-      currentFocus: lastRun?.resultSummary || metadata.currentFocus,
-      openIssues: openIssues.length > 0 ? openIssues : metadata.openIssues,
-      lastRunUid: lastRun?.runUid,
-      lastSuccessfulRunUid: lastSuccessfulRun?.runUid,
-      lastFailedRunUid: lastFailedRun?.runUid,
-      projectedAt: nowIso(),
-    };
-
-    await db
-      .update(workContexts)
-      .set({
-        metadataJson: jsonStringify(updatedMetadata),
-        updatedAt: nowIso(),
-      })
-      .where(eq(workContexts.id, workContext.id));
-
-    console.log(`[WorkContextProjection] Updated: ${workContextUid}, stage: ${currentStage}`);
+  if (!record) {
+    console.warn(`[WorkContextProjection] WorkContext not found: ${input.workContextUid}`);
+    return;
   }
 
-  private buildProgressSummary(
-    runs: typeof agentRuns.$inferSelect[],
-    artifacts: typeof agentArtifacts.$inferSelect[]
-  ): string {
-    const totalRuns = runs.length;
-    const successRuns = runs.filter((r) => r.status === "success").length;
-    const failedRuns = runs.filter((r) => r.status === "failed").length;
-    const totalArtifacts = artifacts.length;
+  const metadata = jsonParse<Record<string, unknown>>(record.metadataJson, {});
+  const existingProjection = (metadata.projection as WorkContextProjection | undefined) ?? {
+    currentStage: "created",
+    progressSummary: "",
+    currentFocus: null,
+    recentRefs: [],
+    openIssues: [],
+    lastRunUid: undefined,
+    lastSuccessfulRunUid: null,
+    lastFailedRunUid: null,
+  };
 
-    return `共 ${totalRuns} 次运行，${successRuns} 成功，${failedRuns} 失败，${totalArtifacts} 个产物`;
-  }
+  // 合并 recentRefs：新产生的 artifact refs + touched refs + 之前的 recentRefs
+  const newRefs = [
+    ...(input.producedArtifactRefs?.map((a) => a.refId) ?? []),
+    ...(input.touchedRefs ?? []),
+  ];
+  const mergedRecentRefs = Array.from(new Set([...newRefs, ...existingProjection.recentRefs])).slice(0, 20);
+
+  // 合并 openIssues
+  const incomingIssues = (input.openIssues ?? []).map((issue) => ({
+    refId: issue.refId,
+    summary: issue.summary,
+    severity: issue.severity ?? ("medium" as const),
+    status: "open" as const,
+  }));
+  const mergedOpenIssues = [...incomingIssues, ...existingProjection.openIssues].slice(0, 10);
+
+  const updatedProjection: WorkContextProjection = {
+    ...existingProjection,
+    currentStage: mapRunStatusToStage(input.status),
+    progressSummary: input.summary,
+    recentRefs: mergedRecentRefs,
+    openIssues: mergedOpenIssues,
+    lastRunUid: input.runUid,
+    lastSuccessfulRunUid: input.status === "success" ? input.runUid : existingProjection.lastSuccessfulRunUid,
+    lastFailedRunUid: input.status === "failed" ? input.runUid : existingProjection.lastFailedRunUid,
+  };
+
+  const updatedMetadata = {
+    ...metadata,
+    projection: updatedProjection,
+  };
+
+  await db
+    .update(workContexts)
+    .set({
+      metadataJson: jsonStringify(updatedMetadata),
+      updatedAt: nowIso(),
+    })
+    .where(eq(workContexts.id, record.id));
+
+  console.log(`[WorkContextProjection] Updated ${input.workContextUid}, stage=${updatedProjection.currentStage}`);
 }

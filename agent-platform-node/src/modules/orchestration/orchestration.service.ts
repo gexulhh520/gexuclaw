@@ -11,6 +11,7 @@ import { ContextBuilder } from "./context-builder.js";
 import { MainAgent } from "./main-agent.js";
 import { runEventBus } from "../../shared/event-bus.js";
 import { updateWorkContextRunBinding } from "../work-contexts/work-context.service.js";
+import { updateWorkContextProjection } from "../work-contexts/work-context-projection.service.js";
 import { pluginRegistry } from "../plugins/plugin-registry-instance.js";
 import { SessionRuntimeSnapshotBuilder } from "./session-runtime-snapshot-builder.js";
 import { SessionContextIndexBuilder } from "./session-context-index-builder.js";
@@ -78,6 +79,16 @@ async function createWorkContext(sessionId: string, title: string, goal: string)
       metadataJson: jsonStringify({
         createdBy: "main_agent",
         createdAt: now,
+        projection: {
+          currentStage: "created",
+          progressSummary: goal,
+          currentFocus: null,
+          recentRefs: [],
+          openIssues: [],
+          lastRunUid: null,
+          lastSuccessfulRunUid: null,
+          lastFailedRunUid: null,
+        },
       }),
       createdAt: now,
       updatedAt: now,
@@ -506,11 +517,25 @@ async function executePlanAsync(
   }
 
   const finalMessage = composeExecutionResult(stepResults);
+  const finalStatus = stepResults.some((r) => r.status === "failed")
+    ? "failed"
+    : stepResults.some((r) => r.status === "partial_success")
+      ? "partial_success"
+      : "success";
+
+  if (finalWorkContextId) {
+    await updateWorkContextProjection({
+      workContextUid: finalWorkContextId,
+      runUid: stepResults[stepResults.length - 1]?.runUid ?? mainRunId,
+      status: finalStatus,
+      summary: finalMessage,
+    });
+  }
 
   await updateMainAgentRun(
     mainRunId,
     finalMessage,
-    stepResults.some((r) => r.status === "failed") ? "failed" : "success",
+    finalStatus,
     finalWorkContextId
   );
 }
@@ -544,38 +569,78 @@ function appendRunResultRefs(
     summary?: string;
     status: string;
     workContextUid?: string;
+    artifacts?: Array<{
+      artifactUid: string;
+      title: string;
+      artifactType: string;
+      artifactRole?: string | null;
+      summary?: string;
+    }>;
   }
 ): import("./orchestration.types.js").SessionContextIndex {
   const runRefId = `run:${input.runUid}`;
 
-  return {
-    refs: [
-      ...index.refs,
-      {
-        refId: runRefId,
-        kind: "run" as const,
-        title: `${input.agentUid} run`,
-        summary: input.summary || "",
-        workContextUid: input.workContextUid,
-        status: input.status,
-        source: {
-          table: "agent_runs" as const,
-          uid: input.runUid,
-          runUid: input.runUid,
-        },
-        tags: ["run", input.status, input.agentUid],
+  const newRefs: import("./orchestration.types.js").ContextRef[] = [
+    {
+      refId: runRefId,
+      kind: "run" as const,
+      title: `${input.agentUid} run`,
+      summary: input.summary || "",
+      workContextUid: input.workContextUid,
+      status: input.status,
+      source: {
+        table: "agent_runs" as const,
+        uid: input.runUid,
+        runUid: input.runUid,
       },
-    ],
-    relations: input.workContextUid
-      ? [
-          ...index.relations,
-          {
-            fromRefId: runRefId,
-            toRefId: `wc:${input.workContextUid}`,
-            relation: "belongs_to" as const,
-          },
-        ]
-      : index.relations,
+      tags: ["run", input.status, input.agentUid],
+    },
+  ];
+
+  const newRelations: import("./orchestration.types.js").ContextRelation[] = input.workContextUid
+    ? [
+        {
+          fromRefId: runRefId,
+          toRefId: `wc:${input.workContextUid}`,
+          relation: "belongs_to" as const,
+        },
+      ]
+    : [];
+
+  if (input.artifacts) {
+    for (const artifact of input.artifacts) {
+      const artifactRefId = `artifact:${artifact.artifactUid}`;
+      newRefs.push({
+        refId: artifactRefId,
+        kind: "artifact" as const,
+        title: artifact.title,
+        summary: artifact.summary || artifact.artifactType,
+        workContextUid: input.workContextUid,
+        status: artifact.artifactRole === "pending_write" ? "pending_write" : "ready",
+        source: {
+          table: "agent_artifacts" as const,
+          uid: artifact.artifactUid,
+        },
+        tags: ["artifact", artifact.artifactType, artifact.artifactRole || ""].filter(Boolean),
+      });
+      newRelations.push({
+        fromRefId: artifactRefId,
+        toRefId: runRefId,
+        relation: "produced" as const,
+      });
+      if (input.workContextUid) {
+        newRelations.push({
+          fromRefId: artifactRefId,
+          toRefId: `wc:${input.workContextUid}`,
+          relation: "belongs_to" as const,
+        });
+      }
+    }
+  }
+
+  return {
+    refs: [...index.refs, ...newRefs],
+    relations: [...index.relations, ...newRelations],
   };
 }
 

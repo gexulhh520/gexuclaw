@@ -126,6 +126,21 @@ export type WorkContextCard = {
   currentStage?: string;
   nextAction?: string;
 
+  currentFocus?: {
+    refId: string;
+    kind: string;
+    title: string;
+  } | null;
+
+  recentRefs?: string[];
+
+  openIssues?: Array<{
+    refId?: string;
+    summary: string;
+    severity?: "low" | "medium" | "high";
+    status: "open" | "resolved";
+  }>;
+
   updatedAt: string;
 
   latestRun?: {
@@ -214,11 +229,29 @@ export type WorkContextDecisionCard = {
   workContextUid: string;
   title: string;
   summary?: string;
+
+  currentStage?: string;
+  progressSummary?: string;
+  currentFocus?: {
+    refId: string;
+    kind: string;
+    title: string;
+  } | null;
+  recentRefs?: string[];
+  openIssues?: Array<{
+    refId?: string;
+    summary: string;
+    severity?: "low" | "medium" | "high";
+    status: "open" | "resolved";
+  }>;
+
   signals: {
     selectedInUI: boolean;
     recentlyActive: boolean;
     hasFailedRun: boolean;
+    hasOpenIssue: boolean;
     hasRecentArtifact: boolean;
+    hasUnverifiedSideEffect?: boolean;
   };
 };
 

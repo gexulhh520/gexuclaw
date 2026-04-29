@@ -57,11 +57,18 @@ export class MainAgent {
         workContextUid: wc.workContextUid,
         title: wc.title,
         summary: wc.summary || wc.goal || "",
+        currentStage: wc.currentStage,
+        progressSummary: wc.progressSummary,
+        currentFocus: wc.currentFocus ?? null,
+        recentRefs: wc.recentRefs ?? wc.topRefs?.map((r) => r.refId) ?? [],
+        openIssues: wc.openIssues ?? [],
         signals: {
           selectedInUI: wc.signals.selectedInUI,
           recentlyActive: wc.signals.recentlyActive,
           hasFailedRun: wc.signals.hasFailedRun,
+          hasOpenIssue: wc.signals.hasOpenIssue,
           hasRecentArtifact: wc.signals.hasRecentArtifact,
+          hasUnverifiedSideEffect: wc.signals.hasUnverifiedSideEffect,
         },
       })),
       refs: input.contextIndex.refs,
@@ -96,10 +103,7 @@ export class MainAgent {
 {
   "decisionType": "delegate | multi_step_plan | answer_directly | ask_user | create_work_context | use_existing_work_context | switch_work_context | explain_trace | verify_execution | recover_execution",
   "targetWorkContextUid": "来自输入 workContexts[].workContextUid 的已有 ID，或 null",
-  "createWorkContext": {
-    "title": "新任务标题",
-    "goal": "新任务目标描述"
-  },
+  "createWorkContext": null,
   "primaryRefs": ["refId1", "refId2"],
   "secondaryRefs": ["refId3"],
   "targetAgentUid": "来自 availableAgents[].agentUid",
@@ -122,6 +126,19 @@ export class MainAgent {
   },
   "confidence": "high | medium | low",
   "reasoning": "简短内部理由，不超过300字"
+}
+
+createWorkContext 为 null 的示例（使用已有 WorkContext）：
+{
+  "createWorkContext": null
+}
+
+createWorkContext 有值的示例（新建 WorkContext）：
+{
+  "createWorkContext": {
+    "title": "查看项目登录逻辑",
+    "goal": "搜索并解释项目登录入口、认证流程、token 生成和鉴权中间件"
+  }
 }
 
 字段说明：

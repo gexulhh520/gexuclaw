@@ -29,7 +29,7 @@ import { PluginRegistry } from "../modules/plugins/plugin-registry.js";
 import { buildPluginCatalogInjection } from "../modules/plugins/plugin-catalog.js";
 import { registerPluginReadItemTool } from "../modules/plugins/plugin-tools.js";
 import { renderTaskEnvelopeForAgent } from "../modules/orchestration/task-envelope-renderer.js";
-import type { TaskEnvelope } from "./task-envelope.js";
+import type { TaskEnvelope } from "../modules/orchestration/task-envelope.types.js";
 
 // 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
 type RunAgentInputExtended = {
@@ -157,11 +157,6 @@ export class AgentRuntime {
         ? renderTaskEnvelopeForAgent(input.taskEnvelope)
         : input.originalUserMessage || input.userMessage;
 
-    // 渲染 taskEnvelopePrompt
-    const taskEnvelopePrompt = input.taskEnvelope
-      ? renderTaskEnvelopeForAgent(input.taskEnvelope)
-      : undefined;
-
     console.log(`[AgentRuntime] Creating run with sessionId: ${input.sessionId}, workContextId: ${input.workContextId}, parentRunId: ${input.parentRunId}`);
     const [run] = await db
       .insert(agentRuns)
@@ -223,7 +218,7 @@ export class AgentRuntime {
       // 发布 Run 完成事件
       runEventBus.emitRunStatus(runUid, {
         runId: runUid,
-        status: "success",
+        status: finalStatus,
         resultSummary: result.summary,
         updatedAt: finishedAt,
       });
@@ -240,7 +235,7 @@ export class AgentRuntime {
 
       return {
         runUid: run.runUid,
-        status: "success",
+        status: finalStatus,
         summary: result.summary,
         stepsCount: result.stepsCount,
       };
@@ -361,10 +356,6 @@ export class AgentRuntime {
         ? renderTaskEnvelopeForAgent(args.input.taskEnvelope)
         : args.input.originalUserMessage || args.input.userMessage;
 
-    const taskEnvelopePrompt = args.input.taskEnvelope
-      ? renderTaskEnvelopeForAgent(args.input.taskEnvelope)
-      : undefined;
-
     const promptContext = buildPromptContext({
       systemPrompt: args.input.versionRecord.systemPrompt,
       skillText: args.input.versionRecord.skillText,
@@ -385,7 +376,7 @@ export class AgentRuntime {
       ? buildPluginCatalogInjection(attachedPlugins)
       : "";
 
-    const systemMessage = this.renderSystemMessage(promptContext, artifactDirectiveConfig, pluginCatalogInjection, taskEnvelopePrompt);
+    const systemMessage = this.renderSystemMessage(promptContext, artifactDirectiveConfig, pluginCatalogInjection);
 
     // 打印插件目录注入日志（用于验证）
     if (pluginCatalogInjection) {
@@ -658,13 +649,11 @@ export class AgentRuntime {
     context: ReturnType<typeof buildPromptContext>,
     artifactDirectiveConfig: ArtifactDirectiveConfig,
     pluginCatalogInjection?: string,
-    taskEnvelopePrompt?: string,
   ): string {
     const sections = [
       context.systemPrompt,
       context.skillText ? `\nSkill:\n${context.skillText}` : "",
       context.handoffNote ? `\nHandoff note:\n${context.handoffNote}` : "",
-      taskEnvelopePrompt ? `\nTask Envelope:\n${taskEnvelopePrompt}` : "",
     ];
 
     // 注入插件目录摘要

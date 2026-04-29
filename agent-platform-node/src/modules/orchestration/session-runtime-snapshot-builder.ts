@@ -77,6 +77,14 @@ export class SessionRuntimeSnapshotBuilder {
       const updatedTime = new Date(ctx.updatedAt).getTime();
       const projection = metadata.projection as Record<string, unknown> | undefined;
 
+      const currentFocus = projection?.currentFocus as WorkContextCard["currentFocus"];
+      const recentRefs = Array.isArray(projection?.recentRefs)
+        ? (projection.recentRefs as string[])
+        : [];
+      const openIssues = Array.isArray(projection?.openIssues)
+        ? (projection.openIssues as WorkContextCard["openIssues"])
+        : [];
+
       return {
         workContextUid: ctx.workContextUid,
         title: ctx.title,
@@ -86,6 +94,9 @@ export class SessionRuntimeSnapshotBuilder {
         progressSummary: (projection?.progressSummary as string | undefined) ?? (metadata.progressSummary as string | undefined),
         currentStage: (projection?.currentStage as string | undefined) ?? (metadata.currentStage as string | undefined),
         nextAction: metadata.nextAction as string | undefined,
+        currentFocus,
+        recentRefs,
+        openIssues,
         updatedAt: ctx.updatedAt,
         signals: {
           selectedInUI: ctx.workContextUid === selectedWorkContextUid,
@@ -114,7 +125,7 @@ export class SessionRuntimeSnapshotBuilder {
     const artifacts = await db
       .select({
         artifactUid: agentArtifacts.artifactUid,
-        workContextId: agentArtifacts.workContextId,
+        workContextUid: workContexts.workContextUid,
         title: agentArtifacts.title,
         artifactType: agentArtifacts.artifactType,
         artifactRole: agentArtifacts.artifactRole,
@@ -122,13 +133,14 @@ export class SessionRuntimeSnapshotBuilder {
         createdAt: agentArtifacts.createdAt,
       })
       .from(agentArtifacts)
+      .leftJoin(workContexts, eq(agentArtifacts.workContextId, workContexts.id))
       .where(inArray(agentArtifacts.runId, runIds))
       .orderBy(desc(agentArtifacts.id))
       .limit(20);
 
     return artifacts.map((art) => ({
       artifactUid: art.artifactUid,
-      workContextUid: String(art.workContextId),
+      workContextUid: art.workContextUid ?? undefined,
       title: art.title,
       artifactType: art.artifactType,
       artifactRole: art.artifactRole ?? undefined,
