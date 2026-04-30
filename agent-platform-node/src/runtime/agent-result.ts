@@ -30,7 +30,7 @@ export type AgentResult = {
   }>;
 
   touchedResources: Array<{
-    type: "file" | "artifact" | "url" | "db_record" | "external_resource";
+    type: "file" | "artifact" | "url" | "db_record" | "external_resource" | "unknown";
     uri: string;
     operation: string;
     verified: boolean;

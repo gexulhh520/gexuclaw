@@ -462,6 +462,8 @@ async function executePlanAsync(
     title: string;
   }> = [];
 
+  const allAgentResults: Array<Record<string, unknown>> = [];
+
   for (const step of plan.steps) {
     try {
       console.log(`[executePlanAsync] Executing step: ${step.stepUid}, agent: ${step.targetAgentUid}`);
@@ -515,6 +517,10 @@ async function executePlanAsync(
             .limit(1)
             .then(([r]) => (r ? jsonParse<Record<string, unknown>>(r.outputJson, {}) : null))
         : null;
+
+      if (agentResult) {
+        allAgentResults.push(agentResult);
+      }
 
       stepResults.push({
         stepUid: step.stepUid,
@@ -573,6 +579,9 @@ async function executePlanAsync(
     title: artifact.title,
   }));
 
+  const touchedRefs = extractTouchedRefsFromAgentResults(allAgentResults);
+  const openIssues = extractOpenIssuesFromAgentResults(allAgentResults);
+
   if (finalWorkContextId) {
     await updateWorkContextProjection({
       workContextUid: finalWorkContextId,
@@ -580,6 +589,8 @@ async function executePlanAsync(
       status: finalStatus,
       summary: finalMessage,
       producedArtifactRefs,
+      touchedRefs,
+      openIssues,
     });
   }
 
@@ -1103,6 +1114,87 @@ function buildFinalResponse(results: Array<{ agentId: string; result: string }>,
     .join("\n\n");
 
   return `${summary || "多 Agent 协作完成"}\n\n**执行链路：**\n\n${executionChain}`;
+}
+
+function extractTouchedRefsFromAgentResults(
+  results: Array<Record<string, unknown>>
+): string[] {
+  return Array.from(
+    new Set(
+      results.flatMap((result) => {
+        const resources = Array.isArray(result.touchedResources)
+          ? result.touchedResources
+          : [];
+
+        return resources
+          .map((resource) => {
+            if (!resource || typeof resource !== "object") return null;
+
+            const item = resource as {
+              type?: string;
+              uri?: string;
+              operation?: string;
+              verified?: boolean;
+            };
+
+            if (!item.uri) return null;
+
+            if (item.type === "file") return `file:${item.uri}`;
+            if (item.type === "artifact") {
+              return item.uri.startsWith("artifact:")
+                ? item.uri
+                : `artifact:${item.uri}`;
+            }
+            if (item.type === "url") return `url:${item.uri}`;
+            if (item.type === "db_record") return `db:${item.uri}`;
+
+            return `resource:${item.uri}`;
+          })
+          .filter((ref): ref is string => Boolean(ref));
+      })
+    )
+  ).slice(0, 20);
+}
+
+function extractOpenIssuesFromAgentResults(
+  results: Array<Record<string, unknown>>
+): Array<{
+  refId?: string;
+  summary: string;
+  severity: "low" | "medium" | "high";
+}> {
+  const allIssues = results.flatMap((result) => {
+    const issues = Array.isArray(result.openIssues)
+      ? result.openIssues
+      : [];
+
+    return issues
+      .map((issue) => {
+        if (!issue || typeof issue !== "object") return null;
+
+        const item = issue as {
+          refId?: string;
+          type?: string;
+          message?: string;
+          summary?: string;
+          severity?: "low" | "medium" | "high";
+        };
+
+        const summary =
+          item.summary ||
+          item.message ||
+          (item.type ? `执行问题：${item.type}` : "执行过程中出现问题");
+
+        return {
+          refId: item.refId,
+          summary,
+          severity: item.severity ?? "medium",
+        };
+      })
+      .filter((issue): issue is NonNullable<typeof issue> => Boolean(issue));
+  });
+
+  return allIssues.slice(0, 10);
 }
 
 
