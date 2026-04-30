@@ -41,6 +41,7 @@ export class MainAgent {
     console.log(`[MainAgent] 决策完成: ${decision.decisionType}`);
     console.log(`[MainAgent] Confidence: ${decision.confidence}`);
     console.log(`[MainAgent] Reasoning: ${decision.reasoning.slice(0, 200)}...`);
+    console.log(`[MainAgent] 完整决策结果:\n${JSON.stringify(decision, null, 2)}`);
 
     return decision;
   }

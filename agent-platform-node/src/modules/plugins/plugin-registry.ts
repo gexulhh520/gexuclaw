@@ -106,8 +106,14 @@ export class PluginRegistry {
    * @returns 挂载的插件列表
    */
   getPluginsForAgent(agentId: number): AgentPlugin[] {
+    console.log(`[PluginRegistry] getPluginsForAgent called, agentId=${agentId}`);
+    console.log(`[PluginRegistry] 当前所有 bindings: ${JSON.stringify(Array.from(this.bindings.entries()))}`);
+    
     const bindings = this.bindings.get(agentId) ?? [];
+    console.log(`[PluginRegistry] agentId=${agentId} 的 bindings: ${JSON.stringify(bindings)}`);
+    
     const enabledBindings = bindings.filter((b) => b.enabled);
+    console.log(`[PluginRegistry] enabledBindings: ${JSON.stringify(enabledBindings)}`);
 
     // 按优先级排序
     enabledBindings.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
@@ -115,11 +121,13 @@ export class PluginRegistry {
     const plugins: AgentPlugin[] = [];
     for (const binding of enabledBindings) {
       const plugin = this.plugins.get(binding.pluginId);
+      console.log(`[PluginRegistry] 查找插件 ${binding.pluginId}: ${plugin ? "找到" : "未找到"}, status=${plugin?.status}`);
       if (plugin && plugin.status === "active") {
         plugins.push(plugin);
       }
     }
 
+    console.log(`[PluginRegistry] 返回插件数: ${plugins.length}`);
     return plugins;
   }
 

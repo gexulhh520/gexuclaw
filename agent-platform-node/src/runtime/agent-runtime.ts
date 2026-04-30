@@ -315,39 +315,40 @@ export class AgentRuntime {
     }
 
     // 获取挂载的插件（Agent 级别，所有版本共享）
+    console.log(`[AgentRuntime] ========== 插件挂载诊断 ==========`);
+    console.log(`[AgentRuntime] Agent: ${args.input.agentRecord.agentUid} (ID: ${args.input.agentRecord.id})`);
+    console.log(`[AgentRuntime] Agent Type: ${args.input.agentRecord.type}`);
+    console.log(`[AgentRuntime] pluginRegistry 是否存在: ${!!this.pluginRegistry}`);
+    
     const attachedPlugins = this.pluginRegistry?.getPluginsForAgent(
       args.input.agentRecord.id
     ) ?? [];
+    
+    console.log(`[AgentRuntime] 获取到挂载插件数: ${attachedPlugins.length}`);
+    attachedPlugins.forEach(p => {
+      console.log(`[AgentRuntime]   - 插件: ${p.pluginId}, 工具数: ${p.tools?.length ?? 0}`);
+    });
 
     // 合并插件工具，工具名称格式为: pluginId__toolId
     const pluginToolIds = attachedPlugins.flatMap((p) =>
       p.tools?.map((t) => `${p.pluginId}__${t.toolId}`) ?? []
     );
+    console.log(`[AgentRuntime] 插件工具ID列表: ${JSON.stringify(pluginToolIds)}`);
+    
     const baseAllowedTools = [...new Set([...allowedTools, ...pluginToolIds])];
+    console.log(`[AgentRuntime] AgentVersion.allowedTools: ${JSON.stringify(allowedTools)}`);
+    console.log(`[AgentRuntime] 合并后 baseAllowedTools: ${JSON.stringify(baseAllowedTools)}`);
 
-    // 与 TaskEnvelope.allowedTools 取交集
+    // 与 TaskEnvelope.allowedTools 取并集（如果 TaskEnvelope 有指定工具，则合并到 baseAllowedTools）
     const envelopeAllowedTools = args.input.taskEnvelope?.allowedTools;
-    const mergedAllowedTools = envelopeAllowedTools
-      ? baseAllowedTools.filter((tool) => envelopeAllowedTools.includes(tool))
+    console.log(`[AgentRuntime] TaskEnvelope.allowedTools: ${JSON.stringify(envelopeAllowedTools)}`);
+    
+    // 取并集：baseAllowedTools + envelopeAllowedTools（去重）
+    const mergedAllowedTools = envelopeAllowedTools && envelopeAllowedTools.length > 0
+      ? [...new Set([...baseAllowedTools, ...envelopeAllowedTools])]
       : baseAllowedTools;
-
-    // 工具组装日志已禁用，如需调试可取消注释
-    // if (attachedPlugins.length > 0 || pluginToolIds.length > 0) {
-    //   console.log(`[AgentRuntime] ========== TOOL ASSEMBLY ==========`);
-    //   console.log(`[AgentRuntime] Agent: ${args.input.agentRecord.agentUid} (ID: ${args.input.agentRecord.id})`);
-    //   console.log(`[AgentRuntime] AgentVersion: ${args.input.versionRecord.id}`);
-    //   console.log(`[AgentRuntime] 挂载插件数: ${attachedPlugins.length}`);
-    //   attachedPlugins.forEach(p => {
-    //     console.log(`[AgentRuntime]   - ${p.pluginId}: ${p.tools?.length ?? 0} 个工具`);
-    //     p.tools?.forEach(t => console.log(`[AgentRuntime]     * ${p.pluginId}__${t.toolId}`));
-    //   });
-    //   console.log(`[AgentRuntime] Version 允许工具: ${allowedTools.length} 个`);
-    //   allowedTools.forEach(t => console.log(`[AgentRuntime]   - ${t}`));
-    //   console.log(`[AgentRuntime] 插件工具: ${pluginToolIds.length} 个`);
-    //   pluginToolIds.forEach(t => console.log(`[AgentRuntime]   - ${t}`));
-    //   console.log(`[AgentRuntime] 合并后总工具: ${mergedAllowedTools.length} 个`);
-    //   console.log(`[AgentRuntime] ======================================`);
-    // }
+    console.log(`[AgentRuntime] 最终 mergedAllowedTools（并集）: ${JSON.stringify(mergedAllowedTools)}`);
+    console.log(`[AgentRuntime] ======================================`);
 
     const toolRuntime = new ToolRuntime(mergedAllowedTools, this.pluginRegistry);
 
@@ -396,6 +397,11 @@ export class AgentRuntime {
     } else {
       console.log("[AgentRuntime] No plugins attached to this AgentVersion");
     }
+
+    // 打印 toolManifest 内容用于调试
+    console.log("\n========== TOOL MANIFEST (传给 LLM 的 tools) ==========");
+    console.log(JSON.stringify(toolManifest, null, 2));
+    console.log(`========== 共 ${toolManifest.length} 个工具 ==========\n`);
 
     // 打印 systemMessage 内容用于调试
     console.log("\n========== SYSTEM MESSAGE ==========");

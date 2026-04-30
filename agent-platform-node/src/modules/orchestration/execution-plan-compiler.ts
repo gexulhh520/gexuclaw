@@ -18,7 +18,8 @@ export class ExecutionPlanCompiler {
     const planUid = makeUid("plan");
 
     // decisionType -> mode 映射
-    const mode = this.mapDecisionTypeToMode(decision.decisionType);
+    const hasSteps = !!decision.plan?.steps && decision.plan.steps.length > 0;
+    const mode = this.mapDecisionTypeToMode(decision.decisionType, hasSteps);
 
     // 收集所有 selected refs
     const selectedRefs = [
@@ -68,7 +69,8 @@ export class ExecutionPlanCompiler {
   }
 
   private mapDecisionTypeToMode(
-    decisionType: MainDecision["decisionType"]
+    decisionType: MainDecision["decisionType"],
+    hasSteps: boolean
   ): ExecutionPlan["mode"] {
     switch (decisionType) {
       case "answer_directly":
@@ -80,6 +82,9 @@ export class ExecutionPlanCompiler {
       case "recover_execution":
       case "verify_execution":
         return "sequential_agents";
+      case "create_work_context":
+        // create_work_context 可以只创建上下文，也可以创建后立即执行
+        return hasSteps ? "single_agent" : "direct_response";
       default:
         return "direct_response";
     }
@@ -90,18 +95,9 @@ export class ExecutionPlanCompiler {
     snapshot: SessionRuntimeSnapshot;
     contextIndex: SessionContextIndex;
   }): string[] {
-    // 从 availableAgents 中查找 agent 的 capabilities
-    const agent = input.snapshot.availableAgents.find(
-      (a) => a.agentUid === input.targetAgentUid
-    );
-
-    if (!agent || !agent.capabilities) {
-      return [];
-    }
-
-    // 这里 capabilities 被当作工具名列表
-    // 后续应该从 AgentVersion.allowedTools 获取
-    return agent.capabilities;
+    // 返回空数组表示不限制工具使用
+    // 实际工具权限由 AgentRuntime 根据 AgentVersion.allowedTools 和挂载插件决定
+    return [];
   }
 
   private determineResponseStrategy(
