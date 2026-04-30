@@ -30,6 +30,7 @@ import { buildPluginCatalogInjection } from "../modules/plugins/plugin-catalog.j
 import { registerPluginReadItemTool } from "../modules/plugins/plugin-tools.js";
 import { renderTaskEnvelopeForAgent } from "../modules/orchestration/task-envelope-renderer.js";
 import type { TaskEnvelope } from "../modules/orchestration/task-envelope.types.js";
+import { buildAgentResult } from "./agent-result-builder.js";
 
 // 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
 type RunAgentInputExtended = {
@@ -204,12 +205,20 @@ export class AgentRuntime {
           ? "partial_success"
           : "success";
 
+      // 构建标准 AgentResult
+      const agentResult = await buildAgentResult({
+        runId: run.id,
+        runUid,
+        summary: result.summary,
+        status: finalStatus,
+      });
+
       await db
         .update(agentRuns)
         .set({
-          status: finalStatus,
-          resultSummary: result.summary,
-          outputJson: jsonStringify(result),
+          status: agentResult.status,
+          resultSummary: agentResult.summary,
+          outputJson: jsonStringify(agentResult),
           finishedAt,
           updatedAt: finishedAt,
         })
@@ -234,6 +243,7 @@ export class AgentRuntime {
       }
 
       return {
+        runId: run.id,
         runUid: run.runUid,
         status: finalStatus,
         summary: result.summary,

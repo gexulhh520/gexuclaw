@@ -82,7 +82,76 @@ export class MainAgent {
     };
   }
 
+  private getMainDecisionJsonContract(): string {
+    return `MainDecision JSON 必须包含以下所有顶层字段：
+
+{
+  "decisionType": "answer_directly | create_work_context | use_existing_work_context | switch_work_context | delegate | multi_step_plan | ask_user | explain_trace | verify_execution | recover_execution",
+  "targetWorkContextUid": "string or null",
+  "createWorkContext": {
+    "title": "string",
+    "goal": "string"
+  } 或 null,
+  "primaryRefs": ["string"],
+  "secondaryRefs": ["string"],
+  "targetAgentUid": "string or null",
+  "plan": {
+    "steps": [
+      {
+        "targetAgentUid": "string",
+        "objective": "string",
+        "inputRefIds": ["string"],
+        "expectedResultKind": "answer | artifact | file_change | diagnosis | verification",
+        "requireVerification": true
+      }
+    ]
+  } 或 null,
+  "response": "string or null",
+  "ambiguity": {
+    "candidateWorkContextUids": ["string"],
+    "candidateRefIds": ["string"],
+    "question": "string"
+  } 或 null,
+  "confidence": "high | medium | low",
+  "reasoning": "string"
+}
+
+硬性规则：
+1. 所有顶层字段都必须存在。
+2. 缺失数组字段用 []。
+3. 缺失对象字段用 null。
+4. targetWorkContextUid 如果不为 null，必须来自输入 workContexts。
+5. createWorkContext 只有在需要新建 WorkContext 时填写，否则为 null。
+6. plan 只有执行型决策填写，否则为 null。
+7. response 只有 answer_directly 填写，否则为 null。
+8. ambiguity 只有 ask_user 填写，否则为 null。
+9. 不要创造额外字段。`;
+  }
+
+  private getAskUserFallbackExample(): string {
+    return `{
+  "decisionType": "ask_user",
+  "targetWorkContextUid": null,
+  "createWorkContext": null,
+  "primaryRefs": [],
+  "secondaryRefs": [],
+  "targetAgentUid": null,
+  "plan": null,
+  "response": null,
+  "ambiguity": {
+    "candidateWorkContextUids": [],
+    "candidateRefIds": [],
+    "question": "请确认你要继续处理哪一项。"
+  },
+  "confidence": "low",
+  "reasoning": "需要用户澄清。"
+}`;
+  }
+
   private buildMainDecisionSystemPrompt(): string {
+    const contract = this.getMainDecisionJsonContract();
+    const fallbackExample = this.getAskUserFallbackExample();
+
     return `你是主 Agent 的结构化决策器，不是执行器。
 
 你会收到：
@@ -98,35 +167,11 @@ export class MainAgent {
 不要输出解释性文字。
 不要编造不存在的 workContextUid、refId、agentUid。
 
-输出格式必须是以下 JSON Schema 的实例：
+${contract}
 
-{
-  "decisionType": "delegate | multi_step_plan | answer_directly | ask_user | create_work_context | use_existing_work_context | switch_work_context | explain_trace | verify_execution | recover_execution",
-  "targetWorkContextUid": "来自输入 workContexts[].workContextUid 的已有 ID，或 null",
-  "createWorkContext": null,
-  "primaryRefs": ["refId1", "refId2"],
-  "secondaryRefs": ["refId3"],
-  "targetAgentUid": "来自 availableAgents[].agentUid",
-  "plan": {
-    "steps": [
-      {
-        "targetAgentUid": "来自 availableAgents[].agentUid",
-        "objective": "步骤目标描述",
-        "inputRefIds": ["refId1"],
-        "expectedResultKind": "answer | artifact | file_change | diagnosis | verification",
-        "requireVerification": false
-      }
-    ]
-  },
-  "response": "当 decisionType=answer_directly 时的直接回复内容",
-  "ambiguity": {
-    "candidateWorkContextUids": [],
-    "candidateRefIds": [],
-    "question": "当 decisionType=ask_user 时的澄清问题"
-  },
-  "confidence": "high | medium | low",
-  "reasoning": "简短内部理由，不超过300字"
-}
+如果无法确定意图，输出这个 ask_user fallback 结构：
+
+${fallbackExample}
 
 createWorkContext 为 null 的示例（使用已有 WorkContext）：
 {
@@ -140,19 +185,6 @@ createWorkContext 有值的示例（新建 WorkContext）：
     "goal": "搜索并解释项目登录入口、认证流程、token 生成和鉴权中间件"
   }
 }
-
-字段说明：
-- decisionType: 决策类型
-- targetWorkContextUid: 目标 WorkContext 的 UID，必须为 null 如果要新建
-- createWorkContext: 当 targetWorkContextUid 为 null 且需要执行时必填，包含 title 和 goal
-- primaryRefs: 主要相关 refId 列表，必须来自输入 refs
-- secondaryRefs: 次要相关 refId 列表，必须来自输入 refs
-- targetAgentUid: 目标 Agent 的 UID，执行型决策必填
-- plan: 执行计划，delegate/multi_step_plan/recover_execution/verify_execution/create_work_context 必填
-- response: answer_directly 必填
-- ambiguity: ask_user 必填
-- confidence: 置信度
-- reasoning: 推理过程
 
 决策规则：
 1. 你必须从 ContextRefs 中选择 primaryRefs / secondaryRefs。
@@ -178,7 +210,7 @@ createWorkContext 有值的示例（新建 WorkContext）：
     - decisionType 可以是 create_work_context、delegate 或 multi_step_plan
     - 真实 workContextUid 由系统代码创建，不由你生成
 19. 任何形如 wc_xxx、work_context_xxx 的新 ID 都禁止由你生成。
-20. 如果需要执行任务但 targetWorkContextUid 为 null，必须填写 createWorkContext。 `;
+20. 如果需要执行任务但 targetWorkContextUid 为 null，必须填写 createWorkContext。`;
   }
 
   private async parseMainDecision(content: string): Promise<MainDecision> {
@@ -220,24 +252,37 @@ createWorkContext 有值的示例（新建 WorkContext）：
     badOutput: string,
     zodError: import("zod").ZodError
   ): Promise<MainDecision> {
-    const repairPrompt = `你的上一次输出不是合法 MainDecision JSON。
-请只修复 JSON，不要改变决策意图。
-不要输出 Markdown。
-不要输出解释。
+    const contract = this.getMainDecisionJsonContract();
+    const fallbackExample = this.getAskUserFallbackExample();
 
-错误信息如下：
+    const repairPrompt = `你是 MainDecision JSON 修复器。
+
+你的任务：
+只修复 JSON 格式和字段结构，不要重新做业务决策。
+不要输出 Markdown。
+不要输出代码块。
+不要输出解释。
+只能输出一个 JSON object。
+
+必须满足以下 MainDecision JSON 合约：
+
+${contract}
+
+如果无法确定原始意图，请输出这个 ask_user fallback 结构：
+
+${fallbackExample}
+
+Zod 校验错误：
 ${zodError.message}
 
 原始输出：
-${badOutput}
-
-必须符合 MainDecision schema。`;
+${badOutput}`;
 
     try {
       const repairResult = await this.modelClient.complete({
         systemPrompt: repairPrompt,
-        userMessage: "请修复上面的 JSON。",
-        temperature: 0.1,
+        userMessage: "请返回修复后的 MainDecision JSON。只输出 JSON object。",
+        temperature: 0,
       });
 
       const json = this.extractJsonObject(repairResult.content);
@@ -247,11 +292,11 @@ ${badOutput}
         console.log("[MainAgent] Repair 成功");
         return repaired.data;
       }
-    } catch {
-      // repair 失败，降级
-    }
 
-    console.warn("[MainAgent] Repair 失败，降级为 ask_user");
+      console.warn("[MainAgent] Repair 后仍不合法:", repaired.error.message);
+    } catch (error) {
+      console.warn("[MainAgent] Repair 调用失败:", error);
+    }
 
     return {
       decisionType: "ask_user",

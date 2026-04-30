@@ -105,10 +105,21 @@ export async function updateWorkContextProjection(input: {
   }));
   const mergedOpenIssues = [...incomingIssues, ...existingProjection.openIssues].slice(0, 10);
 
+  // 自动更新 currentFocus：如果有新产生的 artifact，聚焦到第一个 artifact
+  const firstArtifactRef = input.producedArtifactRefs?.[0];
+  const nextCurrentFocus = firstArtifactRef
+    ? {
+        refId: firstArtifactRef.refId,
+        kind: "artifact" as const,
+        title: firstArtifactRef.title,
+      }
+    : existingProjection.currentFocus ?? null;
+
   const updatedProjection: WorkContextProjection = {
     ...existingProjection,
     currentStage: mapRunStatusToStage(input.status),
     progressSummary: input.summary,
+    currentFocus: nextCurrentFocus,
     recentRefs: mergedRecentRefs,
     openIssues: mergedOpenIssues,
     lastRunUid: input.runUid,

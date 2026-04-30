@@ -1,9 +1,9 @@
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { agents, agentRuns, agentVersions, modelProfiles, sessions, workContexts } from "../../db/schema.js";
+import { agents, agentRuns, agentArtifacts, agentVersions, modelProfiles, sessions, workContexts } from "../../db/schema.js";
 import { notFound } from "../../shared/errors.js";
 import { makeUid } from "../../shared/ids.js";
-import { jsonStringify } from "../../shared/json.js";
+import { jsonParse, jsonStringify } from "../../shared/json.js";
 import { nowIso } from "../../shared/time.js";
 import { getCurrentAgentVersion } from "../agents/agent.service.js";
 import { AgentRuntime } from "../../runtime/agent-runtime.js";
@@ -457,6 +457,11 @@ async function executePlanAsync(
     summary: string;
   }> = [];
 
+  const allProducedArtifacts: Array<{
+    artifactUid: string;
+    title: string;
+  }> = [];
+
   for (const step of plan.steps) {
     try {
       console.log(`[executePlanAsync] Executing step: ${step.stepUid}, agent: ${step.targetAgentUid}`);
@@ -485,12 +490,38 @@ async function executePlanAsync(
 
       console.log(`[executePlanAsync] Step completed: ${run.runUid}, status: ${run.status}`);
 
+      // 查询子 run 产生的 artifacts
+      const producedArtifacts = run.runId
+        ? await db
+            .select({
+              artifactUid: agentArtifacts.artifactUid,
+              title: agentArtifacts.title,
+              artifactType: agentArtifacts.artifactType,
+              artifactRole: agentArtifacts.artifactRole,
+              contentText: agentArtifacts.contentText,
+            })
+            .from(agentArtifacts)
+            .where(eq(agentArtifacts.runId, run.runId))
+        : [];
+
+      console.log(`[executePlanAsync] Step produced ${producedArtifacts.length} artifacts`);
+
+      // 从 AgentResult 获取更丰富的信息
+      const agentResult = run.runId
+        ? await db
+            .select({ outputJson: agentRuns.outputJson })
+            .from(agentRuns)
+            .where(eq(agentRuns.id, run.runId))
+            .limit(1)
+            .then(([r]) => (r ? jsonParse<Record<string, unknown>>(r.outputJson, {}) : null))
+        : null;
+
       stepResults.push({
         stepUid: step.stepUid,
         agentUid: step.targetAgentUid,
         runUid: run.runUid,
         status: run.status,
-        summary: run.summary || "",
+        summary: (agentResult?.summary as string) || run.summary || "",
       });
 
       runningContextIndex = appendRunResultRefs(runningContextIndex, {
@@ -499,7 +530,21 @@ async function executePlanAsync(
         summary: run.summary,
         status: run.status,
         workContextUid: plan.workContextUid,
+        artifacts: producedArtifacts.map((artifact) => ({
+          artifactUid: artifact.artifactUid,
+          title: artifact.title,
+          artifactType: artifact.artifactType,
+          artifactRole: artifact.artifactRole,
+          summary: artifact.contentText?.slice(0, 300),
+        })),
       });
+
+      for (const artifact of producedArtifacts) {
+        allProducedArtifacts.push({
+          artifactUid: artifact.artifactUid,
+          title: artifact.title,
+        });
+      }
 
       if (plan.workContextUid) {
         finalWorkContextId = plan.workContextUid;
@@ -523,12 +568,18 @@ async function executePlanAsync(
       ? "partial_success"
       : "success";
 
+  const producedArtifactRefs = allProducedArtifacts.map((artifact) => ({
+    refId: `artifact:${artifact.artifactUid}`,
+    title: artifact.title,
+  }));
+
   if (finalWorkContextId) {
     await updateWorkContextProjection({
       workContextUid: finalWorkContextId,
       runUid: stepResults[stepResults.length - 1]?.runUid ?? mainRunId,
       status: finalStatus,
       summary: finalMessage,
+      producedArtifactRefs,
     });
   }
 
@@ -1054,11 +1105,4 @@ function buildFinalResponse(results: Array<{ agentId: string; result: string }>,
   return `${summary || "多 Agent 协作完成"}\n\n**执行链路：**\n\n${executionChain}`;
 }
 
-// 辅助函数：安全解析 JSON
-function jsonParse<T>(json: string, defaultValue: T): T {
-  try {
-    return JSON.parse(json) as T;
-  } catch {
-    return defaultValue;
-  }
-}
+
