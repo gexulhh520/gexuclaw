@@ -59,15 +59,21 @@ export class DecisionContractValidator {
     }
 
     // 5. decisionType 必填字段校验
-    const needsExecution = [
+    const requiresPlan = [
       "delegate",
       "multi_step_plan",
       "recover_execution",
       "verify_execution",
-      "create_work_context",
     ].includes(decision.decisionType);
 
-    if (needsExecution && (!decision.plan || decision.plan.steps.length === 0)) {
+    const mayCreateWorkContext =
+      decision.decisionType === "create_work_context" ||
+      decision.decisionType === "delegate" ||
+      decision.decisionType === "multi_step_plan" ||
+      decision.decisionType === "recover_execution" ||
+      decision.decisionType === "verify_execution";
+
+    if (requiresPlan && (!decision.plan || decision.plan.steps.length === 0)) {
       issues.push(`${decision.decisionType} 需要 plan.steps`);
     }
 
@@ -83,9 +89,9 @@ export class DecisionContractValidator {
       issues.push(`targetWorkContextUid ${decision.targetWorkContextUid} 不存在，LLM 可能编造了 WorkContextUid`);
     }
 
-    if (needsExecution && !decision.targetWorkContextUid) {
+    if (mayCreateWorkContext && !decision.targetWorkContextUid) {
       if (!decision.createWorkContext?.title || !decision.createWorkContext?.goal) {
-        issues.push("需要执行任务但没有 targetWorkContextUid，也没有 createWorkContext.title/goal");
+        issues.push("没有 targetWorkContextUid 时必须提供 createWorkContext.title/goal");
       }
     }
 

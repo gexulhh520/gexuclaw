@@ -372,6 +372,19 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       targetWorkContextUid: effectiveWorkContextUid,
     };
 
+    if (
+      effectiveDecision.decisionType === "create_work_context" &&
+      (!effectiveDecision.plan || effectiveDecision.plan.steps.length === 0)
+    ) {
+      await updateMainAgentRun(
+        mainRunId,
+        `已创建新的工作上下文「${effectiveDecision.createWorkContext?.title || "新任务"}」，但当前没有合适的执行 Agent。请先配置或选择具备相关能力的 Agent 后继续。`,
+        "success",
+        effectiveWorkContextUid ?? undefined
+      );
+      return;
+    }
+
     const plan = planCompiler.compile({
       decision: effectiveDecision,
       snapshot,

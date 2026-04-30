@@ -201,16 +201,18 @@ createWorkContext 有值的示例（新建 WorkContext）：
 12. answer_directly 必须填写 response。
 13. ask_user 必须填写 ambiguity.question。
 14. delegate、recover_execution、verify_execution、multi_step_plan 必须填写 plan.steps。
-15. reasoning 只写简短内部理由，不要超过 300 字。
-16. 你不能生成新的 workContextUid。
-17. targetWorkContextUid 只能来自输入 workContexts[].workContextUid。
-18. 如果这是新任务，或者输入 workContexts 中没有合适对象：
+15. create_work_context 允许 plan 为 null，表示只创建上下文、不立即执行。
+16. reasoning 只写简短内部理由，不要超过 300 字。
+17. 你不能生成新的 workContextUid。
+18. targetWorkContextUid 只能来自输入 workContexts[].workContextUid。
+19. 如果这是新任务，或者输入 workContexts 中没有合适对象：
     - targetWorkContextUid 必须为 null
     - createWorkContext 必须填写 title 和 goal
     - decisionType 可以是 create_work_context、delegate 或 multi_step_plan
     - 真实 workContextUid 由系统代码创建，不由你生成
-19. 任何形如 wc_xxx、work_context_xxx 的新 ID 都禁止由你生成。
-20. 如果需要执行任务但 targetWorkContextUid 为 null，必须填写 createWorkContext。`;
+20. 任何形如 wc_xxx、work_context_xxx 的新 ID 都禁止由你生成。
+21. 如果需要执行任务但 targetWorkContextUid 为 null，必须填写 createWorkContext。
+22. 如果用户任务需要执行，但 availableAgents 中没有任何 Agent 能完成该任务，可以输出 decisionType=create_work_context，targetWorkContextUid=null，createWorkContext 填写 title/goal，plan=null，并在 reasoning 中说明缺少合适执行器。`
   }
 
   private async parseMainDecision(content: string): Promise<MainDecision> {
