@@ -385,6 +385,13 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       return;
     }
 
+    // ask_user: 直接返回问题给用户
+    if (effectiveDecision.decisionType === "ask_user") {
+      const question = effectiveDecision.ambiguity?.question || "我需要确认一下你要继续处理哪一项。";
+      await updateMainAgentRun(mainRunId, question, "success", effectiveWorkContextUid ?? undefined);
+      return;
+    }
+
     const plan = planCompiler.compile({
       decision: effectiveDecision,
       snapshot,
@@ -490,6 +497,8 @@ async function executePlanAsync(
         parentRunUid: mainRunId,
         originalUserMessage,
       });
+
+      console.log(`[executePlanAsync] TaskEnvelope:\n${JSON.stringify(taskEnvelope, null, 2)}`);
 
       const run = await runtime.run({
         agentRecord: agent,
@@ -672,15 +681,21 @@ function appendRunResultRefs(
     },
   ];
 
-  const newRelations: import("./orchestration.types.js").ContextRelation[] = input.workContextUid
-    ? [
-        {
-          fromRefId: runRefId,
-          toRefId: `wc:${input.workContextUid}`,
-          relation: "belongs_to" as const,
-        },
-      ]
-    : [];
+  const newRelations: import("./orchestration.types.js").ContextRelation[] = [
+    {
+      fromRefId: runRefId,
+      toRefId: `agent:${input.agentUid}`,
+      relation: "executed_by" as const,
+    },
+  ];
+
+  if (input.workContextUid) {
+    newRelations.push({
+      fromRefId: runRefId,
+      toRefId: `wc:${input.workContextUid}`,
+      relation: "belongs_to" as const,
+    });
+  }
 
   if (input.artifacts) {
     for (const artifact of input.artifacts) {

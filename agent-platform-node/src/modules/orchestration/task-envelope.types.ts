@@ -12,6 +12,7 @@ export type LedgerSlice = {
   agentUid: string;
   agentName?: string;
   status: string;
+  summary?: string;
   steps: RuntimeStepTrace[];
 };
 

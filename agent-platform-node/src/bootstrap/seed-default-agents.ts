@@ -3,7 +3,7 @@ import { ensureDatabaseSchema } from "../db/migrate.js";
 import { createAgent, createAgentVersion, getAgentByUid } from "../modules/agents/agent.service.js";
 import { createModelProfile, getModelProfileByUid } from "../modules/model-profiles/model-profile.service.js";
 import { pluginRegistry } from "../modules/plugins/plugin-registry-instance.js";
-import { seedBuiltinPlugins, attachDefaultPluginsToAgents, attachDefaultPluginsToAllAgents } from "./seed-plugins.js";
+import { PluginManager } from "../modules/plugins/plugin-manager.js";
 
 await ensureDatabaseSchema();
 
@@ -70,8 +70,9 @@ async function main() {
     });
   }
 
-  // 初始化插件系统（使用全局 pluginRegistry）
-  await seedBuiltinPlugins(pluginRegistry);
+  // 初始化插件系统：通过 PluginManager 同步 builtin 插件并加载到注册表
+  const pluginManager = new PluginManager(pluginRegistry);
+  await pluginManager.bootstrap();
 
   if (!browserAgent.currentVersionId) {
     // 第一版 BrowserAgent 绑定 mock 模型和 mock browser 工具，
@@ -80,6 +81,9 @@ async function main() {
       modelProfileUid: "local_mock_default",
       systemPrompt: "You are a browser automation agent. Use browser tools only when they are exposed.",
       skillText: "Open pages, inspect mock page information, and return a concise summary.",
+      allowedPluginIds: [
+        "builtin-browser-core-docs",
+      ],
       allowedTools: [
         // 插件工具（格式: pluginId__toolId）
         "builtin-browser-core-docs__browser_open",
@@ -96,16 +100,7 @@ async function main() {
       outputSchema: {},
       maxSteps: 4,
     });
-
-    // 为 Agent 挂载插件（Agent 级别，所有版本共享）
-    await attachDefaultPluginsToAgents(pluginRegistry, [
-      { id: browserAgent.id, type: browserAgent.type, agentUid: browserAgent.agentUid },
-    ]);
   }
-
-  // 为数据库中所有 Agent 挂载默认插件
-  // 确保即使之前创建的 Agent 也能获得插件绑定
-  await attachDefaultPluginsToAllAgents(pluginRegistry);
 
   console.log("Agent Platform bootstrap completed.");
   console.log(`Plugin stats: ${JSON.stringify(pluginRegistry.getStats())}`);

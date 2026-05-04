@@ -44,6 +44,7 @@ export async function ensureDatabaseSchema(): Promise<void> {
       model_profile_id integer not null,
       system_prompt text not null,
       skill_text text not null default '',
+      allowed_plugin_ids_json text not null default '[]',
       allowed_tools_json text not null default '[]',
       context_policy_json text not null default '{}',
       model_params_override_json text not null default '{}',
@@ -184,6 +185,27 @@ export async function ensureDatabaseSchema(): Promise<void> {
       updated_at text not null
     );
 
+    create table if not exists plugins (
+      id serial primary key,
+      plugin_uid text not null unique,
+      plugin_id text not null unique,
+      name text not null,
+      description text not null default '',
+      plugin_type text not null,
+      provider_type text not null,
+      version text not null default '1',
+      source_ref text,
+      manifest_json text not null default '{}',
+      config_json text not null default '{}',
+      installed boolean not null default false,
+      enabled boolean not null default true,
+      status text not null default 'registered',
+      last_error text,
+      last_health_check_at text,
+      created_at text not null,
+      updated_at text not null
+    );
+
     comment on table agents is 'Agent 基础身份表';
     comment on column agents.agent_uid is '业务稳定 id，给 API、前端、日志和外部引用使用';
     comment on column agents.current_version_id is '当前默认运行版本 id';
@@ -244,6 +266,17 @@ export async function ensureDatabaseSchema(): Promise<void> {
     comment on column agent_artifacts.source_run_id is '明确记录产物来源 run';
     comment on column agent_artifacts.source_artifact_ids_json is '派生产物的血缘关系';
     comment on column agent_artifacts.metadata_json is '扩展字段（subtype、文件信息、页面信息等）';
+
+    comment on table plugins is '插件管理表';
+    comment on column plugins.plugin_uid is '业务稳定 id';
+    comment on column plugins.plugin_id is '插件唯一标识';
+    comment on column plugins.plugin_type is '插件类型：builtin | external';
+    comment on column plugins.provider_type is '提供者类型：builtin_code | manifest | mcp';
+    comment on column plugins.manifest_json is '插件定义快照（tools/resources/prompts 等）';
+    comment on column plugins.config_json is '插件运行配置';
+    comment on column plugins.installed is '是否已安装';
+    comment on column plugins.enabled is '是否已启用';
+    comment on column plugins.status is '状态：registered | active | disabled | error | unavailable';
   `);
 
   // 迁移：为已存在的 agent_artifacts 表添加新字段
@@ -253,5 +286,11 @@ export async function ensureDatabaseSchema(): Promise<void> {
     add column if not exists source_run_id integer,
     add column if not exists source_artifact_ids_json text not null default '[]',
     add column if not exists metadata_json text not null default '{}';
+  `);
+
+  // 迁移：为已存在的 agent_versions 表添加 allowed_plugin_ids_json 字段
+  await pool.query(`
+    alter table agent_versions
+    add column if not exists allowed_plugin_ids_json text not null default '[]';
   `);
 }

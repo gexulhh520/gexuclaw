@@ -46,6 +46,7 @@ type RunAgentInputExtended = {
     modelProfileId: number;
     systemPrompt: string;
     skillText: string;
+    allowedPluginIdsJson: string;
     allowedToolsJson: string;
     contextPolicyJson: string;
     modelParamsOverrideJson: string;
@@ -75,6 +76,7 @@ type RunAgentInput = {
     modelProfileId: number;
     systemPrompt: string;
     skillText: string;
+    allowedPluginIdsJson: string;
     allowedToolsJson: string;
     contextPolicyJson: string;
     modelParamsOverrideJson: string;
@@ -314,16 +316,22 @@ export class AgentRuntime {
       delete modelParamsOverride.temperature;
     }
 
-    // 获取挂载的插件（Agent 级别，所有版本共享）
+    // 从 AgentVersion.allowedPluginIdsJson 获取显式绑定的插件
     console.log(`[AgentRuntime] ========== 插件挂载诊断 ==========`);
     console.log(`[AgentRuntime] Agent: ${args.input.agentRecord.agentUid} (ID: ${args.input.agentRecord.id})`);
-    console.log(`[AgentRuntime] Agent Type: ${args.input.agentRecord.type}`);
     console.log(`[AgentRuntime] pluginRegistry 是否存在: ${!!this.pluginRegistry}`);
-    
-    const attachedPlugins = this.pluginRegistry?.getPluginsForAgent(
-      args.input.agentRecord.id
-    ) ?? [];
-    
+
+    const allowedPluginIds = jsonParse<string[]>(
+      args.input.versionRecord.allowedPluginIdsJson,
+      []
+    );
+    console.log(`[AgentRuntime] AgentVersion.allowedPluginIds: ${JSON.stringify(allowedPluginIds)}`);
+
+    const activePlugins = this.pluginRegistry?.getActivePlugins() ?? [];
+    const attachedPlugins = activePlugins.filter((p) =>
+      allowedPluginIds.includes(p.pluginId)
+    );
+
     console.log(`[AgentRuntime] 获取到挂载插件数: ${attachedPlugins.length}`);
     attachedPlugins.forEach(p => {
       console.log(`[AgentRuntime]   - 插件: ${p.pluginId}, 工具数: ${p.tools?.length ?? 0}`);
@@ -334,8 +342,8 @@ export class AgentRuntime {
       p.tools?.map((t) => `${p.pluginId}__${t.toolId}`) ?? []
     );
     console.log(`[AgentRuntime] 插件工具ID列表: ${JSON.stringify(pluginToolIds)}`);
-    
-    const baseAllowedTools = [...new Set([...allowedTools, ...pluginToolIds])];
+
+    const baseAllowedTools = [...new Set([...pluginToolIds, ...allowedTools])];
     console.log(`[AgentRuntime] AgentVersion.allowedTools: ${JSON.stringify(allowedTools)}`);
     console.log(`[AgentRuntime] 合并后 baseAllowedTools: ${JSON.stringify(baseAllowedTools)}`);
 
@@ -392,15 +400,15 @@ export class AgentRuntime {
     // 打印插件目录注入日志（用于验证）
     if (pluginCatalogInjection) {
       console.log("\n========== PLUGIN CATALOG INJECTION ==========");
-      console.log(pluginCatalogInjection);
-      console.log("========== END PLUGIN CATALOG ==========\n");
+      //console.log(pluginCatalogInjection);
+      //console.log("========== END PLUGIN CATALOG ==========\n");
     } else {
       console.log("[AgentRuntime] No plugins attached to this AgentVersion");
     }
 
     // 打印 toolManifest 内容用于调试
-    console.log("\n========== TOOL MANIFEST (传给 LLM 的 tools) ==========");
-    console.log(JSON.stringify(toolManifest, null, 2));
+    // console.log("\n========== TOOL MANIFEST (传给 LLM 的 tools) ==========");
+   // console.log(JSON.stringify(toolManifest, null, 2));
     console.log(`========== 共 ${toolManifest.length} 个工具 ==========\n`);
 
     // 打印 systemMessage 内容用于调试
@@ -410,7 +418,7 @@ export class AgentRuntime {
 
     // 打印用户消息用于调试
     console.log("\n========== USER MESSAGE ==========");
-    console.log(args.input.userMessage);
+    console.log(effectiveUserMessage);
     console.log("========== END USER MESSAGE ==========\n");
 
     const messages: ChatMessage[] = [
@@ -680,6 +688,9 @@ export class AgentRuntime {
     sections.push(
       "\nUse only the tools exposed in the tool manifest.",
       "\nReturn a concise final answer when done.",
+      "\n你必须严格按照 Objective 执行任务。",
+      // "\nOriginal User Message 仅作为背景参考，不可扩展任务范围。",
+      // "\n如果 Objective 与 Original User Message 冲突，必须以 Objective 为唯一执行目标。",
     );
 
     if (artifactDirectiveConfig.enabled) {

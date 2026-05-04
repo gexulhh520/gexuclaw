@@ -2,15 +2,16 @@ import type { AgentPlugin, AgentPluginBinding } from "./plugin.schema.js";
 
 /**
  * 插件注册表
- * 管理插件的注册、查询和 Agent 挂载关系
- * 
- * 绑定关系改为 Agent 级别，一个 Agent 的所有版本共享相同的插件
+ * 管理插件的注册、查询
+ *
+ * 注意：绑定关系已废弃，插件绑定权下放到 AgentVersion.allowedPluginIds
  */
 export class PluginRegistry {
   // 插件存储: pluginId -> AgentPlugin
   private plugins: Map<string, AgentPlugin> = new Map();
 
   // Agent 挂载关系: agentId -> PluginBinding[]
+  /** @deprecated 不再使用，保留兼容 */
   private bindings: Map<number, AgentPluginBinding[]> = new Map();
 
   /**
@@ -41,6 +42,22 @@ export class PluginRegistry {
   }
 
   /**
+   * 按 ID 列表批量获取插件
+   * @param pluginIds 插件 ID 列表
+   * @returns 插件列表
+   */
+  getPluginsByIds(pluginIds: string[]): AgentPlugin[] {
+    const result: AgentPlugin[] = [];
+    for (const id of pluginIds) {
+      const plugin = this.plugins.get(id);
+      if (plugin) {
+        result.push(plugin);
+      }
+    }
+    return result;
+  }
+
+  /**
    * 获取所有已注册插件
    * @returns 插件列表
    */
@@ -67,6 +84,7 @@ export class PluginRegistry {
 
   /**
    * 添加 Agent 与插件的挂载关系
+   * @deprecated 不再使用，插件绑定权已下放到 AgentVersion.allowedPluginIds
    * @param binding 挂载关系
    */
   addBinding(binding: AgentPluginBinding): void {
@@ -82,12 +100,13 @@ export class PluginRegistry {
     }
     this.bindings.set(binding.agentId, existing);
     console.log(
-      `[PluginRegistry] 挂载插件: ${binding.pluginId} -> Agent ${binding.agentId}`
+      `[PluginRegistry] 挂载插件: ${binding.pluginId} -> Agent ${binding.agentId} (deprecated)`
     );
   }
 
   /**
    * 移除 Agent 与插件的挂载关系
+   * @deprecated 不再使用
    * @param agentId Agent ID
    * @param pluginId 插件 ID
    */
@@ -96,22 +115,23 @@ export class PluginRegistry {
     const filtered = existing.filter((b) => b.pluginId !== pluginId);
     this.bindings.set(agentId, filtered);
     console.log(
-      `[PluginRegistry] 移除挂载: ${pluginId} -> Agent ${agentId}`
+      `[PluginRegistry] 移除挂载: ${pluginId} -> Agent ${agentId} (deprecated)`
     );
   }
 
   /**
    * 获取 Agent 挂载的所有插件
+   * @deprecated 不再使用，请通过 AgentVersion.allowedPluginIds + getActivePlugins() 获取
    * @param agentId Agent ID
    * @returns 挂载的插件列表
    */
   getPluginsForAgent(agentId: number): AgentPlugin[] {
-    console.log(`[PluginRegistry] getPluginsForAgent called, agentId=${agentId}`);
+    console.log(`[PluginRegistry] getPluginsForAgent called (deprecated), agentId=${agentId}`);
     console.log(`[PluginRegistry] 当前所有 bindings: ${JSON.stringify(Array.from(this.bindings.entries()))}`);
-    
+
     const bindings = this.bindings.get(agentId) ?? [];
     console.log(`[PluginRegistry] agentId=${agentId} 的 bindings: ${JSON.stringify(bindings)}`);
-    
+
     const enabledBindings = bindings.filter((b) => b.enabled);
     console.log(`[PluginRegistry] enabledBindings: ${JSON.stringify(enabledBindings)}`);
 
@@ -133,6 +153,7 @@ export class PluginRegistry {
 
   /**
    * 获取 Agent 的绑定列表
+   * @deprecated 不再使用
    * @param agentId Agent ID
    * @returns 绑定列表
    */
@@ -142,6 +163,7 @@ export class PluginRegistry {
 
   /**
    * 检查插件是否已挂载到 Agent
+   * @deprecated 不再使用
    * @param agentId Agent ID
    * @param pluginId 插件 ID
    * @returns 是否已挂载
@@ -153,6 +175,7 @@ export class PluginRegistry {
 
   /**
    * 获取指定 Agent 类型的默认插件列表
+   * @deprecated 不再使用，请通过 AgentVersion.allowedPluginIds 显式绑定
    * @param agentType Agent 类型 (builtin, chat, workflow)
    * @returns 默认应挂载的插件列表
    */

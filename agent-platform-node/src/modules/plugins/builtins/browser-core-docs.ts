@@ -12,6 +12,7 @@ export const builtinBrowserCoreDocs: AgentPlugin = {
   pluginType: "builtin",
   name: "浏览器基础能力文档",
   description: "提供浏览器工具的使用指南、最佳实践和参考模板",
+  providerType: "builtin_code",
 
   prompts: [
     {

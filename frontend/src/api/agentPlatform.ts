@@ -29,6 +29,7 @@ export type AgentVersionRecord = {
   modelProfileId: number
   systemPrompt: string
   skillText: string
+  allowedPluginIdsJson: string
   allowedToolsJson: string
   contextPolicyJson: string
   modelParamsOverrideJson: string
@@ -274,14 +275,81 @@ export type CreateAgentInput = {
   uiRoute?: string
 }
 
+export type PluginRecord = {
+  id: number
+  pluginUid: string
+  pluginId: string
+  name: string
+  description: string
+  pluginType: string
+  providerType: string
+  version: string
+  sourceRef: string | null
+  manifestJson: string
+  configJson: string
+  installed: boolean
+  enabled: boolean
+  status: string
+  lastError: string | null
+  lastHealthCheckAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type CreatePluginInput = {
+  pluginId: string
+  name: string
+  description?: string
+  pluginType?: string
+  providerType?: string
+  version?: string
+  sourceRef?: string
+  manifestJson?: Record<string, unknown>
+  configJson?: Record<string, unknown>
+}
+
+export type UpdatePluginInput = Partial<CreatePluginInput>
+
+export type PluginCatalogItem = {
+  pluginId: string
+  pluginName: string
+  description?: string
+  pluginType: string
+  providerType: string
+  status: string
+  enabled: boolean
+  toolCount: number
+  resourceCount: number
+  promptCount: number
+}
+
 export type CreateAgentVersionInput = {
   modelProfileUid: string
   systemPrompt: string
   skillText?: string
+  allowedPluginIds?: string[]
   allowedTools?: string[]
   contextPolicy?: Record<string, unknown>
   modelParamsOverride?: Record<string, unknown>
   outputSchema?: Record<string, unknown>
+  maxSteps?: number
+}
+
+export type UpdateAgentInput = {
+  name?: string
+  description?: string
+  capabilities?: string[]
+  standaloneEnabled?: boolean
+  subagentEnabled?: boolean
+  uiMode?: 'generic' | 'custom'
+  status?: 'active' | 'inactive' | 'archived'
+}
+
+export type UpdateAgentVersionInput = {
+  allowedPluginIds?: string[]
+  allowedTools?: string[]
+  systemPrompt?: string
+  skillText?: string
   maxSteps?: number
 }
 
@@ -313,6 +381,11 @@ export const agentPlatformApi = {
     return unwrap(data)
   },
 
+  async updateAgent(agentUid: string, input: UpdateAgentInput) {
+    const { data } = await httpClient.patch<ApiEnvelope<AgentRecord>>(`/agents/${agentUid}`, input)
+    return unwrap(data)
+  },
+
   async listModelProfiles() {
     const { data } = await httpClient.get<ApiEnvelope<ModelProfileRecord[]>>('/model-profiles')
     return unwrap(data)
@@ -331,6 +404,14 @@ export const agentPlatformApi = {
   async createAgentVersion(agentUid: string, input: CreateAgentVersionInput) {
     const { data } = await httpClient.post<ApiEnvelope<AgentVersionRecord>>(
       `/agents/${agentUid}/versions`,
+      input
+    )
+    return unwrap(data)
+  },
+
+  async updateAgentVersion(agentUid: string, versionId: number, input: UpdateAgentVersionInput) {
+    const { data } = await httpClient.patch<ApiEnvelope<AgentVersionRecord>>(
+      `/agents/${agentUid}/versions/${versionId}`,
       input
     )
     return unwrap(data)
@@ -578,6 +659,58 @@ export const agentPlatformApi = {
       latestArtifact: AgentArtifactRecord | null
       latestRun: AgentRunRecord | null
     }>>(`/work-contexts/${workContextUid}/workbench`)
+    return unwrap(data)
+  },
+
+  // Plugins API
+  async listPlugins() {
+    const { data } = await httpClient.get<ApiEnvelope<PluginRecord[]>>('/plugins')
+    return unwrap(data)
+  },
+
+  async getPluginsCatalog() {
+    const { data } = await httpClient.get<ApiEnvelope<Array<{
+      pluginId: string
+      pluginName: string
+      description?: string
+      pluginType: string
+      providerType: string
+      status: string
+      enabled: boolean
+      toolCount: number
+      resourceCount: number
+      promptCount: number
+    }>>>('/plugins/catalog')
+    return unwrap(data)
+  },
+
+  async getPlugin(pluginId: string) {
+    const { data } = await httpClient.get<ApiEnvelope<PluginRecord>>(`/plugins/${pluginId}`)
+    return unwrap(data)
+  },
+
+  async createPlugin(input: CreatePluginInput) {
+    const { data } = await httpClient.post<ApiEnvelope<PluginRecord>>('/plugins', input)
+    return unwrap(data)
+  },
+
+  async updatePlugin(pluginId: string, input: UpdatePluginInput) {
+    const { data } = await httpClient.patch<ApiEnvelope<PluginRecord>>(`/plugins/${pluginId}`, input)
+    return unwrap(data)
+  },
+
+  async enablePlugin(pluginId: string) {
+    const { data } = await httpClient.post<ApiEnvelope<{ success: boolean }>>(`/plugins/${pluginId}/enable`)
+    return unwrap(data)
+  },
+
+  async disablePlugin(pluginId: string) {
+    const { data } = await httpClient.post<ApiEnvelope<{ success: boolean }>>(`/plugins/${pluginId}/disable`)
+    return unwrap(data)
+  },
+
+  async reloadPlugin(pluginId: string) {
+    const { data } = await httpClient.post<ApiEnvelope<{ success: boolean }>>(`/plugins/${pluginId}/reload`)
     return unwrap(data)
   },
 }

@@ -22,18 +22,18 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
   lines.push(envelope.objective);
   lines.push("");
 
-  if (envelope.originalUserMessage && envelope.originalUserMessage !== envelope.objective) {
-    lines.push(`## Original User Message`);
-    lines.push(envelope.originalUserMessage);
-    lines.push("");
-  }
+  // if (envelope.originalUserMessage && envelope.originalUserMessage !== envelope.objective) {
+  //   lines.push(`## Original User Message`);
+  //   lines.push(envelope.originalUserMessage);
+  //   lines.push("");
+  // }
 
   if (envelope.selectedContext.refs.length > 0) {
     lines.push(`## Selected Context (${envelope.selectedContext.refs.length} refs)`);
     for (const ref of envelope.selectedContext.refs) {
       lines.push(`- ${ref.refId}: ${ref.title} (${ref.status || "unknown"})`);
       if (ref.summary) {
-        lines.push(`  ${ref.summary.slice(0, 200)}`);
+        lines.push(`  ${ref.summary}`);
       }
     }
     lines.push("");
@@ -43,6 +43,9 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
     lines.push(`## Ledger Slices`);
     for (const slice of envelope.selectedContext.ledgerSlices) {
       lines.push(`- ${slice.refId}: ${slice.status}`);
+      if (slice.summary) {
+        lines.push(`  ${slice.summary}`);
+      }
     }
     lines.push("");
   }
@@ -52,7 +55,7 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
     for (const art of envelope.selectedContext.artifacts) {
       lines.push(`- ${art.refId}: ${art.title} (${art.artifactRole || "reference"})`);
       if (art.summary) {
-        lines.push(`  ${art.summary.slice(0, 200)}`);
+        lines.push(`  ${art.summary}`);
       }
     }
     lines.push("");

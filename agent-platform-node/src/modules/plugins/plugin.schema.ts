@@ -4,9 +4,23 @@ import { z } from "zod";
 export const PluginTypeEnum = z.enum(["builtin", "external"]);
 export type PluginType = z.infer<typeof PluginTypeEnum>;
 
-// 插件状态
-export const PluginStatusEnum = z.enum(["active", "disabled"]);
+// 插件状态（扩展为完整生命周期）
+export const PluginStatusEnum = z.enum([
+  "registered",
+  "active",
+  "disabled",
+  "error",
+  "unavailable",
+]);
 export type PluginStatus = z.infer<typeof PluginStatusEnum>;
+
+// 插件提供者类型
+export const PluginProviderTypeEnum = z.enum([
+  "builtin_code",
+  "manifest",
+  "mcp",
+]);
+export type PluginProviderType = z.infer<typeof PluginProviderTypeEnum>;
 
 // 插件工具定义
 export const pluginToolDefinitionSchema = z.object({
@@ -70,6 +84,24 @@ export const pluginRuntimeRequirementsSchema = z.object({
 
 export type PluginRuntimeRequirements = z.infer<typeof pluginRuntimeRequirementsSchema>;
 
+// 插件 Manifest 结构（用于 manifest_json 字段）
+export const pluginManifestSchema = z.object({
+  tools: z.array(pluginToolDefinitionSchema).optional(),
+  resources: z.array(pluginResourceDefinitionSchema).optional(),
+  prompts: z.array(pluginPromptDefinitionSchema).optional(),
+  catalog: pluginCatalogSummarySchema.optional(),
+  skillText: z.string().optional(),
+  contextPolicyPatch: z.record(z.any()).optional(),
+  runtimeRequirements: pluginRuntimeRequirementsSchema.optional(),
+});
+
+export type PluginManifest = z.infer<typeof pluginManifestSchema>;
+
+// 插件 Config 结构（用于 config_json 字段）
+export const pluginConfigSchema = z.record(z.any());
+
+export type PluginConfig = z.infer<typeof pluginConfigSchema>;
+
 // 主插件对象
 export const agentPluginSchema = z.object({
   pluginId: z.string(),
@@ -90,10 +122,11 @@ export const agentPluginSchema = z.object({
   contextPolicyPatch: z.record(z.any()).optional(),
 
   // 运行时要求
-  providerType: z.enum(["playwright", "bb-browser", "opencli", "custom"]).optional(),
+  providerType: PluginProviderTypeEnum.optional(),
   runtimeRequirements: pluginRuntimeRequirementsSchema.optional(),
 
-  // 默认挂载目标
+  // 默认挂载目标（已废弃，保留兼容）
+  /** @deprecated 不再使用，插件绑定权已下放到 AgentVersion.allowedPluginIds */
   defaultAttachTargets: z.array(z.string()).optional(), // Agent 类型列表
 
   status: PluginStatusEnum,
@@ -103,7 +136,8 @@ export const agentPluginSchema = z.object({
 
 export type AgentPlugin = z.infer<typeof agentPluginSchema>;
 
-// AgentVersion 与插件的挂载关系（已废弃，改为 Agent 级别绑定）
+// AgentVersion 与插件的挂载关系（已废弃）
+/** @deprecated 不再使用，插件绑定权已下放到 AgentVersion.allowedPluginIds */
 export const agentVersionPluginBindingSchema = z.object({
   bindingId: z.string(),
   agentVersionId: z.number(),
@@ -115,9 +149,11 @@ export const agentVersionPluginBindingSchema = z.object({
   updatedAt: z.string(),
 });
 
+/** @deprecated 不再使用 */
 export type AgentVersionPluginBinding = z.infer<typeof agentVersionPluginBindingSchema>;
 
-// Agent 与插件的挂载关系（新版本）
+// Agent 与插件的挂载关系（已废弃）
+/** @deprecated 不再使用，插件绑定权已下放到 AgentVersion.allowedPluginIds */
 export const agentPluginBindingSchema = z.object({
   bindingId: z.string(),
   agentId: z.number(), // Agent ID（关联 agents 表）
@@ -129,6 +165,7 @@ export const agentPluginBindingSchema = z.object({
   updatedAt: z.string(),
 });
 
+/** @deprecated 不再使用 */
 export type AgentPluginBinding = z.infer<typeof agentPluginBindingSchema>;
 
 // plugin.read_item 输入

@@ -17,7 +17,7 @@ export const filesystemCorePlugin: AgentPlugin = {
   name: "文件系统核心",
   description:
     "提供基础的文件系统操作能力，包括读取、写入、编辑、搜索文件和目录列表。所有路径都是相对于工作空间的相对路径。",
-  providerType: "custom",
+  providerType: "builtin_code",
 
   // 插件提示词 - 指导 LLM 如何使用文件系统工具
   prompts: [

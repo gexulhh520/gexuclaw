@@ -194,6 +194,9 @@ export class SessionContextIndexBuilder {
       }
     }
 
+    console.log(`[ContextIndexBuilder] Refs数量: ${refs.length}, Relations数量: ${relations.length}`);
+    console.log(`[ContextIndexBuilder] Refs详情:\n${JSON.stringify(refs.map(r => ({ refId: r.refId, kind: r.kind, title: r.title, status: r.status,summary: r.summary })), null, 2)}`);
+
     return { refs, relations };
   }
 

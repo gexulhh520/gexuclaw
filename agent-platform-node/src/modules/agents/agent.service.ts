@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, ne } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { agents, agentVersions } from "../../db/schema.js";
 import { notFound } from "../../shared/errors.js";
@@ -6,7 +6,7 @@ import { makeUid } from "../../shared/ids.js";
 import { jsonStringify } from "../../shared/json.js";
 import { nowIso } from "../../shared/time.js";
 import { getModelProfileByUid } from "../model-profiles/model-profile.service.js";
-import type { CreateAgentInput, CreateAgentVersionInput } from "./agent.schema.js";
+import type { CreateAgentInput, CreateAgentVersionInput, UpdateAgentInput, UpdateAgentVersionInput } from "./agent.schema.js";
 
 export async function createAgent(input: CreateAgentInput) {
   const now = nowIso();
@@ -33,7 +33,7 @@ export async function createAgent(input: CreateAgentInput) {
 }
 
 export async function listAgents() {
-  return db.select().from(agents).orderBy(agents.id);
+  return db.select().from(agents).where(ne(agents.type, "orchestrator")).orderBy(agents.id);
 }
 
 export async function getAgentByUid(agentUid: string) {
@@ -62,6 +62,7 @@ export async function createAgentVersion(agentUid: string, input: CreateAgentVer
       modelProfileId: profile.id,
       systemPrompt: input.systemPrompt,
       skillText: input.skillText,
+      allowedPluginIdsJson: jsonStringify(input.allowedPluginIds),
       allowedToolsJson: jsonStringify(input.allowedTools),
       contextPolicyJson: jsonStringify(input.contextPolicy),
       modelParamsOverrideJson: jsonStringify(input.modelParamsOverride),
@@ -89,6 +90,28 @@ export async function listAgentVersions(agentUid: string) {
     .orderBy(desc(agentVersions.version));
 }
 
+export async function updateAgent(agentUid: string, input: UpdateAgentInput) {
+  const agent = await getAgentByUid(agentUid);
+  if (!agent) throw notFound("Agent not found", { agentUid });
+
+  const updateData: Record<string, unknown> = { updatedAt: nowIso() };
+  if (input.name !== undefined) updateData.name = input.name;
+  if (input.description !== undefined) updateData.description = input.description;
+  if (input.capabilities !== undefined) updateData.capabilitiesJson = jsonStringify(input.capabilities);
+  if (input.standaloneEnabled !== undefined) updateData.standaloneEnabled = input.standaloneEnabled;
+  if (input.subagentEnabled !== undefined) updateData.subagentEnabled = input.subagentEnabled;
+  if (input.uiMode !== undefined) updateData.uiMode = input.uiMode;
+  if (input.status !== undefined) updateData.status = input.status;
+
+  const [updated] = await db
+    .update(agents)
+    .set(updateData)
+    .where(eq(agents.id, agent.id))
+    .returning();
+
+  return updated;
+}
+
 export async function getCurrentAgentVersion(agentUid: string) {
   const agent = await getAgentByUid(agentUid);
   if (!agent) throw notFound("Agent not found", { agentUid });
@@ -104,6 +127,30 @@ export async function getCurrentAgentVersion(agentUid: string) {
  * 获取所有 Agent 的所有版本
  * 用于 Bootstrap 时为所有版本挂载插件
  */
+export async function updateAgentVersion(agentUid: string, versionId: number, input: UpdateAgentVersionInput) {
+  const agent = await getAgentByUid(agentUid);
+  if (!agent) throw notFound("Agent not found", { agentUid });
+
+  const [version] = await db.select().from(agentVersions).where(eq(agentVersions.id, versionId));
+  if (!version) throw notFound("Agent version not found", { agentUid, versionId });
+  if (version.agentId !== agent.id) throw notFound("Version does not belong to agent", { agentUid, versionId });
+
+  const updateData: Record<string, unknown> = { updatedAt: nowIso() };
+  if (input.allowedPluginIds !== undefined) updateData.allowedPluginIdsJson = jsonStringify(input.allowedPluginIds);
+  if (input.allowedTools !== undefined) updateData.allowedToolsJson = jsonStringify(input.allowedTools);
+  if (input.systemPrompt !== undefined) updateData.systemPrompt = input.systemPrompt;
+  if (input.skillText !== undefined) updateData.skillText = input.skillText;
+  if (input.maxSteps !== undefined) updateData.maxSteps = input.maxSteps;
+
+  const [updated] = await db
+    .update(agentVersions)
+    .set(updateData)
+    .where(eq(agentVersions.id, versionId))
+    .returning();
+
+  return updated;
+}
+
 export async function getAllAgentVersions(): Promise<Array<{ id: number; agentType: string; agentUid: string }>> {
   const result = await db
     .select({

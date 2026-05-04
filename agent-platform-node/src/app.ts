@@ -8,6 +8,7 @@ import { registerProjectRoutes } from "./modules/projects/project.routes.js";
 import { registerRunRoutes } from "./modules/runs/run.routes.js";
 import { registerSessionRoutes } from "./modules/sessions/session.routes.js";
 import { registerWorkContextRoutes } from "./modules/work-contexts/work-context.routes.js";
+import { registerPluginRoutes } from "./modules/plugins/plugin.routes.js";
 import { fail } from "./shared/api-response.js";
 import { AppError } from "./shared/errors.js";
 import { registerBuiltinTools } from "./tools/tool-registry.js";
@@ -30,6 +31,7 @@ export async function buildApp() {
   await registerSessionRoutes(app);
   await registerOrchestrationRoutes(app);
   await registerWorkContextRoutes(app);
+  await registerPluginRoutes(app);
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) {

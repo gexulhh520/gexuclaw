@@ -29,7 +29,7 @@ export class SessionRuntimeSnapshotBuilder {
       stepsPerRun: 20,
     });
     const globalRecentArtifacts = await this.getRecentArtifacts(sessionId);
-    const availableAgents = await this.getAvailableAgents();
+    const availableAgents = await this.getAvailableAgents(session);
 
     return {
       userMessage,
@@ -51,6 +51,7 @@ export class SessionRuntimeSnapshotBuilder {
       .select({
         title: sessions.title,
         description: sessions.description,
+        agentIdsJson: sessions.agentIdsJson,
       })
       .from(sessions)
       .where(eq(sessions.sessionUid, sessionId))
@@ -149,11 +150,19 @@ export class SessionRuntimeSnapshotBuilder {
     }));
   }
 
-  private async getAvailableAgents() {
+  private async getAvailableAgents(session: { agentIdsJson: string } | undefined) {
+    // 从 session 的 agent_ids_json 获取关联的 Agent UID 列表
+    const sessionAgentUids = session ? jsonParse<string[]>(session.agentIdsJson, []) : [];
+
+    if (sessionAgentUids.length === 0) {
+      return [];
+    }
+
+    // 根据 session 关联的 Agent UID 查询 Agent 详情
     const activeAgents = await db
       .select()
       .from(agents)
-      .where(eq(agents.status, "active"));
+      .where(inArray(agents.agentUid, sessionAgentUids));
 
     return activeAgents.map((agent) => {
       const capabilities = jsonParse<string[]>(agent.capabilitiesJson, []);

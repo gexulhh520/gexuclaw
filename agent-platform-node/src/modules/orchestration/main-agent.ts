@@ -56,10 +56,10 @@ export class MainAgent {
       selectedWorkContextUid: input.snapshot.selectedWorkContextUid ?? null,
       workContexts: input.snapshot.workContexts.map((wc) => ({
         workContextUid: wc.workContextUid,
-        title: wc.title,
-        summary: wc.summary || wc.goal || "",
+        title: this.truncateText(wc.title, 100),
+        summary: this.truncateText(wc.summary || wc.goal || "", 300),
         currentStage: wc.currentStage,
-        progressSummary: wc.progressSummary,
+        progressSummary: this.truncateText(wc.progressSummary, 300),
         currentFocus: wc.currentFocus ?? null,
         recentRefs: wc.recentRefs ?? wc.topRefs?.map((r) => r.refId) ?? [],
         openIssues: wc.openIssues ?? [],
@@ -72,15 +72,32 @@ export class MainAgent {
           hasUnverifiedSideEffect: wc.signals.hasUnverifiedSideEffect,
         },
       })),
-      refs: input.contextIndex.refs,
+      refs: this.truncateRefsForDecision(input.contextIndex.refs),
       relations: input.contextIndex.relations,
       availableAgents: input.snapshot.availableAgents.map((agent) => ({
         agentUid: agent.agentUid,
         name: agent.name,
-        description: agent.description,
+        description: this.truncateText(agent.description, 200),
         capabilities: agent.capabilities,
       })),
     };
+  }
+
+  private truncateRefsForDecision(refs: SessionContextIndex["refs"]): SessionContextIndex["refs"] {
+    const MAX_SUMMARY_LENGTH = 300;
+    const MAX_TITLE_LENGTH = 100;
+
+    return refs.map((ref) => ({
+      ...ref,
+      title: this.truncateText(ref.title, MAX_TITLE_LENGTH),
+      summary: this.truncateText(ref.summary, MAX_SUMMARY_LENGTH),
+    }));
+  }
+
+  private truncateText(text: string | undefined | null, maxLength: number): string {
+    if (!text) return "";
+    if (text.length <= maxLength) return text;
+    return text.slice(0, maxLength) + "...";
   }
 
   private getMainDecisionJsonContract(): string {
@@ -213,7 +230,18 @@ createWorkContext 有值的示例（新建 WorkContext）：
     - 真实 workContextUid 由系统代码创建，不由你生成
 20. 任何形如 wc_xxx、work_context_xxx 的新 ID 都禁止由你生成。
 21. 如果需要执行任务但 targetWorkContextUid 为 null，必须填写 createWorkContext。
-22. 如果用户任务需要执行，但 availableAgents 中没有任何 Agent 能完成该任务，可以输出 decisionType=create_work_context，targetWorkContextUid=null，createWorkContext 填写 title/goal，plan=null，并在 reasoning 中说明缺少合适执行器。`
+22. 如果用户任务需要执行，但 availableAgents 中没有任何 Agent 能完成该任务，可以输出 decisionType=create_work_context，targetWorkContextUid=null，createWorkContext 填写 title/goal，plan=null，并在 reasoning 中说明缺少合适执行器。
+23. **多步骤计划的关键规则**：
+    - 如果 plan 中有多个 steps，后续步骤依赖前面步骤的结果时：
+      - 前面步骤执行后会生成 run ref（格式：run:run_xxx）和可能的 artifact ref（格式：artifact:artifact_xxx）
+      - 后续步骤的 inputRefIds 应该引用这些执行结果，而不是引用 Agent 本身
+    - 示例：步骤1生成文案 → 步骤2保存文案
+      - 错误：步骤2 inputRefIds: ["agent:agent_xxx"]（引用Agent，无法获取内容）
+      - 正确：步骤2 inputRefIds: ["run:run_xxx"] 或 ["artifact:artifact_xxx"]（引用执行结果）
+    - **首次规划时的特殊处理**：
+      - 如果前面步骤还没有执行（没有 run/artifact 可用），可以引用目标 Agent 的 refId（格式：agent:agent_xxx）
+      - 系统会自动将该 Agent 最近执行的 run 和 artifact 作为上下文传递给后续步骤
+      - 这是一种 fallback 机制，优先使用 run/artifact refId，没有时才使用 agent refId`
   }
 
   private async parseMainDecision(content: string): Promise<MainDecision> {

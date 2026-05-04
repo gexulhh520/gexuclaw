@@ -26,6 +26,10 @@
           <span>+</span>
           <span>新建项目</span>
         </button>
+        <button class="secondary-action" @click="openAgentVersionDialog">
+          <span>⚙</span>
+          <span>配置 Agent</span>
+        </button>
       </div>
 
       <div class="sidebar-scroll soft-scrollbar">
@@ -893,8 +897,13 @@
               <div class="agent-avatar" :style="{ background: agent.avatar }">
                 {{ agent.short }}
               </div>
-              <div class="agent-choice-check" :class="{ active: pendingAgentIds.includes(agent.id) }">
-                ✓
+              <div class="agent-choice-actions">
+                <div class="agent-choice-check" :class="{ active: pendingAgentIds.includes(agent.id) }">
+                  ✓
+                </div>
+                <div class="agent-edit-btn" @click.stop="openEditAgentDialog(agent)">
+                  ✎
+                </div>
               </div>
             </div>
             <div class="agent-choice-name">{{ agent.name }}</div>
@@ -993,6 +1002,108 @@
         </div>
       </template>
     </el-dialog>
+
+    <!-- AgentVersion 配置对话框 -->
+    <AgentVersionDialog
+      v-model="agentVersionDialogVisible"
+      :existing-agents="existingAgentsForCheck"
+      :model-profiles="modelProfileRecords"
+      @created="handleAgentCreated"
+    />
+
+    <!-- 编辑 Agent 对话框 -->
+    <el-dialog v-model="editAgentDialogVisible" title="编辑 Agent" width="680px" destroy-on-close>
+      <div class="dialog-body">
+        <div class="form-section">
+          <div class="dialog-label">
+            Agent 名称
+            <span class="label-required">*</span>
+          </div>
+          <input v-model="editAgentName" class="dialog-input" placeholder="输入 Agent 名称" />
+        </div>
+
+        <div class="form-section">
+          <div class="dialog-label">Agent 描述</div>
+          <input
+            v-model="editAgentDescription"
+            class="dialog-input"
+            placeholder="简要描述该 Agent 的用途..."
+          />
+        </div>
+
+        <div class="form-section">
+          <div class="dialog-label">
+            能力标签
+            <span class="label-hint">（按回车添加）</span>
+          </div>
+          <div class="capability-input-wrapper">
+            <input
+              v-model="editCapabilityInput"
+              class="dialog-input"
+              placeholder="输入能力标签，例如：代码分析、文档生成..."
+              @keydown.enter.prevent="addEditCapability"
+            />
+            <button class="capability-add-btn" @click="addEditCapability">+</button>
+          </div>
+          <div v-if="editAgentCapabilities.length > 0" class="capability-tags">
+            <span
+              v-for="(cap, index) in editAgentCapabilities"
+              :key="index"
+              class="capability-tag"
+            >
+              {{ cap }}
+              <button class="capability-remove" @click="removeEditCapability(index)">×</button>
+            </span>
+          </div>
+        </div>
+
+        <!-- 插件选择 -->
+        <div class="form-section">
+          <div class="dialog-label">
+            允许使用的插件
+            <span class="label-hint">（多选）</span>
+          </div>
+          <div v-if="editPluginsLoading" class="plugins-loading">加载插件列表...</div>
+          <div v-else-if="editPlugins.length === 0" class="plugins-empty">暂无可用插件</div>
+          <div v-else class="plugin-choice-grid">
+            <button
+              v-for="plugin in editPlugins"
+              :key="plugin.pluginId"
+              class="plugin-choice-card"
+              :class="{ active: editAllowedPluginIds.includes(plugin.pluginId), disabled: !plugin.enabled }"
+              :disabled="!plugin.enabled"
+              @click="toggleEditPlugin(plugin.pluginId)"
+            >
+              <div class="plugin-choice-top">
+                <div class="plugin-icon">{{ getPluginIcon(plugin.pluginType) }}</div>
+                <div class="plugin-choice-check" :class="{ active: editAllowedPluginIds.includes(plugin.pluginId) }">
+                  ✓
+                </div>
+              </div>
+              <div class="plugin-choice-name">{{ plugin.pluginName }}</div>
+              <div class="plugin-choice-desc">{{ plugin.description || '暂无描述' }}</div>
+              <div class="plugin-choice-meta">
+                <span class="plugin-badge" :class="plugin.providerType">{{ plugin.providerType }}</span>
+                <span class="plugin-tools">{{ plugin.toolCount }} 工具</span>
+              </div>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <button class="ghost-button" @click="editAgentDialogVisible = false">取消</button>
+          <button
+            class="primary-action compact"
+            :disabled="isUpdatingAgent"
+            @click="handleUpdateAgent"
+          >
+            {{ isUpdatingAgent ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1001,7 +1112,8 @@ import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { useRoute } from "vue-router";
 
-import { agentPlatformApi, type AgentRecord, type ProjectRecord, type AgentRunRecord, type WorkContextRecord, type AgentArtifactRecord, type AgentRunStepRecord } from "@/api/agentPlatform";
+import { agentPlatformApi, type AgentRecord, type ProjectRecord, type AgentRunRecord, type WorkContextRecord, type AgentArtifactRecord, type AgentRunStepRecord, type ModelProfileRecord, type PluginCatalogItem } from "@/api/agentPlatform";
+import AgentVersionDialog from "@/components/agent-platform/AgentVersionDialog.vue";
 
 type AgentStatus = "online" | "busy" | "idle";
 type WorkspaceType = "writing" | "browser" | "research" | "video";
@@ -1014,6 +1126,7 @@ interface SidebarAgent {
   description: string;
   status: AgentStatus;
   workspaceType: WorkspaceType;
+  capabilities?: string[];
 }
 
 interface RunStep {
@@ -1155,6 +1268,24 @@ const pendingSessionTitle = ref("新的创作会话");
 const pendingSessionLocation = ref<"project" | "personal">("project");
 const pendingProjectTargetId = ref<string>(projectSpaces.value[0]?.id || "");
 const pendingProjectTitle = ref("");
+
+// AgentVersion 对话框状态
+const agentVersionDialogVisible = ref(false);
+const existingAgentsForCheck = ref<{ agentUid: string; name: string }[]>([]);
+const modelProfileRecords = ref<ModelProfileRecord[]>([]);
+
+// 编辑 Agent 对话框状态
+const editAgentDialogVisible = ref(false);
+const editingAgent = ref<SidebarAgent | null>(null);
+const editAgentName = ref("");
+const editAgentDescription = ref("");
+const editAgentCapabilities = ref<string[]>([]);
+const editCapabilityInput = ref("");
+const isUpdatingAgent = ref(false);
+const editPlugins = ref<PluginCatalogItem[]>([]);
+const editPluginsLoading = ref(false);
+const editAllowedPluginIds = ref<string[]>([]);
+const editingAgentVersionId = ref<number | null>(null);
 
 // 右侧工作台 Tab：围绕 WorkContext & Artifact 组织
 const workspaceTabs = ["上下文", "产物", "执行过程"];
@@ -1357,6 +1488,138 @@ function openNewSessionDialog() {
   pendingProjectTargetId.value = selectedProjectId.value || projectSpaces.value[0]?.id || "";
   pendingAgentIds.value = primaryAgent.value ? [primaryAgent.value.id] : ["writing_agent"];
   pendingSessionDescription.value = "";
+}
+
+async function openAgentVersionDialog() {
+  try {
+    // 加载 Agent 列表（用于名称重复校验）和模型配置列表
+    const [agents, profiles] = await Promise.all([
+      agentPlatformApi.listAgents(),
+      agentPlatformApi.listModelProfiles(),
+    ]);
+    existingAgentsForCheck.value = agents.map((a) => ({ agentUid: a.agentUid, name: a.name }));
+    modelProfileRecords.value = profiles;
+    agentVersionDialogVisible.value = true;
+  } catch (error) {
+    console.error("Failed to load data for AgentVersion dialog:", error);
+    ElMessage.error("加载数据失败");
+  }
+}
+
+async function handleAgentCreated(newAgent: { agentUid: string; name: string }) {
+  // 更新本地 Agent 列表
+  existingAgentsForCheck.value.push(newAgent);
+  ElMessage.success(`Agent "${newAgent.name}" 创建成功`);
+  // 可以在这里添加其他逻辑，比如刷新 Agent 列表等
+}
+
+async function openEditAgentDialog(agent: SidebarAgent) {
+  editingAgent.value = agent;
+  editAgentName.value = agent.name;
+  editAgentDescription.value = agent.description;
+  // 从 agentList 中找到原始 Agent 数据获取 capabilities
+  const originalAgent = agentList.value.find((a) => a.id === agent.id);
+  editAgentCapabilities.value = originalAgent?.capabilities || [];
+  editAllowedPluginIds.value = [];
+  editingAgentVersionId.value = null;
+  editAgentDialogVisible.value = true;
+  // 加载插件列表和当前版本的插件配置
+  await loadEditPlugins(agent.id);
+}
+
+function addEditCapability() {
+  const value = editCapabilityInput.value.trim();
+  if (!value) return;
+  if (editAgentCapabilities.value.includes(value)) {
+    ElMessage.warning("该能力标签已存在");
+    return;
+  }
+  editAgentCapabilities.value.push(value);
+  editCapabilityInput.value = "";
+}
+
+function removeEditCapability(index: number) {
+  editAgentCapabilities.value.splice(index, 1);
+}
+
+async function loadEditPlugins(agentUid: string) {
+  editPluginsLoading.value = true;
+  try {
+    const [catalog, versions] = await Promise.all([
+      agentPlatformApi.getPluginsCatalog(),
+      agentPlatformApi.listAgentVersions(agentUid),
+    ]);
+    editPlugins.value = catalog;
+    // 获取最新版本（当前版本）的插件配置
+    if (versions.length > 0) {
+      const latestVersion = versions[0];
+      editingAgentVersionId.value = latestVersion.id;
+      try {
+        const parsed = JSON.parse(latestVersion.allowedPluginIdsJson);
+        if (Array.isArray(parsed)) {
+          editAllowedPluginIds.value = parsed;
+        }
+      } catch {
+        editAllowedPluginIds.value = [];
+      }
+    }
+  } catch (error) {
+    console.error("Failed to load plugins for edit:", error);
+    ElMessage.error("加载插件列表失败");
+    editPlugins.value = [];
+  } finally {
+    editPluginsLoading.value = false;
+  }
+}
+
+function toggleEditPlugin(pluginId: string) {
+  const index = editAllowedPluginIds.value.indexOf(pluginId);
+  if (index > -1) {
+    editAllowedPluginIds.value = editAllowedPluginIds.value.filter((id) => id !== pluginId);
+  } else {
+    editAllowedPluginIds.value = [...editAllowedPluginIds.value, pluginId];
+  }
+}
+
+function getPluginIcon(pluginType: string): string {
+  const iconMap: Record<string, string> = {
+    builtin: "🔌",
+    external: "🧩",
+  };
+  return iconMap[pluginType] || "🔧";
+}
+
+async function handleUpdateAgent() {
+  if (!editingAgent.value) return;
+  const name = editAgentName.value.trim();
+  if (!name) {
+    ElMessage.warning("Agent 名称不能为空");
+    return;
+  }
+
+  isUpdatingAgent.value = true;
+  try {
+    await agentPlatformApi.updateAgent(editingAgent.value.id, {
+      name,
+      description: editAgentDescription.value.trim(),
+      capabilities: editAgentCapabilities.value,
+    });
+    // 如果有版本，同时更新版本的插件配置
+    if (editingAgentVersionId.value !== null) {
+      await agentPlatformApi.updateAgentVersion(editingAgent.value.id, editingAgentVersionId.value, {
+        allowedPluginIds: editAllowedPluginIds.value,
+      });
+    }
+    ElMessage.success("Agent 更新成功");
+    editAgentDialogVisible.value = false;
+    // 刷新 Agent 列表
+    await loadAgentProfiles();
+  } catch (error) {
+    console.error("Failed to update agent:", error);
+    ElMessage.error("更新 Agent 失败");
+  } finally {
+    isUpdatingAgent.value = false;
+  }
 }
 
 function togglePendingAgent(agentId: string) {
@@ -2308,8 +2571,20 @@ function formatRunTime(isoTime: string): string {
   return date.toLocaleDateString("zh-CN");
 }
 
+function parseCapabilities(capabilitiesJson: string | null): string[] {
+  if (!capabilitiesJson) return [];
+  try {
+    const parsed = JSON.parse(capabilitiesJson);
+    if (Array.isArray(parsed)) return parsed;
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
 function mapAgentRecord(agent: AgentRecord): SidebarAgent {
   const lowerUid = agent.agentUid.toLowerCase();
+  const capabilities = parseCapabilities(agent.capabilitiesJson);
 
   if (lowerUid.includes("browser")) {
     return {
@@ -2320,6 +2595,7 @@ function mapAgentRecord(agent: AgentRecord): SidebarAgent {
       description: agent.description || "负责网页访问、信息采集与自动操作。",
       status: "online",
       workspaceType: "browser",
+      capabilities,
     };
   }
 
@@ -2332,6 +2608,7 @@ function mapAgentRecord(agent: AgentRecord): SidebarAgent {
       description: agent.description || "负责资料阅读、检索总结与知识整合。",
       status: "idle",
       workspaceType: "research",
+      capabilities,
     };
   }
 
@@ -2344,6 +2621,7 @@ function mapAgentRecord(agent: AgentRecord): SidebarAgent {
       description: agent.description || "负责镜头剪辑、素材整理与节奏处理。",
       status: "idle",
       workspaceType: "video",
+      capabilities,
     };
   }
 
@@ -2355,6 +2633,7 @@ function mapAgentRecord(agent: AgentRecord): SidebarAgent {
     description: agent.description || "负责写作、改写、润色与结构优化。",
     status: "busy",
     workspaceType: "writing",
+    capabilities,
   };
 }
 
@@ -2378,12 +2657,12 @@ onMounted(async () => {
 <style scoped>
 .agent-os-page {
   display: grid;
-  --sidebar-column: 280px;
-  --sidebar-divider-column: 14px;
-  --conversation-column: minmax(0, 1fr);
-  --center-divider-column: 14px;
-  --workspace-column: minmax(420px, 0.96fr);
-  --workspace-offset: 448px;
+  --sidebar-column: 260px;
+  --sidebar-divider-column: 12px;
+  --conversation-column: minmax(520px, 1.2fr);
+  --center-divider-column: 12px;
+  --workspace-column: minmax(480px, 1fr);
+  --workspace-offset: 420px;
   grid-template-columns:
     var(--sidebar-column)
     var(--sidebar-divider-column)
@@ -2901,7 +3180,7 @@ onMounted(async () => {
 }
 
 .conversation-scroll {
-  min-height: 0;
+  min-height: 520px;
   overflow: auto;
   display: grid;
   align-content: start;
@@ -3254,8 +3533,8 @@ onMounted(async () => {
 }
 
 .composer-box textarea {
-  min-height: 92px;
-  max-height: 180px;
+  min-height: 120px;
+  max-height: 240px;
   resize: vertical;
   border: 0;
   outline: 0;
@@ -5215,5 +5494,259 @@ onMounted(async () => {
     inset: 8px;
     padding: 14px;
   }
+}
+
+/* 编辑 Agent 对话框样式 */
+.form-section {
+  display: grid;
+  gap: 8px;
+}
+
+.label-required {
+  color: #ef4444;
+  margin-left: 4px;
+}
+
+.label-hint {
+  color: #8b9ab0;
+  font-weight: 400;
+  font-size: 12px;
+  margin-left: 4px;
+}
+
+.capability-input-wrapper {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.capability-input-wrapper .dialog-input {
+  flex: 1;
+}
+
+.capability-add-btn {
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(91, 109, 255, 0.5);
+  border-radius: 12px;
+  background: linear-gradient(135deg, #5b6dff, #7c3aed);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.capability-add-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 16px rgba(91, 109, 255, 0.28);
+}
+
+.capability-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.capability-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(91, 109, 255, 0.1), rgba(124, 58, 237, 0.1));
+  border: 1px solid rgba(91, 109, 255, 0.2);
+  color: #4f46e5;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.capability-remove {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(91, 109, 255, 0.2);
+  color: #4f46e5;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.capability-remove:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+/* Agent 编辑按钮样式 */
+.agent-choice-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-edit-btn {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(255, 255, 255, 0.8);
+  color: #64748b;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.agent-edit-btn:hover {
+  border-color: rgba(91, 109, 255, 0.5);
+  background: rgba(91, 109, 255, 0.1);
+  color: #5b6dff;
+}
+
+/* 插件选择区域样式 */
+.plugins-loading,
+.plugins-empty {
+  padding: 20px;
+  text-align: center;
+  color: #8b9ab0;
+  font-size: 13px;
+  background: rgba(248, 250, 252, 0.6);
+  border-radius: 12px;
+  border: 1px dashed rgba(148, 163, 184, 0.2);
+}
+
+.plugin-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.plugin-choice-card {
+  position: relative;
+  padding: 14px;
+  text-align: left;
+  border: 1.5px solid rgba(148, 163, 184, 0.18);
+  border-radius: 14px;
+  background: #fff;
+  color: #10203b;
+  transition: all 0.2s ease;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plugin-choice-card:hover:not(.disabled) {
+  transform: translateY(-2px);
+  border-color: rgba(91, 109, 255, 0.4);
+  box-shadow: 0 8px 24px rgba(91, 109, 255, 0.1);
+}
+
+.plugin-choice-card.active {
+  border-color: #5b6dff;
+  background: linear-gradient(180deg, rgba(232, 239, 255, 0.6), rgba(243, 246, 255, 0.4));
+  box-shadow: 0 4px 16px rgba(91, 109, 255, 0.12);
+}
+
+.plugin-choice-card.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: #f1f5f9;
+}
+
+.plugin-choice-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.plugin-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.plugin-choice-check {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 2px solid rgba(148, 163, 184, 0.3);
+  color: transparent;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.plugin-choice-check.active {
+  border-color: transparent;
+  background: linear-gradient(135deg, #5b6dff, #7c3aed);
+  color: #fff;
+}
+
+.plugin-choice-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.3;
+}
+
+.plugin-choice-desc {
+  color: #64748b;
+  line-height: 1.4;
+  font-size: 11px;
+  min-height: 30px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.plugin-choice-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.plugin-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.plugin-badge.builtin {
+  background: rgba(34, 197, 94, 0.1);
+  color: #16a34a;
+}
+
+.plugin-badge.manifest {
+  background: rgba(91, 109, 255, 0.1);
+  color: #4f46e5;
+}
+
+.plugin-badge.mcp {
+  background: rgba(249, 115, 22, 0.1);
+  color: #ea580c;
+}
+
+.plugin-tools {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 500;
 }
 </style>

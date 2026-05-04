@@ -52,6 +52,8 @@ export const agentVersions = pgTable("agent_versions", {
   modelProfileId: integer("model_profile_id").notNull(),
   systemPrompt: text("system_prompt").notNull(),
   skillText: text("skill_text").notNull().default(""),
+  // allowed_plugin_ids_json：本版本启用的插件 ID 列表。
+  allowedPluginIdsJson: text("allowed_plugin_ids_json").notNull().default("[]"),
   // allowed_tools_json：本版本允许暴露给 LLM 的工具白名单。
   allowedToolsJson: text("allowed_tools_json").notNull().default("[]"),
   // context_policy_json：后续多 Agent / WorkContext 阶段的上下文读取策略入口。
@@ -193,6 +195,29 @@ export const workContexts = pgTable("work_contexts", {
   currentRunId: integer("current_run_id"),
   latestArtifactId: integer("latest_artifact_id"),
   metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+// plugins：插件管理表。
+// 记录所有插件的定义、配置和状态。
+export const plugins = pgTable("plugins", {
+  id: serial("id").primaryKey(),
+  pluginUid: text("plugin_uid").notNull().unique(),
+  pluginId: text("plugin_id").notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  pluginType: text("plugin_type").notNull(),
+  providerType: text("provider_type").notNull(),
+  version: text("version").notNull().default("1"),
+  sourceRef: text("source_ref"),
+  manifestJson: text("manifest_json").notNull().default("{}"),
+  configJson: text("config_json").notNull().default("{}"),
+  installed: boolean("installed").notNull().default(false),
+  enabled: boolean("enabled").notNull().default(true),
+  status: text("status").notNull().default("registered"),
+  lastError: text("last_error"),
+  lastHealthCheckAt: text("last_health_check_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
