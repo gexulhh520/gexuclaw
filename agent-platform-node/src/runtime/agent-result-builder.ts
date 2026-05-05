@@ -83,11 +83,34 @@ export async function buildAgentResult(input: {
     })
   );
 
-  // 5. 从 operations / sideEffects / outputRefs 生成 touchedResources
+  // 5. 从 operation / output.touchedResources / sideEffects / outputRefs 生成 touchedResources
   const touchedResources: AgentResult["touchedResources"] = [];
+
   for (const step of toolEndSteps) {
     const output = jsonParse<Record<string, unknown>>(step.outputJson, {});
     const metadata = jsonParse<Record<string, unknown>>(step.metadataJson, {});
+
+    const operationMeta = (metadata.operation || output.operation) as
+      | Record<string, unknown>
+      | undefined;
+
+    const verificationMeta = (metadata.verification || output.verification) as
+      | Record<string, unknown>
+      | undefined;
+
+    const operationTouchedResource = createTouchedResourceFromOperation({
+      operation: operationMeta,
+      verification: verificationMeta,
+    });
+
+    if (operationTouchedResource) {
+      touchedResources.push(operationTouchedResource);
+    }
+
+    const operationType =
+      typeof operationMeta?.type === "string" && operationMeta.type.trim()
+        ? operationMeta.type.trim()
+        : "unknown";
 
     // 从 output.touchedResources 提取
     const touched = output.touchedResources as
@@ -104,7 +127,7 @@ export async function buildAgentResult(input: {
           touchedResources.push({
             type: (t.type as AgentResult["touchedResources"][0]["type"]) ?? "unknown",
             uri: t.uri,
-            operation: t.operation ?? step.toolName ?? "unknown",
+            operation: t.operation ?? operationType,
             verified: t.verified ?? false,
           });
         }
@@ -126,7 +149,7 @@ export async function buildAgentResult(input: {
           touchedResources.push({
             type: (se.type as AgentResult["touchedResources"][0]["type"]) ?? "unknown",
             uri: se.uri,
-            operation: se.operation ?? step.toolName ?? "unknown",
+            operation: se.operation ?? operationType,
             verified: se.verified ?? false,
           });
         }
@@ -148,7 +171,7 @@ export async function buildAgentResult(input: {
           touchedResources.push({
             type: (ref.type as AgentResult["touchedResources"][0]["type"]) ?? "unknown",
             uri: ref.uri,
-            operation: ref.operation ?? step.toolName ?? "unknown",
+            operation: ref.operation ?? operationType,
             verified: ref.verified ?? false,
           });
         }
@@ -185,5 +208,46 @@ export async function buildAgentResult(input: {
     touchedResources,
     openIssues,
     retryAdvice,
+  };
+}
+
+function normalizeTouchedResourceType(
+  targetKind?: unknown
+): AgentResult["touchedResources"][0]["type"] {
+  if (targetKind === "file") return "file";
+  if (targetKind === "artifact") return "artifact";
+  if (targetKind === "url") return "url";
+  if (targetKind === "db_record") return "db_record";
+  if (targetKind === "external_resource") return "external_resource";
+  return "unknown";
+}
+
+function normalizeVerificationStatus(
+  verification?: Record<string, unknown>
+): boolean {
+  return verification?.status === "verified";
+}
+
+function createTouchedResourceFromOperation(input: {
+  operation?: Record<string, unknown>;
+  verification?: Record<string, unknown>;
+}): AgentResult["touchedResources"][0] | null {
+  const { operation, verification } = input;
+
+  if (!operation) return null;
+
+  const target = typeof operation.target === "string" ? operation.target.trim() : "";
+  if (!target) return null;
+
+  const operationType =
+    typeof operation.type === "string" && operation.type.trim()
+      ? operation.type.trim()
+      : "unknown";
+
+  return {
+    type: normalizeTouchedResourceType(operation.targetKind),
+    uri: target,
+    operation: operationType,
+    verified: normalizeVerificationStatus(verification),
   };
 }
