@@ -87,14 +87,8 @@ export async function hydrateTaskEnvelopeContext(refs: ContextRef[]): Promise<{
         refId: ref.refId,
         uri: ref.source?.uri || "",
         path: ref.source?.uri || "",
-        lastKnownStatus:
-          ref.status === "write_failed"
-            ? "failed"
-            : ref.status === "ok"
-              ? "success"
-              : ref.status === "unverified"
-                ? "unverified"
-                : "unknown",
+        lastKnownOperation: inferFileOperation(ref.tags),
+        lastKnownStatus: inferFileStatus(ref.status),
         summary: ref.summary,
       });
     }
@@ -105,9 +99,7 @@ export async function hydrateTaskEnvelopeContext(refs: ContextRef[]): Promise<{
         kind: ref.kind,
         uri: ref.source?.uri || "",
         title: ref.title,
-        lastKnownOperation: ref.tags.find((t) =>
-          ["read", "write", "save", "fetch", "crawl", "scrape", "modify", "delete"].includes(t)
-        ),
+        lastKnownOperation: inferResourceOperation(ref.tags),
         lastKnownStatus:
           ref.status === "verified"
             ? "success"
@@ -131,4 +123,82 @@ function inferAgentUidFromRunRef(ref: ContextRef): string {
         !["success", "failed", "partial_success", "running"].includes(t)
     ) || ""
   );
+}
+
+function inferFileStatus(
+  status?: string
+): FileSlice["lastKnownStatus"] {
+  if (status === "write_failed" || status === "failed") {
+    return "failed";
+  }
+
+  if (status === "ok" || status === "verified" || status === "success" || status === "ready") {
+    return "success";
+  }
+
+  if (status === "unverified") {
+    return "unverified";
+  }
+
+  return "unknown";
+}
+
+function inferFileOperation(
+  tags: string[]
+): FileSlice["lastKnownOperation"] | undefined {
+  const joined = tags.join(" ").toLowerCase();
+
+  if (joined.includes("append")) {
+    return "append";
+  }
+
+  if (
+    joined.includes("write") ||
+    joined.includes("wrote") ||
+    joined.includes("save") ||
+    joined.includes("create")
+  ) {
+    return "write";
+  }
+
+  if (
+    joined.includes("edit") ||
+    joined.includes("modify") ||
+    joined.includes("modified") ||
+    joined.includes("patch") ||
+    joined.includes("update")
+  ) {
+    return "edit";
+  }
+
+  if (joined.includes("read") || joined.includes("open")) {
+    return "read";
+  }
+
+  if (joined.includes("move") || joined.includes("rename")) {
+    return "move";
+  }
+
+  if (joined.includes("delete") || joined.includes("remove")) {
+    return "delete";
+  }
+
+  return undefined;
+}
+
+function inferResourceOperation(tags: string[]): string | undefined {
+  const joined = tags.join(" ").toLowerCase();
+
+  if (joined.includes("crawl")) return "crawl";
+  if (joined.includes("scrape")) return "scrape";
+  if (joined.includes("fetch")) return "fetch";
+  if (joined.includes("navigate")) return "navigate";
+  if (joined.includes("visit")) return "visit";
+  if (joined.includes("read")) return "read";
+  if (joined.includes("write") || joined.includes("wrote") || joined.includes("save")) return "write";
+  if (joined.includes("modify") || joined.includes("modified") || joined.includes("update")) return "modify";
+  if (joined.includes("delete") || joined.includes("deleted") || joined.includes("remove")) return "delete";
+  if (joined.includes("touched")) return "touched";
+
+  return undefined;
 }
