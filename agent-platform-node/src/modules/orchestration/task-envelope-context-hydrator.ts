@@ -3,16 +3,18 @@ import { db } from "../../db/client.js";
 import { agentRuns, agentRunSteps, agentArtifacts } from "../../db/schema.js";
 import { jsonParse } from "../../shared/json.js";
 import type { ContextRef } from "./orchestration.types.js";
-import type { LedgerSlice, ArtifactSlice, FileSlice } from "./task-envelope.types.js";
+import type { LedgerSlice, ArtifactSlice, FileSlice, ResourceSlice } from "./task-envelope.types.js";
 
 export async function hydrateTaskEnvelopeContext(refs: ContextRef[]): Promise<{
   ledgerSlices: LedgerSlice[];
   artifacts: ArtifactSlice[];
   files: FileSlice[];
+  resources: ResourceSlice[];
 }> {
   const ledgerSlices: LedgerSlice[] = [];
   const artifacts: ArtifactSlice[] = [];
   const files: FileSlice[] = [];
+  const resources: ResourceSlice[] = [];
 
   for (const ref of refs) {
     if (ref.kind === "run") {
@@ -33,11 +35,14 @@ export async function hydrateTaskEnvelopeContext(refs: ContextRef[]): Promise<{
         .where(eq(agentRunSteps.runId, run.id))
         .orderBy(agentRunSteps.stepIndex);
 
+      const agentUid = inferAgentUidFromRunRef(ref);
+
       ledgerSlices.push({
         refId: ref.refId,
         runUid,
-        agentUid: "",
+        agentUid,
         status: run.status || ref.status || "unknown",
+        summary: run.resultSummary ?? ref.summary ?? "",
         steps: steps.map((s) => ({
           stepIndex: s.stepIndex,
           stepType: s.stepType,
@@ -93,7 +98,37 @@ export async function hydrateTaskEnvelopeContext(refs: ContextRef[]): Promise<{
         summary: ref.summary,
       });
     }
+
+    if (ref.kind === "url" || ref.kind === "resource") {
+      resources.push({
+        refId: ref.refId,
+        kind: ref.kind,
+        uri: ref.source?.uri || "",
+        title: ref.title,
+        lastKnownOperation: ref.tags.find((t) =>
+          ["read", "write", "save", "fetch", "crawl", "scrape", "modify", "delete"].includes(t)
+        ),
+        lastKnownStatus:
+          ref.status === "verified"
+            ? "success"
+            : ref.status === "unverified"
+              ? "unverified"
+              : "unknown",
+        summary: ref.summary,
+      });
+    }
   }
 
-  return { ledgerSlices, artifacts, files };
+  return { ledgerSlices, artifacts, files, resources };
+}
+
+function inferAgentUidFromRunRef(ref: ContextRef): string {
+  return (
+    ref.tags.find(
+      (t) =>
+        t !== "run" &&
+        t !== ref.status &&
+        !["success", "failed", "partial_success", "running"].includes(t)
+    ) || ""
+  );
 }

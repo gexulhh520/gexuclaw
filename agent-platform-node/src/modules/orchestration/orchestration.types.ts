@@ -64,7 +64,14 @@ export type ContextRelation = {
     | "intended_for"
     | "produced"
     | "used_by"
-    | "derived_from";
+    | "derived_from"
+
+    // 新增：资源操作关系
+    | "touched"
+    | "read"
+    | "wrote"
+    | "modified"
+    | "deleted";
 };
 
 /* -------------------------------------------------------------------------- */

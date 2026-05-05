@@ -50,6 +50,7 @@ export class TaskEnvelopeBuilder {
         ledgerSlices: hydrated.ledgerSlices,
         artifacts: hydrated.artifacts,
         files: hydrated.files,
+        resources: hydrated.resources,
       },
       constraints,
       allowedTools: step.allowedTools,
@@ -98,31 +99,9 @@ export class TaskEnvelopeBuilder {
           addedRefIds.add(directRef.refId);
         }
 
-        // 如果是 agent 类型，自动关联该 agent 最近的 run 和 artifact
-        if (directRef.kind === "agent") {
-          const agentUid = directRef.source?.uid || refId.replace("agent:", "");
-          console.log(`[resolveRefs] directRef is agent, agentUid:`, agentUid);
-          const relatedRefs = this.findRelatedRefsForAgent(agentUid, contextIndex);
-          console.log(`[resolveRefs] findRelatedRefsForAgent returned:`, relatedRefs.length, `refs`);
-          for (const relatedRef of relatedRefs) {
-            if (!addedRefIds.has(relatedRef.refId)) {
-              resolvedRefs.push(relatedRef);
-              addedRefIds.add(relatedRef.refId);
-            }
-          }
-        }
-      } else {
-        // 2. 如果直接找不到，尝试作为 agentUid 查找关联的 run/artifact
-        const agentUid = refId.startsWith("agent:") ? refId.replace("agent:", "") : refId;
-        console.log(`[resolveRefs] directRef not found, try as agentUid:`, agentUid);
-        const relatedRefs = this.findRelatedRefsForAgent(agentUid, contextIndex);
-        console.log(`[resolveRefs] findRelatedRefsForAgent returned:`, relatedRefs.length, `refs`);
-        for (const relatedRef of relatedRefs) {
-          if (!addedRefIds.has(relatedRef.refId)) {
-            resolvedRefs.push(relatedRef);
-            addedRefIds.add(relatedRef.refId);
-          }
-        }
+        // 禁用 agent 自动扩散：agent 是执行者不是数据源
+        // plan 内数据传递已由 dependsOn -> producedRefsByStepUid 解决
+        // 继续通过 agent 找最近 run 可能拿到其他任务的历史 run，造成上下文串台
       }
     }
 

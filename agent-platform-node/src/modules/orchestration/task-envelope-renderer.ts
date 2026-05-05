@@ -47,6 +47,9 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
       if (slice.agentUid) lines.push(`  agent: ${slice.agentUid}`);
       if (slice.agentName) lines.push(`  agentName: ${slice.agentName}`);
       lines.push(`  status: ${slice.status}`);
+      if (slice.summary) {
+        lines.push(`  summary: ${slice.summary.slice(0, 500)}`);
+      }
 
       if (ledgerMode === "critical_steps" || ledgerMode === "full") {
         const steps = selectLedgerSteps(
@@ -99,6 +102,19 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
       lines.push(`  status: ${file.lastKnownStatus || "unknown"}`);
       if (file.lastKnownOperation) lines.push(`  lastOperation: ${file.lastKnownOperation}`);
       if (file.summary) lines.push(`  summary: ${file.summary.slice(0, 300)}`);
+    }
+    lines.push("");
+  }
+
+  if (envelope.selectedContext.resources?.length > 0) {
+    lines.push(`## Resources`);
+    for (const res of envelope.selectedContext.resources) {
+      lines.push(`- ${res.refId}`);
+      lines.push(`  kind: ${res.kind}`);
+      lines.push(`  uri: ${res.uri}`);
+      if (res.lastKnownStatus) lines.push(`  status: ${res.lastKnownStatus}`);
+      if (res.lastKnownOperation) lines.push(`  lastOperation: ${res.lastKnownOperation}`);
+      if (res.summary) lines.push(`  summary: ${res.summary.slice(0, 300)}`);
     }
     lines.push("");
   }

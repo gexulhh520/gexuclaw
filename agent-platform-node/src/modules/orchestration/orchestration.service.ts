@@ -831,9 +831,9 @@ function appendRunResultRefs(
           refId,
           kind,
           title: resource.uri.split("/").pop() || resource.uri,
-          summary: `${resource.operation || "touched"} ${resource.verified ? "verified" : "unverified"}`,
+          summary: `${resource.operation || "touched"}; verified=${resource.verified ? "true" : "false"}`,
           workContextUid: input.workContextUid,
-          status: resource.verified ? "ok" : "unverified",
+          status: resource.verified ? "verified" : "unverified",
           source: {
             uri: resource.uri,
           },
@@ -845,10 +845,12 @@ function appendRunResultRefs(
         });
       }
 
+      const relation = mapTouchedOperationToRelation(resource.operation);
+
       newRelations.push({
-        fromRefId: refId,
-        toRefId: runRefId,
-        relation: "used_by" as const,
+        fromRefId: runRefId,
+        toRefId: refId,
+        relation,
       });
 
       if (input.workContextUid) {
@@ -865,6 +867,30 @@ function appendRunResultRefs(
     refs: [...index.refs, ...newRefs],
     relations: [...index.relations, ...newRelations],
   };
+}
+
+function mapTouchedOperationToRelation(
+  operation?: string
+): import("./orchestration.types.js").ContextRelation["relation"] {
+  const op = (operation || "").toLowerCase();
+
+  if (["read", "fetch", "open", "visit", "navigate", "crawl", "scrape"].some((k) => op.includes(k))) {
+    return "read";
+  }
+
+  if (["write", "create", "save", "append"].some((k) => op.includes(k))) {
+    return "wrote";
+  }
+
+  if (["edit", "update", "modify", "patch"].some((k) => op.includes(k))) {
+    return "modified";
+  }
+
+  if (["delete", "remove"].some((k) => op.includes(k))) {
+    return "deleted";
+  }
+
+  return "touched";
 }
 
 // 旧流程（fallback）

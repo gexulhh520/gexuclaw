@@ -31,6 +31,7 @@ import { registerPluginReadItemTool } from "../modules/plugins/plugin-tools.js";
 import { renderTaskEnvelopeForAgent } from "../modules/orchestration/task-envelope-renderer.js";
 import type { TaskEnvelope } from "../modules/orchestration/task-envelope.types.js";
 import { buildAgentResult } from "./agent-result-builder.js";
+import { persistFallbackArtifactFromFinalSummary } from "../modules/artifacts/fallback-artifact.js";
 
 // 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
 type RunAgentInputExtended = {
@@ -206,6 +207,14 @@ export class AgentRuntime {
         : result.hasUnverifiedSideEffect
           ? "partial_success"
           : "success";
+
+      // 如果没有 artifact，用 final summary 生成 fallback artifact
+      await persistFallbackArtifactFromFinalSummary({
+        workContextUid: input.workContextId,
+        runId: run.id,
+        summary: result.summary,
+        agentName: input.agentRecord.name,
+      });
 
       // 构建标准 AgentResult
       const agentResult = await buildAgentResult({

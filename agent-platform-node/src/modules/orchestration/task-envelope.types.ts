@@ -36,6 +36,16 @@ export type FileSlice = {
   summary?: string;
 };
 
+export type ResourceSlice = {
+  refId: string;
+  kind: "url" | "resource";
+  uri: string;
+  title: string;
+  lastKnownOperation?: string;
+  lastKnownStatus?: "success" | "failed" | "unverified" | "unknown";
+  summary?: string;
+};
+
 export type LedgerRenderMode = "none" | "summary" | "critical_steps" | "full";
 
 export type TaskEnvelope = {
@@ -53,6 +63,7 @@ export type TaskEnvelope = {
     ledgerSlices: LedgerSlice[];
     artifacts: ArtifactSlice[];
     files: FileSlice[];
+    resources: ResourceSlice[];
   };
 
   constraints: string[];
