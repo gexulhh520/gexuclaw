@@ -16,7 +16,7 @@ export class TaskEnvelopeBuilder {
     parentRunUid: string;
     originalUserMessage: string;
   }): Promise<TaskEnvelope> {
-    const { step, plan, contextIndex, parentRunUid, originalUserMessage } = input;
+    const { step, plan, contextIndex, parentRunUid } = input;
 
     // 从 inputRefIds 展开 refs，并处理 agent 类型 ref 的自动关联
     console.log(`[TaskEnvelopeBuilder] step.inputRefIds:`, JSON.stringify(step.inputRefIds));
@@ -59,9 +59,7 @@ export class TaskEnvelopeBuilder {
         requireVerification: step.requireVerification,
       },
       outputContract: {
-        format: "agent_result",
-        mustIncludeOperations: true,
-        mustIncludeOpenIssues: true,
+        format: "final_answer",
       },
       contextRenderPolicy: {
         renderSelectedRefs: false,

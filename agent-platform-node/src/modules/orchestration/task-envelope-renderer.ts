@@ -162,8 +162,6 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
 
   lines.push(`## Output Contract`);
   lines.push(`format: ${envelope.outputContract.format}`);
-  lines.push(`mustIncludeOperations: ${envelope.outputContract.mustIncludeOperations ? "yes" : "no"}`);
-  lines.push(`mustIncludeOpenIssues: ${envelope.outputContract.mustIncludeOpenIssues ? "yes" : "no"}`);
 
   return lines.join("\n");
 }

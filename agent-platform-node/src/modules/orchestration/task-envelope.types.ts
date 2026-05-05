@@ -85,9 +85,7 @@ export type TaskEnvelope = {
   };
 
   outputContract: {
-    format: "agent_result";
-    mustIncludeOperations: boolean;
-    mustIncludeOpenIssues: boolean;
+    format: "final_answer";
   };
 
   contextRenderPolicy?: {
