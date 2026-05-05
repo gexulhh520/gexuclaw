@@ -15,7 +15,6 @@ import { ModelClient } from "./model-client.js";
 import { ToolRuntime } from "./tool-runtime.js";
 import {
   extractArtifactDirectives,
-  parseArtifactDirectiveConfig,
   type ArtifactDirectiveConfig,
 } from "../modules/artifacts/artifact-directives.js";
 import {
@@ -105,6 +104,22 @@ type RunStepInsert = {
   output?: unknown;
   metadata?: unknown;
 };
+
+function resolveArtifactDirectiveConfigFromTaskEnvelope(
+  taskEnvelope?: TaskEnvelope
+): ArtifactDirectiveConfig {
+  if (taskEnvelope?.expectedResult.kind === "artifact") {
+    return {
+      enabled: true,
+      mode: "full",
+    };
+  }
+
+  return {
+    enabled: false,
+    mode: "decision_only",
+  };
+}
 
 export class AgentRuntime {
   private readonly modelClient = new ModelClient();
@@ -302,8 +317,14 @@ export class AgentRuntime {
     input: RunAgentInput;
   }) {
     const allowedTools = jsonParse<string[]>(args.input.versionRecord.allowedToolsJson, []);
-    const contextPolicy = jsonParse<Record<string, unknown>>(args.input.versionRecord.contextPolicyJson, {});
-    const artifactDirectiveConfig = parseArtifactDirectiveConfig(contextPolicy);
+    const contextPolicy = jsonParse<Record<string, unknown>>(
+      args.input.versionRecord.contextPolicyJson,
+      {}
+    );
+
+    const artifactDirectiveConfig = resolveArtifactDirectiveConfigFromTaskEnvelope(
+      args.input.taskEnvelope
+    );
     const modelParamsOverride = jsonParse<Record<string, unknown>>(
       args.input.versionRecord.modelParamsOverrideJson,
       {},
@@ -396,7 +417,12 @@ export class AgentRuntime {
       ? buildPluginCatalogInjection(attachedPlugins)
       : "";
 
-    const systemMessage = this.renderSystemMessage(promptContext, artifactDirectiveConfig, pluginCatalogInjection);
+    const systemMessage = this.renderSystemMessage(
+      promptContext,
+      artifactDirectiveConfig,
+      pluginCatalogInjection,
+      args.input.taskEnvelope
+    );
 
     // 打印插件目录注入日志（用于验证）
     if (pluginCatalogInjection) {
@@ -674,6 +700,7 @@ export class AgentRuntime {
     context: ReturnType<typeof buildPromptContext>,
     artifactDirectiveConfig: ArtifactDirectiveConfig,
     pluginCatalogInjection?: string,
+    taskEnvelope?: TaskEnvelope,
   ): string {
     const sections = [
       context.systemPrompt,
@@ -696,20 +723,22 @@ export class AgentRuntime {
 
     if (artifactDirectiveConfig.enabled) {
       sections.push(
-        "\nArtifact directives are enabled for this agent version.",
-        "\nIf you want to preserve or discard tool-produced artifact candidates, you may add one machine-readable block anywhere in your reply using the exact tag <artifact_directives>...</artifact_directives>.",
-        '\nWithin that block, you may provide {"artifactDecisions":[{"candidateId":"toolcall:artifact:1","keep":true,"artifactRole":"reference","title":"Optional title override"}]}.',
+        "\nArtifact directives are enabled for this task.",
+        "\nUse exactly one machine-readable block with the tag <artifact_directives>...</artifact_directives>.",
+        "\nThe content inside <artifact_directives> must be strict JSON only. Do not use markdown code fences. Do not add comments.",
+        '\nFor declared artifacts, use {"declaredArtifacts":[{"artifactType":"structured_data","artifactRole":"output","title":"...", "contentJson":{}}]}.',
+        '\nFor tool-produced artifact candidates, use {"artifactDecisions":[{"candidateId":"toolcall:artifact:1","keep":true,"artifactRole":"reference","title":"Optional title override"}]}.'
       );
 
-      if (artifactDirectiveConfig.mode === "full") {
+      if (taskEnvelope?.expectedResult.kind === "artifact") {
         sections.push(
-          '\nFull mode is enabled, so you may also declare new artifacts with {"declaredArtifacts":[{"artifactType":"text","artifactRole":"final","title":"Final summary","contentText":"..."}]}.',
+          "\nThis task requires a business artifact.",
+          "\nYou must declare at least one artifact in declaredArtifacts.",
+          "\nDo not only describe the result in the final answer.",
+          "\nThe declared artifact must contain the business output needed by later steps.",
+          "\nKeep your normal final answer outside the <artifact_directives> block."
         );
       }
-
-      sections.push(
-        "\nOnly include the block when you have artifact decisions or declared artifacts. Keep your normal user-facing answer outside the block.",
-      );
     }
 
     return sections.join("\n");

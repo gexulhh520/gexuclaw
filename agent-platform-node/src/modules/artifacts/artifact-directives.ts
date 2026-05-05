@@ -86,17 +86,7 @@ function normalizeDeclaredArtifact(raw: unknown): AgentDeclaredArtifact | null {
   };
 }
 
-export function parseArtifactDirectiveConfig(contextPolicy: Record<string, unknown>): ArtifactDirectiveConfig {
-  const raw = isRecord(contextPolicy.artifactDirectives) ? contextPolicy.artifactDirectives : null;
-  const enabled = raw?.enabled === true;
-  const mode: ArtifactDirectiveMode =
-    raw?.mode === "full" || raw?.mode === "decision_only" ? raw.mode : "decision_only";
 
-  return {
-    enabled,
-    mode,
-  };
-}
 
 export function extractArtifactDirectives(content: string): ParsedArtifactDirectives {
   if (!content) {

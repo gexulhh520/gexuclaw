@@ -160,6 +160,13 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
   lines.push(`requireVerification: ${envelope.expectedResult.requireVerification ? "yes" : "no"}`);
   lines.push("");
 
+  if (envelope.expectedResult.kind === "artifact") {
+    lines.push(`## Artifact Requirement`);
+    lines.push(`required: yes`);
+    lines.push(`declareWith: <artifact_directives>`);
+    lines.push("");
+  }
+
   lines.push(`## Output Contract`);
   lines.push(`format: ${envelope.outputContract.format}`);
 

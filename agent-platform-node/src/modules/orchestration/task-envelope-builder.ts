@@ -71,8 +71,9 @@ export class TaskEnvelopeBuilder {
   }
 
   /**
-   * 解析 inputRefIds，处理特殊类型的 ref：
-   * - agent:xxx → 自动查找该 agent 最近的 run 和 artifact
+   * 解析 inputRefIds。
+   * 注意：agent 是执行者，不再作为数据源自动扩散最近 run/artifact。
+   * plan 内的数据传递依赖 dependsOn -> producedRefsByStepUid。
    */
   private resolveRefs(
     inputRefIds: string[],
@@ -82,118 +83,31 @@ export class TaskEnvelopeBuilder {
     const addedRefIds = new Set<string>();
 
     console.log(`[resolveRefs] contextIndex.refs total:`, contextIndex.refs.length);
-    console.log(`[resolveRefs] contextIndex.refs:`, JSON.stringify(contextIndex.refs.map((r) => ({ refId: r.refId, kind: r.kind, relations: r.tags }))));
+    console.log(
+      `[resolveRefs] contextIndex.refs:`,
+      JSON.stringify(
+        contextIndex.refs.map((r) => ({
+          refId: r.refId,
+          kind: r.kind,
+          relations: r.tags,
+        }))
+      )
+    );
 
     for (const refId of inputRefIds) {
       console.log(`[resolveRefs] processing refId:`, refId);
 
-      // 1. 先直接查找
       const directRef = contextIndex.refs.find((r) => r.refId === refId);
       console.log(`[resolveRefs] directRef found:`, !!directRef, `kind:`, directRef?.kind);
 
-      if (directRef) {
-        if (!addedRefIds.has(directRef.refId)) {
-          resolvedRefs.push(directRef);
-          addedRefIds.add(directRef.refId);
-        }
-
-        // 禁用 agent 自动扩散：agent 是执行者不是数据源
-        // plan 内数据传递已由 dependsOn -> producedRefsByStepUid 解决
-        // 继续通过 agent 找最近 run 可能拿到其他任务的历史 run，造成上下文串台
+      if (directRef && !addedRefIds.has(directRef.refId)) {
+        resolvedRefs.push(directRef);
+        addedRefIds.add(directRef.refId);
       }
     }
 
     console.log(`[resolveRefs] final resolvedRefs count:`, resolvedRefs.length);
     return resolvedRefs;
-  }
-
-  /**
-   * 查找与指定 agent 相关的 run 和 artifact refs
-   * 按时间倒序，优先返回最近的
-   */
-  private findRelatedRefsForAgent(
-    agentUid: string,
-    contextIndex: SessionContextIndex
-  ): SessionContextIndex["refs"] {
-    const relatedRefs: SessionContextIndex["refs"] = [];
-
-    console.log(`[findRelatedRefsForAgent] agentUid:`, agentUid);
-    console.log(`[findRelatedRefsForAgent] all refs:`, JSON.stringify(contextIndex.refs.map((r) => ({ refId: r.refId, kind: r.kind, tags: r.tags }))));
-    console.log(`[findRelatedRefsForAgent] all relations:`, JSON.stringify(contextIndex.relations));
-
-    // 通过 relations 查找该 agent 关联的 run refs（按 updatedAt 倒序）
-    const agentRefId = `agent:${agentUid}`;
-    const runRefIds = contextIndex.relations
-      .filter((rel) => rel.toRefId === agentRefId && rel.relation === "executed_by")
-      .map((rel) => rel.fromRefId);
-
-    console.log(`[findRelatedRefsForAgent] runRefIds from relations:`, JSON.stringify(runRefIds));
-
-    const runRefs = contextIndex.refs
-      .filter((r) => r.kind === "run" && runRefIds.includes(r.refId))
-      .sort((a, b) => {
-        const timeA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
-        const timeB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
-        return timeB - timeA;
-      });
-
-    console.log(`[findRelatedRefsForAgent] runRefs found:`, runRefs.length, `for agentUid:`, agentUid);
-    console.log(`[findRelatedRefsForAgent] runRefs:`, JSON.stringify(runRefs.map((r) => ({ refId: r.refId, tags: r.tags, source: r.source }))));
-
-    // 取最近的一个 run
-    if (runRefs.length > 0) {
-      relatedRefs.push(runRefs[0]);
-
-      // 查找与该 run 相关的 artifact refs
-      const runUid = runRefs[0].source?.runUid || runRefs[0].source?.uid;
-      console.log(`[findRelatedRefsForAgent] runUid:`, runUid);
-      if (runUid) {
-        const artifactRefs = contextIndex.refs.filter(
-          (r) =>
-            r.kind === "artifact" &&
-            (r.refId.includes(runUid) || this.isArtifactRelatedToRun(r, runUid, contextIndex))
-        );
-        console.log(`[findRelatedRefsForAgent] artifactRefs found:`, artifactRefs.length, `for runUid:`, runUid);
-        relatedRefs.push(...artifactRefs);
-      }
-    }
-
-    // 如果没有找到 run，直接查找该 agent 的 artifact refs
-    if (relatedRefs.length === 0) {
-      const artifactRefs = contextIndex.refs
-        .filter((r) => r.kind === "artifact" && r.tags.some((tag) => tag.includes(agentUid)))
-        .sort((a, b) => {
-          const timeA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
-          const timeB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
-          return timeB - timeA;
-        });
-
-      console.log(`[findRelatedRefsForAgent] fallback artifactRefs found:`, artifactRefs.length, `for agentUid:`, agentUid);
-
-      if (artifactRefs.length > 0) {
-        relatedRefs.push(artifactRefs[0]);
-      }
-    }
-
-    console.log(`[findRelatedRefsForAgent] final relatedRefs count:`, relatedRefs.length);
-    return relatedRefs;
-  }
-
-  /**
-   * 判断 artifact 是否与指定 run 相关
-   */
-  private isArtifactRelatedToRun(
-    artifactRef: SessionContextIndex["refs"][0],
-    runUid: string,
-    contextIndex: SessionContextIndex
-  ): boolean {
-    // 通过 relations 查找关联
-    return contextIndex.relations.some(
-      (rel) =>
-        rel.fromRefId === artifactRef.refId &&
-        rel.toRefId === `run:${runUid}` &&
-        rel.relation === "produced"
-    );
   }
 }
 
