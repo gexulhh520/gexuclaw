@@ -48,6 +48,13 @@ export type ResourceSlice = {
 
 export type LedgerRenderMode = "none" | "summary" | "critical_steps" | "full";
 
+export type RetryContext = {
+  retryAttempt: number;
+  previousRunUid: string;
+  validationIssues: string[];
+  instruction?: string;
+};
+
 export type TaskEnvelope = {
   envelopeUid: string;
 
@@ -57,6 +64,8 @@ export type TaskEnvelope = {
 
   objective: string;
   originalUserMessage?: string;
+
+  retryContext?: RetryContext;
 
   selectedContext: {
     refs: ContextRef[];

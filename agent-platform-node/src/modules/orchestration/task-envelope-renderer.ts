@@ -23,6 +23,28 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
   lines.push(envelope.objective);
   lines.push("");
 
+  if (envelope.retryContext) {
+    lines.push(`## Retry Context`);
+    lines.push(`retryAttempt: ${envelope.retryContext.retryAttempt}`);
+    lines.push(`previousRunUid: ${envelope.retryContext.previousRunUid}`);
+    lines.push("");
+
+    if (envelope.retryContext.validationIssues.length > 0) {
+      lines.push(`## Validation Issues`);
+      for (const issue of envelope.retryContext.validationIssues) {
+        lines.push(`- ${issue}`);
+      }
+      lines.push("");
+    }
+
+    lines.push(`## Retry Instruction`);
+    lines.push(
+      envelope.retryContext.instruction ||
+        "只修复当前 Objective，不要扩展任务范围，不要执行其他步骤。本次必须补齐上一次缺失的结果。"
+    );
+    lines.push("");
+  }
+
   const renderSelectedRefs =
     envelope.contextRenderPolicy?.renderSelectedRefs === true;
 

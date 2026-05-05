@@ -21,6 +21,14 @@ import { TaskEnvelopeBuilder } from "./task-envelope-builder.js";
 import { renderTaskEnvelopeForAgent } from "./task-envelope-renderer.js";
 import type { ChatRequestInput, ChatResponse, OrchestrationDecision, DelegateEnvelope } from "./orchestration.schema.js";
 import type { AgentCapabilitySummary } from "./context-builder.js";
+import type { AgentResult } from "../../runtime/agent-result.js";
+import { evaluateStepResult } from "./step-result-evaluator.js";
+import {
+  createStepRetryState,
+  decideAutoRepair,
+  recordRetryAttempt,
+} from "./step-repair-policy.js";
+import { buildRetryTaskEnvelope } from "./retry-task-envelope.js";
 
 const runtime = new AgentRuntime({ pluginRegistry });
 const contextBuilder = new ContextBuilder();
@@ -473,8 +481,10 @@ async function executePlanAsync(
     stepUid: string;
     agentUid: string;
     runUid: string;
-    status: string;
+    status: "success" | "partial_success" | "failed";
     summary: string;
+    issues?: string[];
+    agentResult?: AgentResult;
   }> = [];
 
   const allProducedArtifacts: Array<{
@@ -494,6 +504,8 @@ async function executePlanAsync(
     runRefByStepUid: new Map(),
   };
 
+  const retryState = createStepRetryState();
+
   for (const step of plan.steps) {
     try {
       console.log(`[executePlanAsync] Executing step: ${step.stepUid}, agent: ${step.targetAgentUid}`);
@@ -507,7 +519,7 @@ async function executePlanAsync(
         inputRefIds: resolvedInputRefIds,
       };
 
-      const taskEnvelope = await taskEnvelopeBuilder.build({
+      let taskEnvelope = await taskEnvelopeBuilder.build({
         step: resolvedStep,
         plan,
         contextIndex: runningContextIndex,
@@ -515,23 +527,118 @@ async function executePlanAsync(
         originalUserMessage,
       });
 
-      console.log(`[executePlanAsync] TaskEnvelope:\n${JSON.stringify(taskEnvelope, null, 2)}`);
+      let acceptedRun: Awaited<ReturnType<typeof runtime.run>> | null = null;
+      let acceptedAgentResult: AgentResult | null = null;
+      let acceptedEvaluationIssues: string[] = [];
 
-      const run = await runtime.run({
-        agentRecord: agent,
-        versionRecord: version,
-        userMessage: originalUserMessage,
-        originalUserMessage,
-        taskEnvelope,
-        sessionId,
-        workContextId: plan.workContextUid || "",
-        parentRunId: mainRun.id,
-        mode: "subagent",
-      });
+      while (true) {
+        console.log(`[executePlanAsync] TaskEnvelope:\n${JSON.stringify(taskEnvelope, null, 2)}`);
 
-      console.log(`[executePlanAsync] Step completed: ${run.runUid}, status: ${run.status}`);
+        const run = await runtime.run({
+          agentRecord: agent,
+          versionRecord: version,
+          userMessage: originalUserMessage,
+          originalUserMessage,
+          taskEnvelope,
+          sessionId,
+          workContextId: plan.workContextUid || "",
+          parentRunId: mainRun.id,
+          mode: "subagent",
+        });
 
-      // 查询子 run 产生的 artifacts
+        const agentResult = run.agentResult;
+
+        const evaluation = evaluateStepResult({
+          step: resolvedStep,
+          agentResult,
+        });
+
+        console.log(
+          `[executePlanAsync] Step evaluation: ${evaluation.status}, issues=${evaluation.issues.length}`
+        );
+
+        if (evaluation.status === "success") {
+          acceptedRun = run;
+          acceptedAgentResult = agentResult;
+          acceptedEvaluationIssues = [];
+          break;
+        }
+
+        const repairDecision = decideAutoRepair({
+          step: resolvedStep,
+          evaluation,
+          agentResult,
+          retryState,
+        });
+
+        console.log(
+          `[executePlanAsync] Auto repair decision: ${repairDecision.action}, reason=${repairDecision.reason}`
+        );
+
+        if (repairDecision.action === "retry_same_agent") {
+          recordRetryAttempt({
+            stepUid: resolvedStep.stepUid,
+            issues: evaluation.issues,
+            retryState,
+          });
+
+          taskEnvelope = buildRetryTaskEnvelope({
+            originalEnvelope: taskEnvelope,
+            retryAttempt: repairDecision.nextAttempt,
+            previousRunUid: run.runUid,
+            validationIssues: evaluation.issues,
+          });
+
+          continue;
+        }
+
+        if (repairDecision.action === "continue") {
+          acceptedRun = run;
+          acceptedAgentResult = agentResult;
+          acceptedEvaluationIssues = evaluation.issues;
+          break;
+        }
+
+        stepResults.push({
+          stepUid: resolvedStep.stepUid,
+          agentUid: resolvedStep.targetAgentUid,
+          runUid: run.runUid,
+          status: evaluation.status,
+          summary: agentResult.summary,
+          issues: evaluation.issues,
+          agentResult,
+        });
+
+        await updateMainAgentRun(
+          mainRunId,
+          composeStepFailureMessage({
+            step: resolvedStep,
+            evaluation,
+            repairDecision: repairDecision.action,
+            previousRunUid: run.runUid,
+          }),
+          "failed",
+          finalWorkContextId
+        );
+
+        return;
+      }
+
+      if (!acceptedRun || !acceptedAgentResult) {
+        await updateMainAgentRun(
+          mainRunId,
+          `步骤执行失败：未获得有效执行结果。stepUid=${resolvedStep.stepUid}`,
+          "failed",
+          finalWorkContextId
+        );
+        return;
+      }
+
+      const run = acceptedRun;
+      const agentResult = acceptedAgentResult;
+
+      console.log(`[executePlanAsync] Step accepted: ${run.runUid}, status: ${agentResult.status}`);
+
       const producedArtifacts = run.runId
         ? await db
             .select({
@@ -547,29 +654,18 @@ async function executePlanAsync(
 
       console.log(`[executePlanAsync] Step produced ${producedArtifacts.length} artifacts`);
 
-      // 从 AgentResult 获取更丰富的信息
-      const agentResult = run.runId
-        ? await db
-            .select({ outputJson: agentRuns.outputJson })
-            .from(agentRuns)
-            .where(eq(agentRuns.id, run.runId))
-            .limit(1)
-            .then(([r]) => (r ? jsonParse<Record<string, unknown>>(r.outputJson, {}) : null))
-        : null;
-
-      if (agentResult) {
-        allAgentResults.push(agentResult);
-      }
+      allAgentResults.push(agentResult as unknown as Record<string, unknown>);
 
       stepResults.push({
-        stepUid: step.stepUid,
-        agentUid: step.targetAgentUid,
+        stepUid: resolvedStep.stepUid,
+        agentUid: resolvedStep.targetAgentUid,
         runUid: run.runUid,
-        status: run.status,
-        summary: (agentResult?.summary as string) || run.summary || "",
+        status: acceptedEvaluationIssues.length > 0 ? "partial_success" : (agentResult.status === "needs_clarification" ? "partial_success" : agentResult.status),
+        summary: agentResult.summary || "",
+        issues: acceptedEvaluationIssues,
+        agentResult,
       });
 
-      // 记录本 step 产生的 refs
       const producedRefIds: string[] = [];
       const runRefId = `run:${run.runUid}`;
       producedRefIds.push(runRefId);
@@ -578,35 +674,30 @@ async function executePlanAsync(
         producedRefIds.push(`artifact:${artifact.artifactUid}`);
       }
 
-      if (agentResult) {
-        const touchedResources = (agentResult.touchedResources || []) as Array<{
-          type?: string;
-          uri?: string;
-          operation?: string;
-          verified?: boolean;
-        }>;
+      const touchedResources = agentResult.touchedResources || [];
 
-        for (const resource of touchedResources) {
-          if (!resource.uri) continue;
+      for (const resource of touchedResources) {
+        if (!resource.uri) continue;
 
-          if (resource.type === "file") {
-            producedRefIds.push(`file:${resource.uri}`);
-          } else if (resource.type === "url") {
-            producedRefIds.push(`url:${resource.uri}`);
-          } else {
-            producedRefIds.push(`resource:${resource.uri}`);
-          }
+        if (resource.type === "file") {
+          producedRefIds.push(`file:${resource.uri}`);
+        } else if (resource.type === "url") {
+          producedRefIds.push(`url:${resource.uri}`);
+        } else {
+          producedRefIds.push(`resource:${resource.uri}`);
         }
       }
 
-      executionContext.producedRefsByStepUid.set(step.stepUid, [...new Set(producedRefIds)]);
-      executionContext.runRefByStepUid.set(step.stepUid, runRefId);
+      executionContext.producedRefsByStepUid.set(resolvedStep.stepUid, [
+        ...new Set(producedRefIds),
+      ]);
+      executionContext.runRefByStepUid.set(resolvedStep.stepUid, runRefId);
 
       runningContextIndex = appendRunResultRefs(runningContextIndex, {
         runUid: run.runUid,
-        agentUid: step.targetAgentUid,
-        summary: run.summary,
-        status: run.status,
+        agentUid: resolvedStep.targetAgentUid,
+        summary: agentResult.summary,
+        status: agentResult.status,
         workContextUid: plan.workContextUid,
         artifacts: producedArtifacts.map((artifact) => ({
           artifactUid: artifact.artifactUid,
@@ -615,7 +706,7 @@ async function executePlanAsync(
           artifactRole: artifact.artifactRole,
           summary: artifact.contentText?.slice(0, 300),
         })),
-        agentResult: agentResult ?? undefined,
+        agentResult: agentResult as unknown as Record<string, unknown>,
       });
 
       for (const artifact of producedArtifacts) {
@@ -712,6 +803,26 @@ function composeExecutionResult(results: Array<{
       return `${title}\n${r.summary || "无摘要"}`;
     })
     .join("\n\n");
+}
+
+function composeStepFailureMessage(input: {
+  step: import("./orchestration.types.js").ExecutionPlan["steps"][0];
+  evaluation: import("./step-result-evaluator.js").StepEvaluation;
+  repairDecision: import("./step-repair-policy.js").AutoRepairAction;
+  previousRunUid: string;
+}): string {
+  const { step, evaluation, repairDecision, previousRunUid } = input;
+
+  const lines = [
+    `步骤 ${step.stepUid}（${step.targetAgentUid}）执行失败：`,
+    `  - 评估状态：${evaluation.status}`,
+    `  - 失败原因：`,
+    ...evaluation.issues.map((issue) => `    - ${issue}`),
+    `  - 自动修复决策：${repairDecision}`,
+    `  - 上次运行：${previousRunUid}`,
+  ];
+
+  return lines.join("\n");
 }
 
 function appendRunResultRefs(
