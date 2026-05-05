@@ -13,6 +13,8 @@ export type ContextRefKind =
   | "step"
   | "artifact"
   | "file"
+  | "url"
+  | "resource"
   | "agent"
   | "tool";
 

@@ -484,14 +484,31 @@ async function executePlanAsync(
 
   const allAgentResults: Array<Record<string, unknown>> = [];
 
+  type StepExecutionContext = {
+    producedRefsByStepUid: Map<string, string[]>;
+    runRefByStepUid: Map<string, string>;
+  };
+
+  const executionContext: StepExecutionContext = {
+    producedRefsByStepUid: new Map(),
+    runRefByStepUid: new Map(),
+  };
+
   for (const step of plan.steps) {
     try {
       console.log(`[executePlanAsync] Executing step: ${step.stepUid}, agent: ${step.targetAgentUid}`);
 
       const { agent, version } = await getCurrentAgentVersion(step.targetAgentUid);
 
-      const taskEnvelope = taskEnvelopeBuilder.build({
-        step,
+      const resolvedInputRefIds = resolveStepInputRefIds(step, executionContext);
+
+      const resolvedStep = {
+        ...step,
+        inputRefIds: resolvedInputRefIds,
+      };
+
+      const taskEnvelope = await taskEnvelopeBuilder.build({
+        step: resolvedStep,
         plan,
         contextIndex: runningContextIndex,
         parentRunUid: mainRunId,
@@ -552,6 +569,39 @@ async function executePlanAsync(
         summary: (agentResult?.summary as string) || run.summary || "",
       });
 
+      // 记录本 step 产生的 refs
+      const producedRefIds: string[] = [];
+      const runRefId = `run:${run.runUid}`;
+      producedRefIds.push(runRefId);
+
+      for (const artifact of producedArtifacts) {
+        producedRefIds.push(`artifact:${artifact.artifactUid}`);
+      }
+
+      if (agentResult) {
+        const touchedResources = (agentResult.touchedResources || []) as Array<{
+          type?: string;
+          uri?: string;
+          operation?: string;
+          verified?: boolean;
+        }>;
+
+        for (const resource of touchedResources) {
+          if (!resource.uri) continue;
+
+          if (resource.type === "file") {
+            producedRefIds.push(`file:${resource.uri}`);
+          } else if (resource.type === "url") {
+            producedRefIds.push(`url:${resource.uri}`);
+          } else {
+            producedRefIds.push(`resource:${resource.uri}`);
+          }
+        }
+      }
+
+      executionContext.producedRefsByStepUid.set(step.stepUid, [...new Set(producedRefIds)]);
+      executionContext.runRefByStepUid.set(step.stepUid, runRefId);
+
       runningContextIndex = appendRunResultRefs(runningContextIndex, {
         runUid: run.runUid,
         agentUid: step.targetAgentUid,
@@ -565,6 +615,7 @@ async function executePlanAsync(
           artifactRole: artifact.artifactRole,
           summary: artifact.contentText?.slice(0, 300),
         })),
+        agentResult: agentResult ?? undefined,
       });
 
       for (const artifact of producedArtifacts) {
@@ -624,6 +675,24 @@ async function executePlanAsync(
   );
 }
 
+function resolveStepInputRefIds(
+  step: import("./orchestration.types.js").ExecutionPlan["steps"][0],
+  executionContext: {
+    producedRefsByStepUid: Map<string, string[]>;
+  }
+): string[] {
+  const refs = new Set<string>(step.inputRefIds || []);
+
+  for (const depStepUid of step.dependsOn || []) {
+    const producedRefs = executionContext.producedRefsByStepUid.get(depStepUid) || [];
+    for (const refId of producedRefs) {
+      refs.add(refId);
+    }
+  }
+
+  return [...refs];
+}
+
 function composeExecutionResult(results: Array<{
   stepUid: string;
   agentUid: string;
@@ -660,6 +729,7 @@ function appendRunResultRefs(
       artifactRole?: string | null;
       summary?: string;
     }>;
+    agentResult?: Record<string, unknown>;
   }
 ): import("./orchestration.types.js").SessionContextIndex {
   const runRefId = `run:${input.runUid}`;
@@ -721,6 +791,69 @@ function appendRunResultRefs(
       if (input.workContextUid) {
         newRelations.push({
           fromRefId: artifactRefId,
+          toRefId: `wc:${input.workContextUid}`,
+          relation: "belongs_to" as const,
+        });
+      }
+    }
+  }
+
+  // 处理 touchedResources
+  const touchedResources = input.agentResult?.touchedResources as
+    | Array<{
+        type?: string;
+        uri?: string;
+        operation?: string;
+        verified?: boolean;
+      }>
+    | undefined;
+
+  if (touchedResources) {
+    for (const resource of touchedResources) {
+      if (!resource.uri) continue;
+
+      const refId =
+        resource.type === "file"
+          ? `file:${resource.uri}`
+          : resource.type === "url"
+            ? `url:${resource.uri}`
+            : `resource:${resource.uri}`;
+
+      const kind: import("./orchestration.types.js").ContextRefKind =
+        resource.type === "file"
+          ? "file"
+          : resource.type === "url"
+            ? "url"
+            : "resource";
+
+      if (!newRefs.find((r) => r.refId === refId) && !index.refs.find((r) => r.refId === refId)) {
+        newRefs.push({
+          refId,
+          kind,
+          title: resource.uri.split("/").pop() || resource.uri,
+          summary: `${resource.operation || "touched"} ${resource.verified ? "verified" : "unverified"}`,
+          workContextUid: input.workContextUid,
+          status: resource.verified ? "ok" : "unverified",
+          source: {
+            uri: resource.uri,
+          },
+          tags: [
+            resource.type || "resource",
+            resource.operation || "unknown",
+            resource.verified ? "verified" : "unverified",
+          ],
+        });
+      }
+
+      newRelations.push({
+        fromRefId: refId,
+        toRefId: runRefId,
+        relation: "used_by" as const,
+      });
+
+      if (input.workContextUid) {
+        newRelations.push({
+          fromRefId: refId,
           toRefId: `wc:${input.workContextUid}`,
           relation: "belongs_to" as const,
         });

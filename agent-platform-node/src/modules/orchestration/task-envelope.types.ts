@@ -36,6 +36,8 @@ export type FileSlice = {
   summary?: string;
 };
 
+export type LedgerRenderMode = "none" | "summary" | "critical_steps" | "full";
+
 export type TaskEnvelope = {
   envelopeUid: string;
 
@@ -44,7 +46,7 @@ export type TaskEnvelope = {
   targetAgentUid: string;
 
   objective: string;
-  originalUserMessage: string;
+  originalUserMessage?: string;
 
   selectedContext: {
     refs: ContextRef[];
@@ -66,5 +68,12 @@ export type TaskEnvelope = {
     format: "agent_result";
     mustIncludeOperations: boolean;
     mustIncludeOpenIssues: boolean;
+  };
+
+  contextRenderPolicy?: {
+    renderSelectedRefs?: boolean;
+    ledgerMode?: LedgerRenderMode;
+    maxArtifactContentChars?: number;
+    maxLedgerSteps?: number;
   };
 };

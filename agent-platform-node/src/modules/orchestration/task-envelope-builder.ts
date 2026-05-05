@@ -5,16 +5,17 @@
 
 import { makeUid } from "../../shared/ids.js";
 import type { ExecutionPlan, SessionContextIndex } from "./orchestration.types.js";
-import type { TaskEnvelope, LedgerSlice, ArtifactSlice, FileSlice } from "./task-envelope.types.js";
+import type { TaskEnvelope, LedgerRenderMode } from "./task-envelope.types.js";
+import { hydrateTaskEnvelopeContext } from "./task-envelope-context-hydrator.js";
 
 export class TaskEnvelopeBuilder {
-  build(input: {
+  async build(input: {
     step: ExecutionPlan["steps"][0];
     plan: ExecutionPlan;
     contextIndex: SessionContextIndex;
     parentRunUid: string;
     originalUserMessage: string;
-  }): TaskEnvelope {
+  }): Promise<TaskEnvelope> {
     const { step, plan, contextIndex, parentRunUid, originalUserMessage } = input;
 
     // 从 inputRefIds 展开 refs，并处理 agent 类型 ref 的自动关联
@@ -22,42 +23,8 @@ export class TaskEnvelopeBuilder {
     const refs = this.resolveRefs(step.inputRefIds, contextIndex);
     console.log(`[TaskEnvelopeBuilder] resolved refs count:`, refs.length, `refs:`, JSON.stringify(refs.map((r) => ({ refId: r.refId, kind: r.kind, title: r.title }))));
 
-    // 展开 ledger slices
-    const ledgerSlices: LedgerSlice[] = [];
-    const artifactSlices: ArtifactSlice[] = [];
-    const fileSlices: FileSlice[] = [];
-
-    for (const ref of refs) {
-      if (ref.kind === "run") {
-        // 从 tags 中提取 agentUid（tags 格式: ["run", status, agentUid]）
-        const agentUid = ref.tags[2] || "";
-        ledgerSlices.push({
-          refId: ref.refId,
-          runUid: ref.source?.uid || "",
-          agentUid,
-          status: ref.status || "unknown",
-          summary: ref.summary,
-          steps: [],
-        });
-      } else if (ref.kind === "artifact") {
-        artifactSlices.push({
-          refId: ref.refId,
-          artifactUid: ref.source?.uid || "",
-          title: ref.title,
-          artifactType: "text",
-          artifactRole: ref.status === "pending_write" ? "pending_write" : "reference",
-          summary: ref.summary,
-        });
-      } else if (ref.kind === "file") {
-        fileSlices.push({
-          refId: ref.refId,
-          uri: ref.source?.uri || "",
-          path: ref.source?.uri || "",
-          lastKnownStatus: ref.status === "write_failed" ? "failed" : "unknown",
-          summary: ref.summary,
-        });
-      }
-    }
+    // 使用 hydrator 从数据库查询完整内容
+    const hydrated = await hydrateTaskEnvelopeContext(refs);
 
     // constraints
     const constraints: string[] = [];
@@ -77,12 +44,12 @@ export class TaskEnvelopeBuilder {
       workContextUid: plan.workContextUid || "",
       targetAgentUid: step.targetAgentUid,
       objective: step.objective,
-      originalUserMessage,
+      originalUserMessage: undefined,
       selectedContext: {
         refs,
-        ledgerSlices,
-        artifacts: artifactSlices,
-        files: fileSlices,
+        ledgerSlices: hydrated.ledgerSlices,
+        artifacts: hydrated.artifacts,
+        files: hydrated.files,
       },
       constraints,
       allowedTools: step.allowedTools,
@@ -94,6 +61,12 @@ export class TaskEnvelopeBuilder {
         format: "agent_result",
         mustIncludeOperations: true,
         mustIncludeOpenIssues: true,
+      },
+      contextRenderPolicy: {
+        renderSelectedRefs: false,
+        ledgerMode: determineLedgerMode(step),
+        maxArtifactContentChars: 2000,
+        maxLedgerSteps: 8,
       },
     };
   }
@@ -245,4 +218,13 @@ export class TaskEnvelopeBuilder {
         rel.relation === "produced"
     );
   }
+}
+
+function determineLedgerMode(
+  step: ExecutionPlan["steps"][0]
+): LedgerRenderMode {
+  if (step.expectedResultKind === "diagnosis") return "critical_steps";
+  if (step.expectedResultKind === "verification") return "critical_steps";
+  if (step.requireVerification) return "critical_steps";
+  return "summary";
 }

@@ -5,6 +5,7 @@
  */
 
 import type { TaskEnvelope } from "./task-envelope.types.js";
+import type { RuntimeStepTrace } from "./orchestration.types.js";
 
 export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
   const lines: string[] = [];
@@ -22,13 +23,10 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
   lines.push(envelope.objective);
   lines.push("");
 
-  // if (envelope.originalUserMessage && envelope.originalUserMessage !== envelope.objective) {
-  //   lines.push(`## Original User Message`);
-  //   lines.push(envelope.originalUserMessage);
-  //   lines.push("");
-  // }
+  const renderSelectedRefs =
+    envelope.contextRenderPolicy?.renderSelectedRefs === true;
 
-  if (envelope.selectedContext.refs.length > 0) {
+  if (renderSelectedRefs && envelope.selectedContext.refs.length > 0) {
     lines.push(`## Selected Context (${envelope.selectedContext.refs.length} refs)`);
     for (const ref of envelope.selectedContext.refs) {
       lines.push(`- ${ref.refId}: ${ref.title} (${ref.status || "unknown"})`);
@@ -39,32 +37,68 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
     lines.push("");
   }
 
-  if (envelope.selectedContext.ledgerSlices.length > 0) {
-    lines.push(`## Ledger Slices`);
+  const ledgerMode = envelope.contextRenderPolicy?.ledgerMode ?? "summary";
+
+  if (ledgerMode !== "none" && envelope.selectedContext.ledgerSlices.length > 0) {
+    lines.push(`## Previous Runs`);
+
     for (const slice of envelope.selectedContext.ledgerSlices) {
-      lines.push(`- ${slice.refId}: ${slice.status}`);
-      if (slice.summary) {
-        lines.push(`  ${slice.summary}`);
+      lines.push(`- ${slice.refId}`);
+      if (slice.agentUid) lines.push(`  agent: ${slice.agentUid}`);
+      if (slice.agentName) lines.push(`  agentName: ${slice.agentName}`);
+      lines.push(`  status: ${slice.status}`);
+
+      if (ledgerMode === "critical_steps" || ledgerMode === "full") {
+        const steps = selectLedgerSteps(
+          slice.steps,
+          ledgerMode,
+          envelope.contextRenderPolicy?.maxLedgerSteps ?? 8
+        );
+        for (const step of steps) {
+          lines.push(`  - step#${step.stepIndex} ${step.stepType}`);
+          if (step.toolName) lines.push(`    tool: ${step.toolName}`);
+          if (step.toolStatus) lines.push(`    status: ${step.toolStatus}`);
+          if (step.content) lines.push(`    content: ${step.content.slice(0, 300)}`);
+        }
       }
     }
+
     lines.push("");
   }
 
   if (envelope.selectedContext.artifacts.length > 0) {
     lines.push(`## Artifacts`);
+    const maxChars = envelope.contextRenderPolicy?.maxArtifactContentChars ?? 2000;
+
     for (const art of envelope.selectedContext.artifacts) {
       lines.push(`- ${art.refId}: ${art.title} (${art.artifactRole || "reference"})`);
+
       if (art.summary) {
-        lines.push(`  ${art.summary}`);
+        lines.push(`  summary: ${art.summary.slice(0, 300)}`);
+      }
+
+      if (art.contentText) {
+        lines.push(`  content:`);
+        lines.push(indentBlock(art.contentText.slice(0, maxChars), "  "));
+      }
+
+      if (art.contentJson) {
+        lines.push(`  json:`);
+        lines.push(indentBlock(JSON.stringify(art.contentJson, null, 2).slice(0, maxChars), "  "));
       }
     }
+
     lines.push("");
   }
 
   if (envelope.selectedContext.files.length > 0) {
     lines.push(`## Files`);
     for (const file of envelope.selectedContext.files) {
-      lines.push(`- ${file.refId}: ${file.path} (${file.lastKnownStatus || "unknown"})`);
+      lines.push(`- ${file.refId}`);
+      lines.push(`  path: ${file.path}`);
+      lines.push(`  status: ${file.lastKnownStatus || "unknown"}`);
+      if (file.lastKnownOperation) lines.push(`  lastOperation: ${file.lastKnownOperation}`);
+      if (file.summary) lines.push(`  summary: ${file.summary.slice(0, 300)}`);
     }
     lines.push("");
   }
@@ -94,4 +128,33 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
   lines.push(`mustIncludeOpenIssues: ${envelope.outputContract.mustIncludeOpenIssues ? "yes" : "no"}`);
 
   return lines.join("\n");
+}
+
+function selectLedgerSteps(
+  steps: RuntimeStepTrace[],
+  mode: "summary" | "critical_steps" | "full",
+  maxSteps: number
+): RuntimeStepTrace[] {
+  if (mode === "summary") return [];
+
+  if (mode === "full") {
+    return steps.slice(-maxSteps);
+  }
+
+  return steps
+    .filter(
+      (s) =>
+        s.stepType === "tool_end" ||
+        s.stepType === "error" ||
+        s.toolStatus === "failed" ||
+        s.toolStatus === "error"
+    )
+    .slice(-maxSteps);
+}
+
+function indentBlock(text: string, prefix: string): string {
+  return text
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
 }
