@@ -42,6 +42,8 @@ export class MainAgent {
       temperature: 0.1,
     });
 
+  
+    //console.log(`[MainAgent] 决策完成的content: ${raw.content}`);
     const decision = await this.parseMainDecision(raw.content);
 
     console.log(`[MainAgent] 决策完成: ${decision.decisionType}`);

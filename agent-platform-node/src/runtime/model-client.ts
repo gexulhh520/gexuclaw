@@ -100,7 +100,7 @@ export class ModelClient {
       baseUrl: input.baseUrl,
       modelName: input.modelName,
     });
-
+ //console.log("[MainAgent] getProviderConfig:", config);
     const result = await this.invoke({
       provider: providerName,
       modelName: input.modelName || config.defaultModel,
@@ -116,7 +116,7 @@ export class ModelClient {
       ],
       tools: [],
     });
-
+    //console.log("[MainAgent] invoke result.content:", result.content);
     return { content: result.content };
   }
 
