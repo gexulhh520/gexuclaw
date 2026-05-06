@@ -1,4 +1,9 @@
 import type { ToolDefinition } from "../tools/tool-types.js";
+import { OpenAICompatibleProvider } from "./openai-compatible-provider.js";
+import {
+  getProviderConfig,
+  type OpenAICompatibleProviderConfig,
+} from "./provider-config.js";
 
 export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
@@ -12,7 +17,6 @@ export type ChatMessage = {
       arguments: string;
     };
   }>;
-  // 支持 thinking 的模型（如 Kimi k2.5）需要此字段
   reasoning_content?: string;
 };
 
@@ -34,6 +38,7 @@ export type ModelClientInput = {
 export type ModelClientResult = {
   content: string;
   toolCalls: ModelToolCall[];
+  reasoningContent?: string;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
@@ -41,51 +46,68 @@ export type ModelClientResult = {
   raw?: unknown;
 };
 
-type OpenAICompatibleToolCall = {
-  id?: string;
-  function?: {
-    name?: string;
-    arguments?: string;
-  };
-};
-
 export class ModelClient {
+  private readonly providerCache = new Map<string, OpenAICompatibleProvider>();
+
   async invoke(input: ModelClientInput): Promise<ModelClientResult> {
-    // mock provider 用来在没有 Kimi / OpenAI key 的情况下验证 Runtime 闭环。
-    // 真实模型统一走 OpenAI-compatible 分支。
     if (input.provider === "mock") {
       return this.invokeMock(input);
     }
 
-    return this.invokeOpenAICompatible(input);
+    const config = getProviderConfig({
+      provider: input.provider,
+      baseUrl: input.baseUrl,
+    });
+
+    const normalizedInput = this.normalizeInput(input, config);
+
+    const provider = this.getOpenAICompatibleProvider(config);
+
+    return provider.invoke(normalizedInput);
   }
 
-  // 简化版调用（用于主 Agent 决策，不需要工具）
   async complete(input: {
     systemPrompt: string;
     userMessage: string;
+    provider?: string;
+    modelName?: string;
+    baseUrl?: string | null;
     temperature?: number;
+    maxTokens?: number;
+    timeoutMs?: number;
   }): Promise<{ content: string }> {
-    // 使用 mock provider 或从环境获取默认配置
-    const provider = process.env.DEFAULT_MODEL_PROVIDER || "mock";
-    // 根据 provider 选择正确的默认模型
-    let modelName: string;
-    if (provider === "kimi") {
-      modelName = process.env.KIMI_DEFAULT_MODEL || "moonshot-v1-8k";
-    } else if (provider === "openai") {
-      modelName = process.env.OPENAI_DEFAULT_MODEL || "gpt-4o-mini";
-    } else {
-      modelName = "mock-model";
+    const providerName =
+      input.provider || process.env.DEFAULT_MODEL_PROVIDER || "mock";
+
+    if (providerName === "mock") {
+      const result = await this.invoke({
+        provider: "mock",
+        modelName: "mock-model",
+        params: {},
+        messages: [
+          { role: "system", content: input.systemPrompt },
+          { role: "user", content: input.userMessage },
+        ],
+        tools: [],
+      });
+
+      return { content: result.content };
     }
 
-    // kimi-k2.5 模型只支持 temperature=1
-    const isKimiK25 = modelName === "kimi-k2.5";
-    const temperature = isKimiK25 ? 1 : (input.temperature ?? 0.7);
+    const config = getProviderConfig({
+      provider: providerName,
+      baseUrl: input.baseUrl,
+    });
 
     const result = await this.invoke({
-      provider,
-      modelName,
-      params: { temperature },
+      provider: providerName,
+      modelName: input.modelName || config.defaultModel,
+      baseUrl: config.baseURL,
+      params: {
+        temperature: input.temperature ?? 0.7,
+        maxTokens: input.maxTokens ?? config.defaultMaxTokens ?? 1000,
+        timeoutMs: input.timeoutMs ?? config.timeoutMs,
+      },
       messages: [
         { role: "system", content: input.systemPrompt },
         { role: "user", content: input.userMessage },
@@ -96,78 +118,107 @@ export class ModelClient {
     return { content: result.content };
   }
 
-  private async invokeOpenAICompatible(input: ModelClientInput): Promise<ModelClientResult> {
-    const apiKey = this.getApiKey(input.provider);
-    const baseUrl = input.baseUrl ?? this.getBaseUrl(input.provider);
+  private normalizeInput(
+    input: ModelClientInput,
+    config: OpenAICompatibleProviderConfig
+  ): ModelClientInput {
+    const modelName = input.modelName || config.defaultModel;
 
-    if (!apiKey) {
-      throw new Error(`Missing API key for provider: ${input.provider}`);
+    if (!modelName) {
+      throw new Error(`Missing modelName for provider: ${config.provider}`);
     }
 
-    // Kimi k2.5 不需要特殊处理 temperature 参数
-    // 使用传入的参数，不强制覆盖
-
-    // Kimi、OpenAI 这类兼容 Chat Completions 的 provider 先共用同一套请求格式。
-    // 后续如果某个厂商字段不同，只在这里做适配，不污染 AgentRuntime。
-    const body = {
-      model: input.modelName,
-      messages: input.messages.map((message) => ({
-        role: message.role,
-        content: message.content,
-        tool_call_id: message.tool_call_id,
-        tool_calls: message.tool_calls,
-        reasoning_content: message.reasoning_content,
-      })),
-      tools: input.tools,
-      ...input.params,
-    };
-
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-
-    const raw = (await response.json()) as Record<string, unknown>;
-    if (!response.ok) {
-      throw new Error(`Model provider request failed: ${response.status} ${JSON.stringify(raw)}`);
-    }
-
-    const choice = (raw.choices as Array<Record<string, unknown>> | undefined)?.[0];
-    const message = choice?.message as Record<string, unknown> | undefined;
-    const usage = raw.usage as Record<string, number> | undefined;
+    const params = this.normalizeParams(input.params, config, modelName);
 
     return {
-      content: typeof message?.content === "string" ? message.content : "",
-      toolCalls: this.parseToolCalls((message?.tool_calls as OpenAICompatibleToolCall[] | undefined) ?? []),
-      usage: {
-        inputTokens: usage?.prompt_tokens,
-        outputTokens: usage?.completion_tokens,
-      },
-      raw,
+      ...input,
+      provider: config.provider,
+      modelName,
+      baseUrl: config.baseURL,
+      params,
+      messages: input.messages,
+      tools: input.tools,
     };
   }
 
-  private invokeMock(input: ModelClientInput): ModelClientResult {
-    const latestUser = [...input.messages].reverse().find((message) => message.role === "user")?.content ?? "";
-    const latestTool = [...input.messages].reverse().find((message) => message.role === "tool")?.content ?? "";
-    const systemMessage = input.messages.find((message) => message.role === "system")?.content ?? "";
-    const artifactDirectivesEnabled = systemMessage.includes("Artifact directives are enabled for this agent version.");
+  private normalizeParams(
+    params: Record<string, unknown>,
+    config: OpenAICompatibleProviderConfig,
+    modelName: string
+  ): Record<string, unknown> {
+    const normalized: Record<string, unknown> = {
+      ...params,
+    };
 
-    // mock 模型看到"百度 / baidu / http"时主动发起 browser_open，
-    // 用来验证 tool call、allowed_tools 校验和 agent_run_steps 记录。
-    // 一旦已经拿到 tool 结果，就返回最终总结，避免在 phase one 里重复死循环调用同一个工具。
+    if (normalized.timeoutMs === undefined) {
+      normalized.timeoutMs = config.timeoutMs;
+    }
+
+    if (typeof normalized.maxTokens === "number") {
+      normalized[config.maxTokensParamName] = normalized.maxTokens;
+      delete normalized.maxTokens;
+    }
+
+    if (
+      normalized[config.maxTokensParamName] === undefined &&
+      typeof config.defaultMaxTokens === "number"
+    ) {
+      normalized[config.maxTokensParamName] = config.defaultMaxTokens;
+    }
+
+    if (config.provider === "kimi" && modelName === "kimi-k2.5") {
+      normalized.temperature = 1;
+    }
+
+    return normalized;
+  }
+
+  private getOpenAICompatibleProvider(
+    config: OpenAICompatibleProviderConfig
+  ): OpenAICompatibleProvider {
+    const cacheKey = [
+      config.provider,
+      config.baseURL,
+      config.defaultModel,
+    ].join("|");
+
+    const cached = this.providerCache.get(cacheKey);
+
+    if (cached) {
+      return cached;
+    }
+
+    const provider = new OpenAICompatibleProvider(config);
+    this.providerCache.set(cacheKey, provider);
+
+    return provider;
+  }
+
+  private invokeMock(input: ModelClientInput): ModelClientResult {
+    const latestUser =
+      [...input.messages].reverse().find((message) => message.role === "user")?.content ?? "";
+
+    const latestTool =
+      [...input.messages].reverse().find((message) => message.role === "tool")?.content ?? "";
+
+    const systemMessage =
+      input.messages.find((message) => message.role === "system")?.content ?? "";
+
+    const artifactDirectivesEnabled =
+      systemMessage.includes("Artifact directives are enabled for this task.") ||
+      systemMessage.includes("Artifact directives are enabled for this agent version.");
+
     if (latestTool) {
       const parsedTool = this.parseToolPayload(latestTool);
       const rawCandidates = Array.isArray(parsedTool?.artifactCandidates)
         ? parsedTool.artifactCandidates
         : [];
+
       const firstCandidate = rawCandidates[0] as Record<string, unknown> | undefined;
       const candidateId =
-        typeof firstCandidate?.candidateId === "string" ? firstCandidate.candidateId : undefined;
+        typeof firstCandidate?.candidateId === "string"
+          ? firstCandidate.candidateId
+          : undefined;
 
       const directives = {
         artifactDecisions: candidateId
@@ -184,17 +235,17 @@ export class ModelClient {
           {
             artifactType: "text",
             artifactRole: "final",
-            title: "浏览结果摘要",
-            contentText: `Mock browser flow completed for: ${latestUser}`,
+            title: "Mock 结果摘要",
+            contentText: `Mock flow completed for: ${latestUser}`,
           },
         ],
       };
 
       const content = artifactDirectivesEnabled
-        ? `Mock browser flow completed for: ${latestUser}\n<artifact_directives>${JSON.stringify(
-            directives,
+        ? `Mock flow completed for: ${latestUser}\n<artifact_directives>${JSON.stringify(
+            directives
           )}</artifact_directives>`
-        : `Mock browser flow completed for: ${latestUser}`;
+        : `Mock flow completed for: ${latestUser}`;
 
       return {
         content,
@@ -203,14 +254,21 @@ export class ModelClient {
       };
     }
 
-    if (input.tools.some((tool) => tool.function.name.includes("browser_open")) && /baidu|百度|http/i.test(latestUser)) {
+    if (
+      input.tools.some((tool) => tool.function.name.includes("browser_open")) &&
+      /baidu|百度|http/i.test(latestUser)
+    ) {
       return {
         content: "I will open the requested page with the browser tool.",
         toolCalls: [
           {
             id: "mock_tool_call_browser_open",
             name: "browser_open",
-            arguments: { url: latestUser.includes("百度") ? "https://www.baidu.com" : "https://example.com" },
+            arguments: {
+              url: latestUser.includes("百度")
+                ? "https://www.baidu.com"
+                : "https://example.com",
+            },
           },
         ],
         usage: { inputTokens: 0, outputTokens: 0 },
@@ -224,47 +282,11 @@ export class ModelClient {
     };
   }
 
-  private parseToolCalls(toolCalls: OpenAICompatibleToolCall[]): ModelToolCall[] {
-    return toolCalls
-      .filter((toolCall) => toolCall.function?.name)
-      .map((toolCall, index) => ({
-        id: toolCall.id ?? `tool_call_${index + 1}`,
-        name: toolCall.function?.name ?? "",
-        arguments: this.parseToolArguments(toolCall.function?.arguments),
-      }));
-  }
-
-  private parseToolArguments(value: string | undefined): Record<string, unknown> {
-    if (!value) return {};
-
-    try {
-      return JSON.parse(value) as Record<string, unknown>;
-    } catch {
-      // 模型偶尔会返回非 JSON 参数。第一阶段先降级为空对象，
-      // 后续可以在这里增加 repair 或 needs_clarification 策略。
-      return {};
-    }
-  }
-
   private parseToolPayload(value: string): Record<string, unknown> | null {
     try {
       return JSON.parse(value) as Record<string, unknown>;
     } catch {
       return null;
     }
-  }
-
-  private getApiKey(provider: string): string | undefined {
-    // API key 只从环境变量读取，不进入数据库，避免敏感信息落库。
-    if (provider === "kimi") return process.env.KIMI_API_KEY;
-    if (provider === "openai") return process.env.OPENAI_API_KEY;
-    return process.env[`${provider.toUpperCase()}_API_KEY`];
-  }
-
-  private getBaseUrl(provider: string): string {
-    // Kimi 默认使用 Moonshot 的 OpenAI-compatible 地址。
-    if (provider === "kimi") return process.env.KIMI_BASE_URL ?? "https://api.moonshot.cn/v1";
-    if (provider === "openai") return process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
-    return process.env[`${provider.toUpperCase()}_BASE_URL`] ?? "";
   }
 }

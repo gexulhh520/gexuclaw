@@ -331,13 +331,6 @@ export class AgentRuntime {
     );
     const modelDefaultParams = jsonParse<Record<string, unknown>>(args.profile.defaultParamsJson, {});
 
-    // Kimi k2.5 不需要传入 temperature 参数，使用模型默认值
-    const isKimiK25 = args.profile.modelName === "kimi-k2.5";
-    if (isKimiK25) {
-      delete modelDefaultParams.temperature;
-      delete modelParamsOverride.temperature;
-    }
-
     // 从 AgentVersion.allowedPluginIdsJson 获取显式绑定的插件
     console.log(`[AgentRuntime] ========== 插件挂载诊断 ==========`);
     console.log(`[AgentRuntime] Agent: ${args.input.agentRecord.agentUid} (ID: ${args.input.agentRecord.id})`);
@@ -566,7 +559,6 @@ export class AgentRuntime {
       }
 
       // 构建 assistant 消息，包含 tool_calls
-      // 对于支持 thinking 的模型（如 Kimi k2.5），需要添加 reasoning_content 字段
       const assistantMessage: {
         role: "assistant";
         content: string;
@@ -588,21 +580,12 @@ export class AgentRuntime {
           },
         })),
       };
-      // 如果模型返回了 reasoning_content，则包含它
-      // 对于支持 thinking 的模型（如 Kimi k2.5），所有 assistant 消息都必须包含 reasoning_content
-      const rawResponse = modelResult.raw as Record<string, unknown> | undefined;
-      const rawChoices = rawResponse?.choices as Array<Record<string, unknown>> | undefined;
-      const rawMessage = rawChoices?.[0]?.message as Record<string, unknown> | undefined;
-      console.log("[AgentRuntime] rawMessage keys:", rawMessage ? Object.keys(rawMessage) : "undefined");
-      console.log("[AgentRuntime] rawMessage.reasoning_content:", rawMessage?.reasoning_content);
-      // 对于 Kimi k2.5，始终添加 reasoning_content（即使为空字符串）
-      if (args.profile.modelName === "kimi-k2.5") {
-        const reasoningContent = typeof rawMessage?.reasoning_content === "string" ? rawMessage.reasoning_content : "";
-        assistantMessage.reasoning_content = reasoningContent;
-        console.log("[AgentRuntime] 添加 reasoning_content 到 assistant 消息:", reasoningContent ? "有内容" : "空字符串");
-      } else if (typeof rawMessage?.reasoning_content === "string") {
-        assistantMessage.reasoning_content = rawMessage.reasoning_content;
+
+      // 从 modelResult 获取 reasoningContent（由 OpenAICompatibleProvider 统一处理）
+      if (modelResult.reasoningContent) {
+        assistantMessage.reasoning_content = modelResult.reasoningContent;
       }
+
       messages.push(assistantMessage);
       console.log("[AgentRuntime] Assistant 消息已添加，tool_calls 数量:", assistantMessage.tool_calls.length);
 
