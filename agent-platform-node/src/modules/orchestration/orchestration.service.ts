@@ -25,8 +25,10 @@ import type { AgentResult } from "../../runtime/agent-result.js";
 import { evaluateStepResult } from "./step-result-evaluator.js";
 import {
   createStepRetryState,
-  decideAutoRepair,
   recordRetryAttempt,
+  MAX_STEP_RETRIES,
+  MAX_TOTAL_REPAIRS,
+  type StepRetryState,
 } from "./step-repair-policy.js";
 import { buildRetryTaskEnvelope } from "./retry-task-envelope.js";
 
@@ -553,75 +555,160 @@ async function executePlanAsync(
           agentResult,
         });
 
-        console.log(
-          `[executePlanAsync] Step evaluation: ${evaluation.status}, issues=${evaluation.issues.length}`
-        );
-
-        if (evaluation.status === "success") {
-          acceptedRun = run;
-          acceptedAgentResult = agentResult;
-          acceptedEvaluationIssues = [];
-          break;
-        }
-
-        const repairDecision = decideAutoRepair({
-          step: resolvedStep,
-          evaluation,
+        const review = await mainAgent.reviewStepOutcome({
+          originalUserMessage,
+          currentPlan: plan,
+          currentStep: resolvedStep,
+          taskEnvelope,
           agentResult,
-          retryState,
+          ruleEvaluation: evaluation,
+          stepResultsSoFar: stepResults.map((item) => ({
+            stepUid: item.stepUid,
+            agentUid: item.agentUid,
+            runUid: item.runUid,
+            status: item.status,
+            summary: item.summary,
+            issues: item.issues,
+          })),
         });
 
         console.log(
-          `[executePlanAsync] Auto repair decision: ${repairDecision.action}, reason=${repairDecision.reason}`
+          `[executePlanAsync] MainAgent step review: ${review.decision}, safe=${review.safeToUseProducedRefs}, confidence=${review.confidence}`
         );
 
-        if (repairDecision.action === "retry_same_agent") {
+        if (review.decision === "continue") {
+          if (!review.safeToUseProducedRefs) {
+            stepResults.push({
+              stepUid: resolvedStep.stepUid,
+              agentUid: resolvedStep.targetAgentUid,
+              runUid: run.runUid,
+              status: "failed",
+              summary: agentResult.summary,
+              issues: [
+                "MainAgent review returned continue but safeToUseProducedRefs=false.",
+                ...review.issues,
+              ],
+              agentResult,
+            });
+
+            await updateMainAgentRun(
+              mainRunId,
+              review.finalMessage || "步骤结果不可信，已停止继续执行，避免污染后续任务。",
+              "failed",
+              finalWorkContextId
+            );
+            return;
+          }
+
+          acceptedRun = run;
+          acceptedAgentResult = agentResult;
+          acceptedEvaluationIssues = review.issues;
+          break;
+        }
+
+        if (review.decision === "retry_same_agent") {
+          if (!canRetryStep({ stepUid: resolvedStep.stepUid, retryState })) {
+            stepResults.push({
+              stepUid: resolvedStep.stepUid,
+              agentUid: resolvedStep.targetAgentUid,
+              runUid: run.runUid,
+              status: "failed",
+              summary: agentResult.summary,
+              issues: [
+                "Retry limit reached.",
+                ...review.issues,
+              ],
+              agentResult,
+            });
+
+            await updateMainAgentRun(
+              mainRunId,
+              review.finalMessage || "当前步骤重试次数已达上限，任务已停止。",
+              "failed",
+              finalWorkContextId
+            );
+            return;
+          }
+
           recordRetryAttempt({
             stepUid: resolvedStep.stepUid,
-            issues: evaluation.issues,
+            issues: review.issues.length > 0 ? review.issues : evaluation.issues,
             retryState,
           });
 
           taskEnvelope = buildRetryTaskEnvelope({
             originalEnvelope: taskEnvelope,
-            retryAttempt: repairDecision.nextAttempt,
+            retryAttempt: retryState.attemptsByStepUid.get(resolvedStep.stepUid) ?? 1,
             previousRunUid: run.runUid,
-            validationIssues: evaluation.issues,
+            validationIssues: review.issues.length > 0 ? review.issues : evaluation.issues,
+            instruction:
+              review.retryInstruction ||
+              "只修复当前 Objective，不要扩展任务范围，不要执行其他步骤。只能使用 TaskEnvelope 中明确给出的输入资源。",
           });
 
           continue;
         }
 
-        if (repairDecision.action === "continue") {
-          acceptedRun = run;
-          acceptedAgentResult = agentResult;
-          acceptedEvaluationIssues = evaluation.issues;
-          break;
+        if (review.decision === "replan_remaining") {
+          stepResults.push({
+            stepUid: resolvedStep.stepUid,
+            agentUid: resolvedStep.targetAgentUid,
+            runUid: run.runUid,
+            status: "failed",
+            summary: agentResult.summary,
+            issues: review.issues,
+            agentResult,
+          });
+
+          await updateMainAgentRun(
+            mainRunId,
+            review.finalMessage ||
+              `当前步骤需要重新规划：${review.replanInstruction || review.reasoning}`,
+            "failed",
+            finalWorkContextId
+          );
+          return;
         }
 
-        stepResults.push({
-          stepUid: resolvedStep.stepUid,
-          agentUid: resolvedStep.targetAgentUid,
-          runUid: run.runUid,
-          status: evaluation.status,
-          summary: agentResult.summary,
-          issues: evaluation.issues,
-          agentResult,
-        });
+        if (review.decision === "ask_user") {
+          stepResults.push({
+            stepUid: resolvedStep.stepUid,
+            agentUid: resolvedStep.targetAgentUid,
+            runUid: run.runUid,
+            status: "partial_success",
+            summary: agentResult.summary,
+            issues: review.issues,
+            agentResult,
+          });
 
-        await updateMainAgentRun(
-          mainRunId,
-          composeStepFailureMessage({
-            step: resolvedStep,
-            evaluation,
-            repairDecision: repairDecision.action,
-            previousRunUid: run.runUid,
-          }),
-          "failed",
-          finalWorkContextId
-        );
+          await updateMainAgentRun(
+            mainRunId,
+            review.userQuestion || review.finalMessage || "需要你确认下一步操作。",
+            "success",
+            finalWorkContextId
+          );
+          return;
+        }
 
-        return;
+        if (review.decision === "fail") {
+          stepResults.push({
+            stepUid: resolvedStep.stepUid,
+            agentUid: resolvedStep.targetAgentUid,
+            runUid: run.runUid,
+            status: "failed",
+            summary: agentResult.summary,
+            issues: review.issues,
+            agentResult,
+          });
+
+          await updateMainAgentRun(
+            mainRunId,
+            review.finalMessage || "任务执行失败。",
+            "failed",
+            finalWorkContextId
+          );
+          return;
+        }
       }
 
       if (!acceptedRun || !acceptedAgentResult) {
@@ -731,12 +818,17 @@ async function executePlanAsync(
     }
   }
 
-  const finalMessage = composeExecutionResult(stepResults);
-  const finalStatus = stepResults.some((r) => r.status === "failed")
-    ? "failed"
-    : stepResults.some((r) => r.status === "partial_success")
-      ? "partial_success"
-      : "success";
+  const finalSummary = await mainAgent.summarizeFinalResult({
+    originalUserMessage,
+    plan,
+    stepResults,
+    producedArtifacts: allProducedArtifacts,
+    touchedRefs: extractTouchedRefsFromAgentResults(allAgentResults),
+    openIssues: extractOpenIssuesFromAgentResults(allAgentResults),
+  });
+
+  const finalStatus = finalSummary.status;
+  const finalMessage = finalSummary.finalAnswer;
 
   const producedArtifactRefs = allProducedArtifacts.map((artifact) => ({
     refId: `artifact:${artifact.artifactUid}`,
@@ -753,8 +845,12 @@ async function executePlanAsync(
       status: finalStatus,
       summary: finalMessage,
       producedArtifactRefs,
-      touchedRefs,
-      openIssues,
+      touchedRefs: touchedRefs.map((r) => r.refId),
+      openIssues: openIssues.map((issue) => ({
+        type: issue.type,
+        summary: issue.message,
+        severity: issue.severity as "low" | "medium" | "high" | undefined,
+      })),
     });
   }
 
@@ -764,6 +860,14 @@ async function executePlanAsync(
     finalStatus,
     finalWorkContextId
   );
+}
+
+function canRetryStep(input: {
+  stepUid: string;
+  retryState: StepRetryState;
+}): boolean {
+  const attempts = input.retryState.attemptsByStepUid.get(input.stepUid) ?? 0;
+  return attempts < MAX_STEP_RETRIES && input.retryState.totalRepairAttempts < MAX_TOTAL_REPAIRS;
 }
 
 function resolveStepInputRefIds(
@@ -1416,7 +1520,7 @@ function buildFinalResponse(results: Array<{ agentId: string; result: string }>,
 
 function extractTouchedRefsFromAgentResults(
   results: Array<Record<string, unknown>>
-): string[] {
+): Array<{ refId: string; title?: string }> {
   return Array.from(
     new Set(
       results.flatMap((result) => {
@@ -1451,15 +1555,17 @@ function extractTouchedRefsFromAgentResults(
           .filter((ref): ref is string => Boolean(ref));
       })
     )
-  ).slice(0, 20);
+  )
+    .slice(0, 20)
+    .map((refId) => ({ refId }));
 }
 
 function extractOpenIssuesFromAgentResults(
   results: Array<Record<string, unknown>>
 ): Array<{
-  refId?: string;
-  summary: string;
-  severity: "low" | "medium" | "high";
+  type?: string;
+  message: string;
+  severity?: string;
 }> {
   const allIssues = results.flatMap((result) => {
     const issues = Array.isArray(result.openIssues)
@@ -1478,14 +1584,14 @@ function extractOpenIssuesFromAgentResults(
           severity?: "low" | "medium" | "high";
         };
 
-        const summary =
-          item.summary ||
+        const message =
           item.message ||
+          item.summary ||
           (item.type ? `执行问题：${item.type}` : "执行过程中出现问题");
 
         return {
-          refId: item.refId,
-          summary,
+          type: item.type,
+          message,
           severity: item.severity ?? "medium",
         };
       })

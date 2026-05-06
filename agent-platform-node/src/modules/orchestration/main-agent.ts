@@ -4,6 +4,12 @@ import type { OrchestrationDecision, DelegateEnvelope } from "./orchestration.sc
 import type { PromptContext, AgentCapabilitySummary, WorkContextDetail } from "./context-builder.js";
 import { mainDecisionSchema } from "./main-decision.schema.js";
 import type { SessionRuntimeSnapshot, SessionContextIndex, MainDecision, MainDecisionInput } from "./orchestration.types.js";
+import { stepOutcomeReviewSchema, type StepOutcomeReview } from "./step-outcome-review.schema.js";
+import { finalResultSummarySchema, type FinalResultSummary } from "./final-result-summary.schema.js";
+import type { ExecutionPlan } from "./orchestration.types.js";
+import type { TaskEnvelope } from "./task-envelope.types.js";
+import type { AgentResult } from "../../runtime/agent-result.js";
+import type { StepEvaluation } from "./step-result-evaluator.js";
 
 // 主 Agent - 负责编排和委派
 export class MainAgent {
@@ -964,5 +970,287 @@ ${context.selectedWorkContext
    - 如果不确定 → clarify 向用户确认
 
 请给出详细的 reasoning 说明你的分析过程。`;
+  }
+
+  async reviewStepOutcome(input: {
+    originalUserMessage: string;
+    currentPlan: ExecutionPlan;
+    currentStep: ExecutionPlan["steps"][0];
+    taskEnvelope: TaskEnvelope;
+    agentResult: AgentResult;
+    ruleEvaluation: StepEvaluation;
+    stepResultsSoFar: Array<{
+      stepUid: string;
+      agentUid: string;
+      runUid: string;
+      status: string;
+      summary: string;
+      issues?: string[];
+    }>;
+  }): Promise<StepOutcomeReview> {
+    const systemPrompt = this.buildStepOutcomeReviewSystemPrompt();
+
+    const reviewInput = {
+      originalUserMessage: input.originalUserMessage,
+      currentStep: {
+        stepUid: input.currentStep.stepUid,
+        targetAgentUid: input.currentStep.targetAgentUid,
+        objective: input.currentStep.objective,
+        expectedResultKind: input.currentStep.expectedResultKind,
+        requireVerification: input.currentStep.requireVerification,
+        inputRefIds: input.currentStep.inputRefIds,
+        dependsOn: input.currentStep.dependsOn,
+      },
+      taskEnvelope: {
+        objective: input.taskEnvelope.objective,
+        retryContext: input.taskEnvelope.retryContext ?? null,
+        selectedContext: {
+          refs: input.taskEnvelope.selectedContext.refs.map((ref) => ({
+            refId: ref.refId,
+            kind: ref.kind,
+            title: ref.title,
+            status: ref.status,
+            summary: ref.summary,
+          })),
+          artifacts: input.taskEnvelope.selectedContext.artifacts.map((art) => ({
+            refId: art.refId,
+            title: art.title,
+            artifactRole: art.artifactRole,
+            summary: art.summary,
+            contentPreview:
+              art.contentText?.slice(0, 500) ??
+              (art.contentJson ? JSON.stringify(art.contentJson).slice(0, 500) : undefined),
+          })),
+          files: input.taskEnvelope.selectedContext.files.map((file) => ({
+            refId: file.refId,
+            path: file.path,
+            status: file.lastKnownStatus,
+            operation: file.lastKnownOperation,
+            summary: file.summary,
+          })),
+          resources: input.taskEnvelope.selectedContext.resources.map((resource) => ({
+            refId: resource.refId,
+            kind: resource.kind,
+            uri: resource.uri,
+            status: resource.lastKnownStatus,
+            operation: resource.lastKnownOperation,
+            summary: resource.summary,
+          })),
+        },
+        expectedResult: input.taskEnvelope.expectedResult,
+        constraints: input.taskEnvelope.constraints,
+      },
+      ruleEvaluation: input.ruleEvaluation,
+      agentResult: {
+        status: input.agentResult.status,
+        summary: input.agentResult.summary,
+        operations: input.agentResult.operations,
+        producedArtifacts: input.agentResult.producedArtifacts,
+        touchedResources: input.agentResult.touchedResources,
+        openIssues: input.agentResult.openIssues,
+        retryAdvice: input.agentResult.retryAdvice,
+      },
+      stepResultsSoFar: input.stepResultsSoFar,
+    };
+
+    const raw = await this.modelClient.complete({
+      systemPrompt,
+      userMessage: JSON.stringify(reviewInput, null, 2),
+      temperature: 0,
+    });
+
+    const json = this.extractJsonObject(raw.content);
+    const parsed = stepOutcomeReviewSchema.safeParse(json);
+
+    if (parsed.success) {
+      return parsed.data;
+    }
+
+    console.warn("[MainAgent] StepOutcomeReview parse failed:", parsed.error.message);
+
+    return {
+      decision: input.ruleEvaluation.status === "success" ? "continue" : "fail",
+      confidence: "low",
+      safeToUseProducedRefs: input.ruleEvaluation.status === "success",
+      issues: [
+        "StepOutcomeReview parse failed.",
+        ...input.ruleEvaluation.issues,
+      ],
+      finalMessage:
+        input.ruleEvaluation.status === "success"
+          ? undefined
+          : "步骤执行结果无法通过主 Agent 验收。",
+      reasoning: "Fallback decision because StepOutcomeReview JSON parsing failed.",
+    };
+  }
+
+  private buildStepOutcomeReviewSystemPrompt(): string {
+    return `你是主 Agent 的 Step Outcome Reviewer，不是执行器。
+
+你会收到：
+1. 原始用户任务
+2. 当前执行计划中的当前 step
+3. 当前 TaskEnvelope
+4. 子 Agent 执行后的 AgentResult
+5. 系统基础规则验收 ruleEvaluation
+6. 已完成 step 的简要结果
+
+你的任务：
+判断当前 step 是否可以被接受，以及下一步应该怎么做。
+
+你必须只输出严格 JSON，不要 Markdown，不要代码块，不要解释性文字。
+
+输出 JSON 格式：
+{
+  "decision": "continue | retry_same_agent | replan_remaining | ask_user | fail",
+  "confidence": "high | medium | low",
+  "safeToUseProducedRefs": true,
+  "issues": ["string"],
+  "retryInstruction": "string optional",
+  "replanInstruction": "string optional",
+  "userQuestion": "string optional",
+  "finalMessage": "string optional",
+  "reasoning": "string"
+}
+
+决策含义：
+- continue：当前 step 可以接受，可以继续执行后续 step。
+- retry_same_agent：当前 step 目标没有完成，但问题局部可修复，可以让同一个子 Agent 只修复当前 Objective。
+- replan_remaining：当前计划、输入 refs、上下文或结果不可靠，需要重新规划当前 step 或剩余步骤。
+- ask_user：缺少必须由用户确认的信息。
+- fail：不可恢复失败。
+
+核心判断规则：
+1. 不要只相信子 Agent 的 final answer，必须优先相信工具事实、AgentResult、touchedResources、producedArtifacts、openIssues。
+2. 如果 ruleEvaluation 有问题，必须结合语义判断是否真的影响后续。
+3. 如果 expectedResultKind=artifact，但没有 producedArtifacts：
+   - 如果只是忘记声明 artifact，且业务内容可靠，可以 retry_same_agent。
+   - 如果业务内容本身不可靠或来源污染，replan_remaining。
+4. 如果 expectedResultKind=file_change：
+   - 工具事实证明目标资源被正确修改且 verified=true，可以 continue。
+   - 如果只是日志结构缺失但工具事实足够明确，可以 continue，但 safeToUseProducedRefs 必须谨慎判断。
+5. 如果子 Agent 使用了 TaskEnvelope 明确输入之外的资源替代指定输入，通常必须 replan_remaining，safeToUseProducedRefs=false。
+6. 如果指定输入 refs 缺失、失效、读取失败，且子 Agent 又寻找其他文件替代，必须 replan_remaining，safeToUseProducedRefs=false。
+7. 如果结果可能被错误上下文污染，必须 safeToUseProducedRefs=false。
+8. retry_same_agent 只能用于局部格式修复或轻微遗漏，不能用于让 Agent 扩展任务范围。
+9. retryInstruction 必须明确约束：只修复当前 Objective，不要执行其他 step，不要使用未指定资源替代。
+10. replan_remaining 时，必须给出 replanInstruction，说明从哪里重新规划、哪些 refs 不可信。
+11. 如果可以继续，safeToUseProducedRefs 必须为 true。
+12. 如果 safeToUseProducedRefs=false，不应该 decision=continue。
+13. reasoning 简短说明，不超过 300 字。`;
+  }
+
+  async summarizeFinalResult(input: {
+    originalUserMessage: string;
+    plan: ExecutionPlan;
+    stepResults: Array<{
+      stepUid: string;
+      agentUid: string;
+      runUid: string;
+      status: string;
+      summary: string;
+      issues?: string[];
+      agentResult?: AgentResult;
+    }>;
+    producedArtifacts: Array<{
+      artifactUid: string;
+      title: string;
+    }>;
+    touchedRefs: Array<{
+      refId: string;
+      title?: string;
+    }>;
+    openIssues: Array<{
+      type?: string;
+      message: string;
+      severity?: string;
+    }>;
+  }): Promise<FinalResultSummary> {
+    const systemPrompt = this.buildFinalResultSummarySystemPrompt();
+
+    const summaryInput = {
+      originalUserMessage: input.originalUserMessage,
+      plan: {
+        mode: input.plan.mode,
+        steps: input.plan.steps.map((step) => ({
+          stepUid: step.stepUid,
+          targetAgentUid: step.targetAgentUid,
+          objective: step.objective,
+          expectedResultKind: step.expectedResultKind,
+        })),
+      },
+      stepResults: input.stepResults.map((result) => ({
+        stepUid: result.stepUid,
+        agentUid: result.agentUid,
+        runUid: result.runUid,
+        status: result.status,
+        summary: result.summary,
+        issues: result.issues ?? [],
+        producedArtifacts: result.agentResult?.producedArtifacts ?? [],
+        touchedResources: result.agentResult?.touchedResources ?? [],
+        openIssues: result.agentResult?.openIssues ?? [],
+      })),
+      producedArtifacts: input.producedArtifacts,
+      touchedRefs: input.touchedRefs,
+      openIssues: input.openIssues,
+    };
+
+    const raw = await this.modelClient.complete({
+      systemPrompt,
+      userMessage: JSON.stringify(summaryInput, null, 2),
+      temperature: 0.2,
+    });
+
+    const json = this.extractJsonObject(raw.content);
+    const parsed = finalResultSummarySchema.safeParse(json);
+
+    if (parsed.success) {
+      return parsed.data;
+    }
+
+    console.warn("[MainAgent] FinalResultSummary parse failed:", parsed.error.message);
+
+    const hasFailed = input.stepResults.some((item) => item.status === "failed");
+    const hasPartial = input.stepResults.some((item) => item.status === "partial_success");
+
+    return {
+      status: hasFailed ? "failed" : hasPartial ? "partial_success" : "success",
+      finalAnswer: input.stepResults.length > 0
+        ? input.stepResults[input.stepResults.length - 1].summary || "任务执行完成。"
+        : "任务执行完成。",
+      openIssues: input.openIssues.map((issue) => issue.message),
+      reasoning: "Fallback summary because FinalResultSummary JSON parsing failed.",
+    };
+  }
+
+  private buildFinalResultSummarySystemPrompt(): string {
+    return `你是主 Agent 的最终回复生成器。
+
+你会收到：
+1. 用户原始任务
+2. 执行计划
+3. 每个 step 的执行结果
+4. 产物、资源变更、open issues
+
+你的任务：
+生成给用户看的最终回复。
+
+要求：
+1. 只输出严格 JSON，不要 Markdown 代码块，不要解释性文字。
+2. 不要简单拼接每个子 Agent 的 summary。
+3. 要从用户视角总结最终结果。
+4. 如果任务成功，说明完成了什么，必要时列出关键文件或产物。
+5. 如果部分成功，说明已完成部分和待处理问题。
+6. 如果失败，说明失败原因和下一步需要用户或系统做什么。
+7. 不要输出完整 tool logs。
+8. 不要输出冗长执行过程。
+
+输出 JSON：
+{
+  "status": "success | partial_success | failed",
+  "finalAnswer": "给用户看的最终回复",
+  "openIssues": ["string"],
+  "reasoning": "string optional"
+}`;
   }
 }
