@@ -452,10 +452,10 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       await processChatAsyncOld(input, mainRunId);
       return;
     }
-
+    //新编排流程执行失败，更新运行状态为失败并记录错误信息
     await updateMainAgentRun(
       mainRunId,
-      `新编排流程执行失败：${error instanceof Error ? error.message : "未知错误"}`,
+      `执行失败：${error instanceof Error ? error.message : "未知错误"}`,
       "failed",
       finalWorkContextId
     );

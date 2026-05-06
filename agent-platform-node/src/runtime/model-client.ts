@@ -57,6 +57,7 @@ export class ModelClient {
     const config = getProviderConfig({
       provider: input.provider,
       baseUrl: input.baseUrl,
+      modelName: input.modelName,
     });
 
     const normalizedInput = this.normalizeInput(input, config);
@@ -97,6 +98,7 @@ export class ModelClient {
     const config = getProviderConfig({
       provider: providerName,
       baseUrl: input.baseUrl,
+      modelName: input.modelName,
     });
 
     const result = await this.invoke({
