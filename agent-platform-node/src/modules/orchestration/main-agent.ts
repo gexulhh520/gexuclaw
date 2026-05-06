@@ -39,7 +39,7 @@ export class MainAgent {
     const raw = await this.modelClient.complete({
       systemPrompt,
       userMessage: JSON.stringify(decisionInput, null, 2),
-      temperature: 0.1,
+      temperature: 1,
     });
 
   

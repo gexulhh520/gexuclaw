@@ -83,7 +83,7 @@ export class OpenAICompatibleProvider {
           }
         | undefined;
 
-      console.log("[OpenAICompatibleProvider] response message:", message);
+      //console.log("[OpenAICompatibleProvider] response message:", message);
       console.log("[OpenAICompatibleProvider] request done", {
         provider: this.config.provider,
         modelName: input.modelName,
@@ -91,7 +91,7 @@ export class OpenAICompatibleProvider {
         hasContent: !!message?.content,
         toolCallCount: message?.tool_calls?.length ?? 0,
       });
-      console.log("[OpenAICompatibleProvider] content:", typeof message?.content === "string" ? message.content : "",);
+      //console.log("[OpenAICompatibleProvider] content:", typeof message?.content === "string" ? message.content : "",);
       return {
         content: typeof message?.content === "string" ? message.content : "",
         reasoningContent:

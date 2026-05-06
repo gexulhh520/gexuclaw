@@ -58,7 +58,7 @@ export function getProviderConfig(input: {
         maxTokensParamName: "max_tokens",
         timeoutMs: Number(process.env.DEEPSEEK_TIMEOUT_MS || 60_000),
         maxRetries: Number(process.env.DEEPSEEK_MAX_RETRIES || 2),
-        defaultMaxTokens: Number(process.env.DEEPSEEK_DEFAULT_MAX_TOKENS || 2000),
+        defaultMaxTokens: Number(process.env.DEEPSEEK_DEFAULT_MAX_TOKENS || 86400),
       };
 
     case "kimi":
@@ -72,10 +72,10 @@ export function getProviderConfig(input: {
         omitEmptyTools: true,
         stripReasoningContentFromInput: false,
         mapDeveloperToSystem: true,
-        maxTokensParamName: "max_tokens",
+        maxTokensParamName: "max_completion_tokens",
         timeoutMs: Number(process.env.KIMI_TIMEOUT_MS || 180_000),
         maxRetries: Number(process.env.KIMI_MAX_RETRIES || 2),
-        defaultMaxTokens: Number(process.env.KIMI_DEFAULT_MAX_TOKENS || 2000),
+        defaultMaxTokens: Number(process.env.KIMI_DEFAULT_MAX_TOKENS || 86400),
       };
 
     case "openrouter":
