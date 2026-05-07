@@ -75,6 +75,14 @@ export async function registerPluginRoutes(app: FastifyInstance) {
       enabled: true,
       status: "active",
     });
+
+    // 创建后自动加载到注册表
+    try {
+      await pluginManager.enablePlugin(record.pluginId);
+    } catch (error) {
+      console.error(`[PluginRoutes] 创建插件后加载失败: ${record.pluginId}`, error);
+    }
+
     return ok(record);
   });
 

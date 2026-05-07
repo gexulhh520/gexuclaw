@@ -126,11 +126,11 @@
                 ✓
               </div>
             </div>
-            <div class="plugin-choice-name">{{ plugin.pluginName }}</div>
+            <div class="plugin-choice-name">{{ plugin.name }}</div>
             <div class="plugin-choice-desc">{{ plugin.description || '暂无描述' }}</div>
             <div class="plugin-choice-meta">
               <span class="plugin-badge" :class="plugin.providerType">{{ plugin.providerType }}</span>
-              <span class="plugin-tools">{{ plugin.toolCount }} 工具</span>
+              <span class="plugin-tools">{{ plugin.pluginType }}</span>
             </div>
           </button>
         </div>
@@ -168,7 +168,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
 import { ElMessage } from "element-plus";
-import { agentPlatformApi, type ModelProfileRecord, type PluginCatalogItem, type CreateAgentInput } from "@/api/agentPlatform";
+import { agentPlatformApi, type ModelProfileRecord, type PluginRecord, type CreateAgentInput } from "@/api/agentPlatform";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -181,7 +181,7 @@ const emit = defineEmits<{
   (e: "created", agent: { agentUid: string; name: string }): void;
 }>();
 
-const plugins = ref<PluginCatalogItem[]>([]);
+const plugins = ref<PluginRecord[]>([]);
 const pluginsLoading = ref(false);
 const isSubmitting = ref(false);
 const nameError = ref("");
@@ -255,10 +255,11 @@ function checkAgentNameDuplicate() {
 async function loadPlugins() {
   pluginsLoading.value = true;
   try {
-    const catalog = await agentPlatformApi.getPluginsCatalog();
-    plugins.value = catalog;
+    // 使用 listPlugins 从数据库获取所有插件（包括外部插件）
+    const pluginList = await agentPlatformApi.listPlugins();
+    plugins.value = pluginList;
   } catch (error) {
-    console.error("Failed to load plugins catalog:", error);
+    console.error("Failed to load plugins:", error);
     ElMessage.error("加载插件列表失败");
     plugins.value = [];
   } finally {
