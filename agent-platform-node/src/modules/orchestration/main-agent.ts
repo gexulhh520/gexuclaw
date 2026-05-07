@@ -763,13 +763,15 @@ ${context.sessionDescription || "无特定目标"}
 
 ## 输出格式（JSON）
 {
-  "decision": "continue | retry_same_agent | replan_remaining | stop",
+  "decision": "continue | retry_same_agent | replan_remaining | ask_user | fail",
   "safeToUseProducedRefs": true | false,
   "issues": ["问题1", "问题2"],
   "confidence": "high | medium | low",
   "reasoning": "分析理由",
   "retryInstruction": "重试时的具体指示（decision=retry_same_agent 时）",
-  "finalMessage": "最终返回给用户的消息（decision=stop 时）"
+  "replanInstruction": "重新规划时的指示（decision=replan_remaining 时）",
+  "userQuestion": "询问用户的问题（decision=ask_user 时）",
+  "finalMessage": "最终返回给用户的消息（decision=fail 时）"
 }
 
 ## 决策规则
@@ -785,7 +787,11 @@ ${context.sessionDescription || "无特定目标"}
    - 当当前步骤成功但后续计划需要调整
    - 或当前步骤失败但可以通过调整计划继续
 
-4. decision=stop: 停止执行，向用户报告
+4. decision=ask_user: 向用户询问，暂停执行
+   - 当需要用户确认或提供额外信息
+   - 提供清晰的 userQuestion
+
+5. decision=fail: 停止执行，向用户报告失败
    - 当重试次数已达上限
    - 当问题无法自动解决，需要用户介入
    - 提供清晰的 finalMessage 说明情况

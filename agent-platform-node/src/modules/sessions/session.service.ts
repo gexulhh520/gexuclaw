@@ -96,14 +96,6 @@ export async function getSessionByUid(sessionUid: string) {
 export async function getSessionWorkbench(sessionUid: string) {
   const session = await getSessionByUid(sessionUid);
 
-  // 加载该会话的 workContexts（按更新时间倒序）
-  const workContextList = await db
-    .select()
-    .from(workContexts)
-    .where(eq(workContexts.sessionId, sessionUid))
-    .orderBy(desc(workContexts.updatedAt))
-    .limit(10);
-
   // 加载该会话的最近 runs
   const runList = await db
     .select()
@@ -112,24 +104,17 @@ export async function getSessionWorkbench(sessionUid: string) {
     .orderBy(desc(agentRuns.id))
     .limit(20);
 
-  // 如果有 workContext，加载最近的 artifacts
-  let artifactList: typeof agentArtifacts.$inferSelect[] = [];
-  if (workContextList.length > 0) {
-    const workContextIds = workContextList.map(wc => wc.id);
-    artifactList = await db
-      .select()
-      .from(agentArtifacts)
-      .where(eq(agentArtifacts.workContextId, workContextIds[0]))
-      .orderBy(desc(agentArtifacts.id))
-      .limit(20);
-  }
+  // 加载该会话的 artifacts（按 sessionId 查询）
+  const artifactList = await db
+    .select()
+    .from(agentArtifacts)
+    .where(eq(agentArtifacts.sessionId, sessionUid))
+    .orderBy(desc(agentArtifacts.id))
+    .limit(20);
 
   return {
     session,
-    workContexts: workContextList,
     runs: runList,
     artifacts: artifactList,
-    // 默认选中最近活跃的 workContext
-    selectedWorkContext: workContextList[0] || null,
   };
 }

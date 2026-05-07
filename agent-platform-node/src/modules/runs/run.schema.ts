@@ -5,7 +5,6 @@ export const runAgentSchema = z.object({
   handoffNote: z.string().optional(),
   userId: z.string().optional(),
   sessionId: z.string().optional(),
-  workContextId: z.string().optional(),
   mode: z.enum(["standalone", "subagent", "main"]).default("standalone"),
 });
 

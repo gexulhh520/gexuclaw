@@ -12,7 +12,6 @@ export async function registerRunRoutes(app: FastifyInstance) {
     return ok(
       await listRuns({
         agentUid: request.query.agentUid,
-        workContextId: request.query.workContextId,
         sessionId: request.query.sessionId,
         limit: request.query.limit ? Number(request.query.limit) : undefined,
       }),

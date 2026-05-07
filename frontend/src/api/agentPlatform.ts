@@ -63,7 +63,6 @@ export type AgentRunRecord = {
   agentVersionId: number
   userId: string | null
   sessionId: string | null
-  workContextId: string | null
   parentOrchestrationEventId: string | null
   parentRunId: number | null
   mode: string
@@ -149,26 +148,6 @@ export type SessionRecord = {
   updatedAt: string
 }
 
-export type WorkContextRecord = {
-  id: number
-  workContextUid: string
-  title: string
-  goal: string
-  userId: string | null
-  sessionId: string | null
-  projectId: string | null
-  source: string
-  status: string
-  currentStage: string
-  currentRunId: number | null
-  latestArtifactId: number | null
-  runRefsJson: string
-  artifactRefsJson: string
-  metadataJson: string
-  createdAt: string
-  updatedAt: string
-}
-
 // Artifact 类型枚举
 export type ArtifactType = 'text' | 'structured_data' | 'page' | 'image' | 'link' | 'file' | 'collection'
 
@@ -178,7 +157,7 @@ export type ArtifactRole = 'input' | 'reference' | 'intermediate' | 'draft' | 'f
 export type AgentArtifactRecord = {
   id: number
   artifactUid: string
-  workContextId: number
+  sessionId: string | null
   runId: number | null
   artifactType: ArtifactType
   artifactRole: ArtifactRole
@@ -210,27 +189,15 @@ export type CreateSessionInput = {
   metadata?: Record<string, unknown>
 }
 
-export type CreateWorkContextInput = {
-  title: string
-  goal?: string
-  userId?: string
-  sessionId?: string
-  projectId?: string
-  source?: string
-  metadata?: Record<string, unknown>
-}
-
 // Orchestration Types
 export type ChatRequestInput = {
   sessionId: string
   message: string
-  workContextId?: string
   selectedAgentId?: string
 }
 
 export type ChatResponse = {
   message: string
-  workContextId: string
   runId?: string
   agentId?: string
   artifacts?: Array<{
@@ -425,7 +392,6 @@ export const agentPlatformApi = {
       mode?: 'standalone' | 'subagent' | 'main'
       sessionId?: string
       userId?: string
-      workContextId?: string
     } = {}
   ) {
     const { data } = await httpClient.post<ApiEnvelope<{ runUid: string; status: string; summary: string; stepsCount: number }>>(
@@ -435,10 +401,10 @@ export const agentPlatformApi = {
     return unwrap(data)
   },
 
-  async listRuns(params: { agentUid?: string; sessionId?: string; workContextId?: string; limit?: number } = {}) {
-    const { agentUid, sessionId, workContextId, limit = 20 } = params
+  async listRuns(params: { agentUid?: string; sessionId?: string; limit?: number } = {}) {
+    const { agentUid, sessionId, limit = 20 } = params
     const { data } = await httpClient.get<ApiEnvelope<AgentRunRecord[]>>('/runs', {
-      params: { agentUid, sessionId, workContextId, limit },
+      params: { agentUid, sessionId, limit },
     })
     return unwrap(data)
   },
@@ -601,35 +567,17 @@ export const agentPlatformApi = {
     return unwrap(data)
   },
 
-  // WorkContexts API
-  async listWorkContexts(params: { sessionId?: string; projectId?: string; limit?: number } = {}) {
-    const { data } = await httpClient.get<ApiEnvelope<WorkContextRecord[]>>('/work-contexts', {
-      params,
-    })
-    return unwrap(data)
-  },
-
-  async createWorkContext(input: CreateWorkContextInput) {
-    const { data } = await httpClient.post<ApiEnvelope<WorkContextRecord>>('/work-contexts', input)
-    return unwrap(data)
-  },
-
-  async getWorkContext(workContextUid: string) {
-    const { data } = await httpClient.get<ApiEnvelope<WorkContextRecord>>(`/work-contexts/${workContextUid}`)
-    return unwrap(data)
-  },
-
   // Artifacts API
-  async listArtifacts(workContextUid: string) {
+  async listArtifacts(sessionId: string) {
     const { data } = await httpClient.get<ApiEnvelope<AgentArtifactRecord[]>>(
-      `/work-contexts/${workContextUid}/artifacts`
+      `/sessions/${sessionId}/artifacts`
     )
     return unwrap(data)
   },
 
-  async createArtifact(workContextUid: string, input: CreateArtifactInput) {
+  async createArtifact(sessionId: string, input: CreateArtifactInput) {
     const { data } = await httpClient.post<ApiEnvelope<AgentArtifactRecord>>(
-      `/work-contexts/${workContextUid}/artifacts`,
+      `/sessions/${sessionId}/artifacts`,
       input
     )
     return unwrap(data)
@@ -639,26 +587,9 @@ export const agentPlatformApi = {
   async getSessionWorkbench(sessionUid: string) {
     const { data } = await httpClient.get<ApiEnvelope<{
       session: SessionRecord
-      workContexts: WorkContextRecord[]
       runs: AgentRunRecord[]
       artifacts: AgentArtifactRecord[]
-      selectedWorkContext: WorkContextRecord | null
     }>>(`/sessions/${sessionUid}/workbench`)
-    return unwrap(data)
-  },
-
-  async getWorkContextWorkbench(workContextUid: string) {
-    const { data } = await httpClient.get<ApiEnvelope<{
-      workContext: WorkContextRecord & {
-        currentStage: string
-        progressSummary: string
-        nextAction: string
-      }
-      artifacts: AgentArtifactRecord[]
-      runs: AgentRunRecord[]
-      latestArtifact: AgentArtifactRecord | null
-      latestRun: AgentRunRecord | null
-    }>>(`/work-contexts/${workContextUid}/workbench`)
     return unwrap(data)
   },
 

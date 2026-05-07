@@ -4,7 +4,6 @@ import { agentRunSteps, agentRuns, agents, modelInvocations } from "../../db/sch
 import { AgentRuntime } from "../../runtime/agent-runtime.js";
 import { notFound } from "../../shared/errors.js";
 import { getCurrentAgentVersion } from "../agents/agent.service.js";
-import { getWorkContextByUid } from "../work-contexts/work-context.service.js";
 import { pluginRegistry } from "../plugins/plugin-registry-instance.js";
 import type { RunAgentInput } from "./run.schema.js";
 
@@ -13,10 +12,6 @@ const runtime = new AgentRuntime({ pluginRegistry });
 export async function runAgent(agentUid: string, input: RunAgentInput) {
   // run API 默认取当前发布版本，不要求调用方自己传 version id。
   const { agent, version } = await getCurrentAgentVersion(agentUid);
-
-  if (input.workContextId) {
-    await getWorkContextByUid(input.workContextId);
-  }
 
   return runtime.run({
     agentRecord: agent,
@@ -35,7 +30,7 @@ export async function getRunByUid(runUid: string) {
   return run;
 }
 
-export async function listRuns(input?: { agentUid?: string; workContextId?: string; sessionId?: string; limit?: number }) {
+export async function listRuns(input?: { agentUid?: string; sessionId?: string; limit?: number }) {
   const limit = Math.min(Math.max(input?.limit ?? 20, 1), 100);
 
   if (input?.agentUid) {
@@ -50,21 +45,6 @@ export async function listRuns(input?: { agentUid?: string; workContextId?: stri
       .from(agentRuns)
       .innerJoin(agents, eq(agentRuns.agentId, agents.id))
       .where(eq(agentRuns.agentId, agent.id))
-      .orderBy(desc(agentRuns.id))
-      .limit(limit);
-    
-    return runs.map(r => ({ ...r.run, agentName: r.agentName }));
-  }
-
-  if (input?.workContextId) {
-    const runs = await db
-      .select({
-        run: agentRuns,
-        agentName: agents.name,
-      })
-      .from(agentRuns)
-      .innerJoin(agents, eq(agentRuns.agentId, agents.id))
-      .where(eq(agentRuns.workContextId, input.workContextId))
       .orderBy(desc(agentRuns.id))
       .limit(limit);
     
