@@ -25,7 +25,6 @@ export async function runAgent(agentUid: string, input: RunAgentInput) {
     handoffNote: input.handoffNote,
     userId: input.userId,
     sessionId: input.sessionId,
-    workContextId: input.workContextId,
     mode: input.mode,
   });
 }

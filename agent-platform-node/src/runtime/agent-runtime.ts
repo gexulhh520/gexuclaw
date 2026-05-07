@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { agentRunSteps, agentRuns, modelInvocations, modelProfiles, workContexts } from "../db/schema.js";
+import { agentRunSteps, agentRuns, modelInvocations, modelProfiles } from "../db/schema.js";
 import { jsonParse, jsonStringify } from "../shared/json.js";
 import { makeUid } from "../shared/ids.js";
 import { nowIso } from "../shared/time.js";
@@ -57,7 +57,6 @@ type RunAgentInputExtended = {
   taskEnvelope?: TaskEnvelope;
   userId?: string;
   sessionId?: string;
-  workContextId?: string;
   mode: "standalone" | "subagent" | "main";
   runUid?: string; // 用于事件推送
 };
@@ -87,7 +86,6 @@ type RunAgentInput = {
   taskEnvelope?: TaskEnvelope;
   userId?: string;
   sessionId?: string;
-  workContextId?: string;
   parentRunId?: number;  // 父 run 的 ID，用于关联主 Agent 和子 Agent
   mode: "standalone" | "subagent" | "main";
 };
@@ -218,7 +216,7 @@ export class AgentRuntime {
         ? renderTaskEnvelopeForAgent(input.taskEnvelope)
         : input.originalUserMessage || input.userMessage;
 
-    console.log(`[AgentRuntime] Creating run with sessionId: ${input.sessionId}, workContextId: ${input.workContextId}, parentRunId: ${input.parentRunId}`);
+    console.log(`[AgentRuntime] Creating run with sessionId: ${input.sessionId}, parentRunId: ${input.parentRunId}`);
     const [run] = await db
       .insert(agentRuns)
       .values({
@@ -227,7 +225,6 @@ export class AgentRuntime {
         agentVersionId: input.versionRecord.id,
         userId: input.userId,
         sessionId: input.sessionId,
-        workContextId: input.workContextId,
         parentRunId: input.parentRunId,
         mode: input.mode,
         status: "running",
@@ -242,16 +239,6 @@ export class AgentRuntime {
       .returning();
     this.currentRunId = run.id;
     console.log(`[AgentRuntime] Run created: ${run.runUid} with sessionId: ${run.sessionId}, id=${run.id}`);
-
-    if (input.workContextId) {
-      await db
-        .update(workContexts)
-        .set({
-          currentRunId: run.id,
-          updatedAt: now,
-        })
-        .where(eq(workContexts.workContextUid, input.workContextId));
-    }
 
     try {
       // AgentRun 先落库再执行主循环，这样即使模型或工具失败，也能留下失败轨迹。
@@ -287,16 +274,6 @@ export class AgentRuntime {
         resultSummary: agentResult.summary,
         updatedAt: finishedAt,
       });
-
-      if (input.workContextId) {
-        await db
-          .update(workContexts)
-          .set({
-            currentRunId: run.id,
-            updatedAt: finishedAt,
-          })
-          .where(eq(workContexts.workContextUid, input.workContextId));
-      }
 
       return {
         runId: run.id,
@@ -517,7 +494,6 @@ export class AgentRuntime {
       if (directives.artifactDecisions.length > 0) {
         const decisionResult = await persistArtifactsFromAgentDecisions({
           sessionId: args.input.sessionId || "",
-          workContextUid: args.input.workContextId,
           runId: args.runId,
           pendingCandidates: pendingArtifactCandidates,
           decisions: directives.artifactDecisions,
@@ -534,7 +510,6 @@ export class AgentRuntime {
       if (directives.declaredArtifacts.length > 0) {
         await persistDeclaredArtifacts({
           sessionId: args.input.sessionId || "",
-          workContextUid: args.input.workContextId,
           runId: args.runId,
           declaredArtifacts: directives.declaredArtifacts,
         });
@@ -574,7 +549,6 @@ export class AgentRuntime {
         if (pendingArtifactCandidates.length > 0) {
           await persistArtifactsFromToolResult({
             sessionId: args.input.sessionId || "",
-            workContextUid: args.input.workContextId,
             runId: args.runId,
             toolResult: {
               success: true,
@@ -706,7 +680,6 @@ export class AgentRuntime {
     if (pendingArtifactCandidates.length > 0) {
       await persistArtifactsFromToolResult({
         sessionId: args.input.sessionId || "",
-        workContextUid: args.input.workContextId,
         runId: args.runId,
         toolResult: {
           success: true,

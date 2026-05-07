@@ -1,17 +1,14 @@
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { agents, agentRuns, agentArtifacts, agentVersions, modelProfiles, sessions, workContexts } from "../../db/schema.js";
+import { agents, agentRuns, agentArtifacts, agentVersions, modelProfiles, sessions } from "../../db/schema.js";
 import { notFound } from "../../shared/errors.js";
 import { makeUid } from "../../shared/ids.js";
 import { jsonParse, jsonStringify } from "../../shared/json.js";
 import { nowIso } from "../../shared/time.js";
 import { getCurrentAgentVersion } from "../agents/agent.service.js";
 import { AgentRuntime } from "../../runtime/agent-runtime.js";
-import { ContextBuilder } from "./context-builder.js";
 import { MainAgent } from "./main-agent.js";
 import { runEventBus } from "../../shared/event-bus.js";
-import { updateWorkContextRunBinding } from "../work-contexts/work-context.service.js";
-import { updateWorkContextProjection } from "../work-contexts/work-context-projection.service.js";
 import { pluginRegistry } from "../plugins/plugin-registry-instance.js";
 import { SessionRuntimeSnapshotBuilder } from "./session-runtime-snapshot-builder.js";
 import { SessionContextIndexBuilder } from "./session-context-index-builder.js";
@@ -33,7 +30,6 @@ import {
 import { buildRetryTaskEnvelope } from "./retry-task-envelope.js";
 
 const runtime = new AgentRuntime({ pluginRegistry });
-const contextBuilder = new ContextBuilder();
 const mainAgent = new MainAgent();
 const snapshotBuilder = new SessionRuntimeSnapshotBuilder();
 const contextIndexBuilder = new SessionContextIndexBuilder();
@@ -41,7 +37,7 @@ const decisionValidator = new DecisionContractValidator();
 const planCompiler = new ExecutionPlanCompiler();
 const taskEnvelopeBuilder = new TaskEnvelopeBuilder();
 
-const ENABLE_LEGACY_FALLBACK = process.env.ENABLE_LEGACY_FALLBACK === "true";
+const ENABLE_LEGACY_FALLBACK = false;
 
 // 最大链式委派深度，防止无限循环
 const MAX_DELEGATION_DEPTH = 5;
@@ -74,38 +70,184 @@ async function getAvailableAgents(): Promise<AgentCapabilitySummary[]> {
   });
 }
 
-// 创建新的 WorkContext
-async function createWorkContext(sessionId: string, title: string, goal: string) {
-  const now = nowIso();
-  const [workContext] = await db
-    .insert(workContexts)
-    .values({
-      workContextUid: makeUid("work_context"),
-      sessionId,
-      title,
-      goal,
-      status: "active",
-      source: "llm_generated",
-      metadataJson: jsonStringify({
-        createdBy: "main_agent",
-        createdAt: now,
-        projection: {
-          currentStage: "created",
-          progressSummary: goal,
-          currentFocus: null,
-          recentRefs: [],
-          openIssues: [],
-          lastRunUid: null,
-          lastSuccessfulRunUid: null,
-          lastFailedRunUid: null,
-        },
-      }),
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
+// 判断是否是继续/重试类消息
+function isContinuationMessage(message: string): boolean {
+  const text = message.trim();
+  return /^(继续|继续执行|接着|接着执行|重试|再试一次|重新试试|再来一次|刚才那个|上次那个|继续刚才|继续上次|恢复执行)$/.test(text);
+}
 
-  return workContext;
+// 获取 Session metadata
+async function getSessionMetadata(sessionId: string) {
+  const [session] = await db
+    .select({ metadataJson: sessions.metadataJson })
+    .from(sessions)
+    .where(eq(sessions.sessionUid, sessionId))
+    .limit(1);
+
+  return jsonParse<Record<string, any>>(session?.metadataJson, {});
+}
+
+// 更新 Session metadata
+async function patchSessionMetadata(
+  sessionId: string,
+  patch: Record<string, unknown>
+) {
+  const [session] = await db
+    .select({ metadataJson: sessions.metadataJson })
+    .from(sessions)
+    .where(eq(sessions.sessionUid, sessionId))
+    .limit(1);
+
+  const metadata = jsonParse<Record<string, unknown>>(session?.metadataJson, {});
+  const next = {
+    ...metadata,
+    ...patch,
+  };
+
+  await db
+    .update(sessions)
+    .set({
+      metadataJson: jsonStringify(next),
+      updatedAt: nowIso(),
+    })
+    .where(eq(sessions.sessionUid, sessionId));
+
+  return next;
+}
+
+// 查找最近可恢复的 run
+async function findLatestRecoverableRun(sessionId: string) {
+  const metadata = await getSessionMetadata(sessionId);
+
+  if (metadata.lastRecoverableRunUid) {
+    const [run] = await db
+      .select()
+      .from(agentRuns)
+      .where(eq(agentRuns.runUid, String(metadata.lastRecoverableRunUid)))
+      .limit(1);
+
+    if (run) return run;
+  }
+
+  const runs = await db
+    .select()
+    .from(agentRuns)
+    .where(eq(agentRuns.sessionId, sessionId))
+    .orderBy(desc(agentRuns.id))
+    .limit(20);
+
+  return runs.find((run) => run.status === "failed" && !!run.userMessage);
+}
+
+// 解析有效用户消息（处理继续/重试场景）
+async function resolveEffectiveUserMessage(input: {
+  sessionId: string;
+  message: string;
+}) {
+  if (!isContinuationMessage(input.message)) {
+    return input.message;
+  }
+
+  const metadata = await getSessionMetadata(input.sessionId);
+
+  if (
+    typeof metadata.lastEffectiveUserMessage === "string" &&
+    metadata.lastEffectiveUserMessage.trim()
+  ) {
+    return metadata.lastEffectiveUserMessage;
+  }
+
+  const latestRecoverableRun = await findLatestRecoverableRun(input.sessionId);
+
+  return latestRecoverableRun?.userMessage || input.message;
+}
+
+// 标记 Session 为 planning 状态
+async function markSessionPlanning(input: {
+  sessionId: string;
+  runUid: string;
+  effectiveUserMessage: string;
+}) {
+  const metadata = await getSessionMetadata(input.sessionId);
+  const recentRefs = Array.isArray(metadata.recentRefs) ? metadata.recentRefs : [];
+
+  await patchSessionMetadata(input.sessionId, {
+    currentStage: "planning",
+    recoverable: true,
+    lastEffectiveUserMessage: input.effectiveUserMessage,
+    lastRecoverableRunUid: input.runUid,
+    recentRefs: Array.from(new Set([`run:${input.runUid}`, ...recentRefs])).slice(0, 20),
+  });
+}
+
+// 标记 Session 为 blocked 状态
+async function markSessionBlocked(input: {
+  sessionId: string;
+  runUid: string;
+  effectiveUserMessage: string;
+  error: unknown;
+}) {
+  const metadata = await getSessionMetadata(input.sessionId);
+  const recentRefs = Array.isArray(metadata.recentRefs) ? metadata.recentRefs : [];
+  const openIssues = Array.isArray(metadata.openIssues) ? metadata.openIssues : [];
+
+  const errorMessage =
+    input.error instanceof Error ? input.error.message : String(input.error || "未知错误");
+
+  await patchSessionMetadata(input.sessionId, {
+    currentStage: "blocked",
+    recoverable: true,
+    lastEffectiveUserMessage: input.effectiveUserMessage,
+    lastRecoverableRunUid: input.runUid,
+    lastFailedRunUid: input.runUid,
+    lastError: errorMessage,
+    lastErrorAt: nowIso(),
+    recentRefs: Array.from(new Set([`run:${input.runUid}`, ...recentRefs])).slice(0, 20),
+    openIssues: [
+      {
+        refId: `run:${input.runUid}`,
+        summary: `执行失败：${errorMessage}`,
+        severity: "high",
+        status: "open",
+      },
+      ...openIssues,
+    ].slice(0, 10),
+  });
+
+  await db
+    .update(agentRuns)
+    .set({
+      errorMessage,
+      updatedAt: nowIso(),
+    })
+    .where(eq(agentRuns.runUid, input.runUid));
+}
+
+// 标记 Session 为 completed 状态
+async function markSessionCompleted(input: {
+  sessionId: string;
+  runUid: string;
+  effectiveUserMessage: string;
+  summary: string;
+}) {
+  const metadata = await getSessionMetadata(input.sessionId);
+  const recentRefs = Array.isArray(metadata.recentRefs) ? metadata.recentRefs : [];
+  const openIssues = Array.isArray(metadata.openIssues) ? metadata.openIssues : [];
+
+  await patchSessionMetadata(input.sessionId, {
+    currentStage: "completed",
+    recoverable: false,
+    lastEffectiveUserMessage: input.effectiveUserMessage,
+    lastSuccessfulRunUid: input.runUid,
+    lastRecoverableRunUid: null,
+    lastError: null,
+    progressSummary: input.summary,
+    recentRefs: Array.from(new Set([`run:${input.runUid}`, ...recentRefs])).slice(0, 20),
+    openIssues: openIssues.map((issue: any) => ({
+      ...issue,
+      status: "resolved",
+    })),
+  });
 }
 
 // 获取或创建主 Agent 记录
@@ -323,16 +465,28 @@ export async function handleChat(input: ChatRequestInput): Promise<ChatResponse>
 
 // 异步处理完整的聊天流程（主 Agent 决策 + 子 Agent 执行）
 async function processChatAsync(input: ChatRequestInput, mainRunId: string): Promise<void> {
-  const { sessionId, message, selectedAgentId } = input;
+  const { sessionId, message } = input;
+
+  let effectiveUserMessage = message;
 
   try {
-    // ===== 新流程：基于 SessionRuntimeSnapshot + SessionContextIndex =====
-    console.log("[processChatAsync] 尝试新结构化决策流程...");
+    console.log("[processChatAsync] Session-only orchestration flow...");
+
+    effectiveUserMessage = await resolveEffectiveUserMessage({
+      sessionId,
+      message,
+    });
+
+    await markSessionPlanning({
+      sessionId,
+      runUid: mainRunId,
+      effectiveUserMessage,
+    });
 
     const snapshot = await snapshotBuilder.build({
       sessionId,
       userMessage: message,
-      effectiveUserMessage: message,
+      effectiveUserMessage,
     });
 
     const contextIndex = contextIndexBuilder.build(snapshot);
@@ -350,20 +504,21 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
     });
 
     if (!validation.valid) {
-      console.log("[processChatAsync] Decision validation failed, fallback to ask_user");
-      await updateMainAgentRun(
-        mainRunId,
-        validation.fallbackDecision.ambiguity?.question || "我需要确认一下你要继续处理哪一项。",
-        "success"
-      );
+      const question =
+        validation.fallbackDecision.ambiguity?.question ||
+        "我需要确认下一步操作。";
+
+      await updateMainAgentRun(mainRunId, question, "success");
       return;
     }
 
     const normalizedDecision = validation.normalizedDecision;
 
-    // ask_user: 直接返回问题给用户
     if (normalizedDecision.decisionType === "ask_user") {
-      const question = normalizedDecision.ambiguity?.question || "我需要确认一下你要继续处理哪一项。";
+      const question =
+        normalizedDecision.ambiguity?.question ||
+        "我需要确认下一步操作。";
+
       await updateMainAgentRun(mainRunId, question, "success");
       return;
     }
@@ -374,52 +529,73 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       contextIndex,
     });
 
-    console.log(`[processChatAsync] ExecutionPlan mode: ${plan.mode}, steps: ${plan.steps.length}`);
-
-    // 根据 plan mode 执行
     switch (plan.mode) {
       case "direct_response": {
-        await updateMainAgentRun(
-          mainRunId,
-          validation.normalizedDecision.response || "我已收到您的消息",
-          "success"
-        );
+        const response = normalizedDecision.response || "我已收到您的消息";
+
+        await updateMainAgentRun(mainRunId, response, "success");
+
+        await markSessionCompleted({
+          sessionId,
+          runUid: mainRunId,
+          effectiveUserMessage,
+          summary: response,
+        });
+
         return;
       }
 
       case "single_agent":
       case "sequential_agents": {
-        await updateMainAgentRun(mainRunId, "正在委派任务给子 Agent...", "running");
-        await executePlanAsync(plan, sessionId, message, mainRunId, contextIndex);
+        await updateMainAgentRun(
+          mainRunId,
+          "正在委派任务给子 Agent...",
+          "running"
+        );
+
+        await executePlanAsync(
+          plan,
+          sessionId,
+          effectiveUserMessage,
+          mainRunId,
+          contextIndex
+        );
+
         return;
       }
 
       default: {
-        if (ENABLE_LEGACY_FALLBACK) {
-          console.log("[processChatAsync] Plan mode not handled, fallback to old flow");
-          await processChatAsyncOld(input, mainRunId);
-        } else {
-          await updateMainAgentRun(
-            mainRunId,
-            `新编排流程暂不支持 plan mode: ${plan.mode}`,
-            "failed"
-          );
-        }
+        const error = new Error(`暂不支持 plan mode: ${plan.mode}`);
+
+        await markSessionBlocked({
+          sessionId,
+          runUid: mainRunId,
+          effectiveUserMessage,
+          error,
+        });
+
+        await updateMainAgentRun(
+          mainRunId,
+          error.message,
+          "failed"
+        );
+
         return;
       }
     }
   } catch (error) {
-    console.error("[processChatAsync] New flow error:", error);
+    console.error("[processChatAsync] Session-only flow error:", error);
 
-    if (ENABLE_LEGACY_FALLBACK) {
-      console.log("[processChatAsync] Fallback to old flow due to error");
-      await processChatAsyncOld(input, mainRunId);
-      return;
-    }
-    //新编排流程执行失败，更新运行状态为失败并记录错误信息
+    await markSessionBlocked({
+      sessionId,
+      runUid: mainRunId,
+      effectiveUserMessage,
+      error,
+    });
+
     await updateMainAgentRun(
       mainRunId,
-      `执行失败：${error instanceof Error ? error.message : "未知错误"}`,
+      `执行失败：${error instanceof Error ? error.message : "未知错误"}。任务已记录，你可以发送"继续"重试。`,
       "failed"
     );
   }
@@ -505,7 +681,6 @@ async function executePlanAsync(
           originalUserMessage,
           taskEnvelope,
           sessionId,
-          workContextId: "",
           parentRunId: mainRun.id,
           mode: "subagent",
         });
@@ -760,22 +935,29 @@ async function executePlanAsync(
       }
     } catch (error) {
       console.error(`[executePlanAsync] Step failed:`, error);
+
+      await markSessionBlocked({
+        sessionId,
+        runUid: mainRunId,
+        effectiveUserMessage: originalUserMessage,
+        error,
+      });
+
       await updateMainAgentRun(
         mainRunId,
-        `执行失败：${error instanceof Error ? error.message : "未知错误"}`,
+        `执行失败：${error instanceof Error ? error.message : "未知错误"}。任务已记录，你可以发送"继续"重试。`,
         "failed"
       );
+
       return;
     }
   }
 
-  const finalSummary = await mainAgent.summarizeFinalResult({
+  const finalSummary = await mainAgent.generateFinalResultSummary({
     originalUserMessage,
     plan,
     stepResults,
-    producedArtifacts: allProducedArtifacts,
-    touchedRefs: extractTouchedRefsFromAgentResults(allAgentResults),
-    openIssues: extractOpenIssuesFromAgentResults(allAgentResults),
+    allProducedArtifacts,
   });
 
   const finalStatus = finalSummary.status;
@@ -786,6 +968,22 @@ async function executePlanAsync(
     finalMessage,
     finalStatus
   );
+
+  if (finalStatus === "success") {
+    await markSessionCompleted({
+      sessionId,
+      runUid: mainRunId,
+      effectiveUserMessage: originalUserMessage,
+      summary: finalMessage,
+    });
+  } else {
+    await markSessionBlocked({
+      sessionId,
+      runUid: mainRunId,
+      effectiveUserMessage: originalUserMessage,
+      error: new Error(finalMessage),
+    });
+  }
 }
 
 function canRetryStep(input: {
@@ -1069,21 +1267,10 @@ async function handleDelegateChain(
     };
   }
 
-  // 获取或创建 WorkContext
-  let workContextId = decision.workContextId;
-  if (!workContextId) {
-    const workContext = await createWorkContext(
-      sessionId,
-      userMessage.slice(0, 50),
-      userMessage
-    );
-    workContextId = workContext.workContextUid;
-  }
-
   // 执行子 Agent
   let runResult: { runUid: string; resultSummary: string | null; status: string };
   try {
-    console.log(`[SubAgent] 开始执行: ${targetAgentId}, depth=${depth}, workContext=${workContextId}`);
+    console.log(`[SubAgent] 开始执行: ${targetAgentId}, depth=${depth}`);
     console.log(`[SubAgent] HandoffNote: ${decision.handoffNote?.slice(0, 200)}...`);
 
     const { agent, version } = await getCurrentAgentVersion(targetAgentId);
@@ -1094,7 +1281,6 @@ async function handleDelegateChain(
       userMessage,
       handoffNote: decision.handoffNote || `请处理用户的请求：${userMessage}`,
       sessionId,
-      workContextId,
       mode: "subagent",
     });
 
@@ -1124,48 +1310,14 @@ async function handleDelegateChain(
 
   // 子 Agent 执行完成后，主 Agent 再次判断是否需要继续委派
   const followUpMessage = `子 Agent ${targetAgentId} 执行完成，结果：${runResult.resultSummary || "无摘要"}。\n\n用户原始请求：${userMessage}`;
-  
-  const followUpContext = await contextBuilder.buildMainAgentContext({
-    sessionId,
-    userMessage: followUpMessage,
-  });
 
-  // 添加执行历史到上下文
-  followUpContext.executionHistory = previousResults;
-
-  const followUpDecision = await mainAgent.decideFollowUp(followUpContext, availableAgents);
-
-  // 根据后续决策处理
-  switch (followUpDecision.action) {
-    case "delegate":
-      // 继续委派给下一个 Agent
-      return handleDelegateChain(
-        followUpDecision,
-        sessionId,
-        followUpMessage,
-        undefined, // 使用决策中的 targetAgentId
-        availableAgents,
-        depth + 1,
-        previousResults
-      );
-
-    case "clarify":
-      return {
-        message: followUpDecision.response || "需要进一步澄清",
-        runId: runResult.runUid,
-        agentId: targetAgentId,
-      };
-
-    case "respond":
-    default:
-      // 汇总所有执行结果，生成最终回复
-      const finalMessage = buildFinalResponse(previousResults, followUpDecision.response);
-      return {
-        message: finalMessage,
-        runId: runResult.runUid,
-        agentId: targetAgentId,
-      };
-  }
+  // 汇总所有执行结果，生成最终回复
+  const finalMessage = buildFinalResponse(previousResults, followUpMessage);
+  return {
+    message: finalMessage,
+    runId: runResult.runUid,
+    agentId: targetAgentId,
+  };
 }
 
 // 异步处理链式委派（不阻塞 HTTP 响应）
@@ -1218,7 +1370,6 @@ async function handleDelegateChainAsync(
       userMessage,
       handoffNote: decision.handoffNote || `请处理用户的请求：${userMessage}`,
       sessionId,
-      workContextId: "",
       parentRunId: mainRun.id,
       mode: "subagent",
     });
@@ -1245,52 +1396,11 @@ async function handleDelegateChainAsync(
     return;
   }
 
-  // 子 Agent 执行完成后，主 Agent 再次判断是否需要继续委派
+  // 子 Agent 执行完成后，汇总所有执行结果，生成最终回复
   const followUpMessage = `子 Agent ${targetAgentId} 执行完成，结果：${runResult.resultSummary || "无摘要"}。\n\n用户原始请求：${userMessage}`;
 
-  const followUpContext = await contextBuilder.buildMainAgentContext({
-    sessionId,
-    userMessage: followUpMessage,
-  });
-
-  // 添加执行历史到上下文
-  followUpContext.executionHistory = previousResults;
-
-  const followUpDecision = await mainAgent.decideFollowUp(followUpContext, availableAgents);
-
-  // 根据后续决策处理
-  switch (followUpDecision.action) {
-    case "delegate":
-      // 继续委派给下一个 Agent
-      await handleDelegateChainAsync(
-        followUpDecision,
-        sessionId,
-        followUpMessage,
-        undefined,
-        availableAgents,
-        mainRunId,
-        depth + 1,
-        previousResults
-      );
-      break;
-
-    case "clarify":
-      await updateMainAgentRun(mainRunId, 
-        followUpDecision.response || "需要进一步澄清", 
-        "success"
-      );
-      break;
-
-    case "respond":
-    default: {
-      // 汇总所有执行结果，生成最终回复
-      console.log(`[MainAgent] Building final response, results count: ${previousResults.length}, response: ${followUpDecision.response?.slice(0, 100)}`);
-      const finalMessage = buildFinalResponse(previousResults, followUpDecision.response);
-      console.log(`[MainAgent] Final message length: ${finalMessage.length}, content: ${finalMessage.slice(0, 100)}`);
-      await updateMainAgentRun(mainRunId, finalMessage, "success");
-      break;
-    }
-  }
+  const finalMessage = buildFinalResponse(previousResults, followUpMessage);
+  await updateMainAgentRun(mainRunId, finalMessage, "success");
 }
 
 // 更新主 Agent 的 run 记录
