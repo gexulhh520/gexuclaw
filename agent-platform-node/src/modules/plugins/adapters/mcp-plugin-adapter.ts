@@ -1,16 +1,25 @@
 import { jsonParse } from "../../../shared/json.js";
 import { McpClient, McpToolBridge, McpToolBridgeRegistry } from "../mcp/index.js";
 import type { AgentPlugin, PluginToolDefinition, PluginResourceDefinition, PluginPromptDefinition } from "../plugin.schema.js";
+import {
+  runRuntimeHealthCheck,
+  runRuntimeResetPolicy,
+  type RuntimeHealthResult,
+  type RuntimeHookConfig,
+} from "../mcp/mcp-runtime-hook.js";
 
 /**
  * MCP 插件配置结构
  */
-export type McpPluginConfig = {
+export type McpPluginConfig = RuntimeHookConfig & {
   mcpServers?: Record<string, {
     command: string;
     args?: string[];
     env?: Record<string, string>;
+    transport?: "stdio" | "sse" | "http";
+    autoStart?: boolean;
   }>;
+
   // 兼容旧格式
   command?: string;
   args?: string[];
@@ -18,6 +27,15 @@ export type McpPluginConfig = {
   transport?: "stdio" | "sse" | "http";
   serverUrl?: string;
   timeout?: number;
+
+  runtime?: {
+    type?: string;
+    provider?: string;
+    managedByHost?: boolean;
+    requiresDaemon?: boolean;
+    requiresCdp?: boolean;
+    startupMode?: "mcp_tool_auto_start" | "host_managed";
+  };
 };
 
 /**
@@ -61,6 +79,7 @@ export class McpPluginRuntime {
       this.toolBridge = new McpToolBridge({
         pluginId: this.pluginId,
         mcpClient: this.client,
+        runtimeConfig: this.config,
       });
 
       // 注册到全局桥接器注册表
@@ -199,6 +218,20 @@ export class McpPluginRuntime {
   getToolBridge(): McpToolBridge | null {
     return this.toolBridge;
   }
+
+  /**
+   * 检查运行时健康状态
+   */
+  async checkRuntimeHealth(): Promise<RuntimeHealthResult> {
+    return runRuntimeHealthCheck(this.config);
+  }
+
+  /**
+   * 重置运行时
+   */
+  async resetRuntime(): Promise<void> {
+    await runRuntimeResetPolicy(this.pluginId, this.config);
+  }
 }
 
 /**
@@ -294,5 +327,29 @@ export class McpPluginAdapter {
    */
   getRuntime(): McpPluginRuntime | undefined {
     return this.runtimes.get(this.pluginId);
+  }
+
+  /**
+   * 检查运行时健康状态
+   */
+  async checkRuntimeHealth(): Promise<RuntimeHealthResult | null> {
+    const runtime = this.runtimes.get(this.pluginId);
+    if (!runtime) {
+      return null;
+    }
+
+    return runtime.checkRuntimeHealth();
+  }
+
+  /**
+   * 重置运行时
+   */
+  async resetRuntime(): Promise<void> {
+    const runtime = this.runtimes.get(this.pluginId);
+    if (!runtime) {
+      return;
+    }
+
+    await runtime.resetRuntime();
   }
 }

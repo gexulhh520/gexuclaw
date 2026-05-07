@@ -13,6 +13,12 @@ import {
 } from "./plugin.repository.js";
 import { pluginRegistry } from "./plugin-registry-instance.js";
 import { PluginManager } from "./plugin-manager.js";
+import {
+  runRuntimeHealthCheck,
+  runRuntimeResetPolicy,
+  type RuntimeHookConfig,
+} from "./mcp/mcp-runtime-hook.js";
+import { McpPluginAdapter } from "./adapters/mcp-plugin-adapter.js";
 
 const pluginManager = new PluginManager(pluginRegistry);
 
@@ -108,6 +114,43 @@ export async function registerPluginRoutes(app: FastifyInstance) {
   // POST /api/agent-platform/plugins/:pluginId/reload - 重新加载插件
   app.post<{ Params: { pluginId: string } }>("/api/agent-platform/plugins/:pluginId/reload", async (request) => {
     await pluginManager.reloadPlugin(request.params.pluginId);
+    return ok({ success: true });
+  });
+
+  // POST /api/agent-platform/plugins/:pluginId/health-check - 健康检查
+  app.post<{ Params: { pluginId: string } }>("/api/agent-platform/plugins/:pluginId/health-check", async (request) => {
+    const record = await getPluginById(request.params.pluginId);
+    if (!record) throw notFound("Plugin not found", { pluginId: request.params.pluginId });
+
+    if (record.providerType !== "mcp") {
+      return ok({
+        checked: false,
+        state: "UNKNOWN",
+        message: "Only MCP plugins support health check",
+      });
+    }
+
+    const config = jsonParse<RuntimeHookConfig>(record.configJson, {});
+    const result = await runRuntimeHealthCheck(config);
+
+    return ok(result);
+  });
+
+  // POST /api/agent-platform/plugins/:pluginId/reset-runtime - 重置运行时
+  app.post<{ Params: { pluginId: string } }>("/api/agent-platform/plugins/:pluginId/reset-runtime", async (request) => {
+    const record = await getPluginById(request.params.pluginId);
+    if (!record) throw notFound("Plugin not found", { pluginId: request.params.pluginId });
+
+    if (record.providerType !== "mcp") {
+      return ok({
+        success: false,
+        message: "Only MCP plugins support runtime reset",
+      });
+    }
+
+    const config = jsonParse<RuntimeHookConfig>(record.configJson, {});
+    await runRuntimeResetPolicy(request.params.pluginId, config);
+
     return ok({ success: true });
   });
 }

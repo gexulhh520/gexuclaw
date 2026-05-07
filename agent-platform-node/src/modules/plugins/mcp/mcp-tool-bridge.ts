@@ -1,9 +1,17 @@
 import type { McpClient } from "./mcp-client.js";
 import type { ToolDefinition, ToolResult } from "../../../tools/tool-types.js";
+import type { McpPluginConfig } from "../adapters/mcp-plugin-adapter.js";
+import {
+  buildRuntimeHookErrorResult,
+  isRecoverableRuntimeError,
+  runBeforeToolHook,
+  runRuntimeResetPolicy,
+} from "./mcp-runtime-hook.js";
 
 export type McpToolBridgeConfig = {
   pluginId: string;
   mcpClient: McpClient;
+  runtimeConfig?: McpPluginConfig;
 };
 
 /**
@@ -13,10 +21,12 @@ export type McpToolBridgeConfig = {
 export class McpToolBridge {
   private pluginId: string;
   private mcpClient: McpClient;
+  private runtimeConfig: McpPluginConfig;
 
   constructor(config: McpToolBridgeConfig) {
     this.pluginId = config.pluginId;
     this.mcpClient = config.mcpClient;
+    this.runtimeConfig = config.runtimeConfig ?? {};
   }
 
   /**
@@ -41,9 +51,75 @@ export class McpToolBridge {
 
     console.log(`[McpToolBridge] 执行工具: ${originalToolName} (原始: ${toolName})`);
 
+    // beforeTool hook：
+    // 1. 执行 bb-browser status
+    // 2. 如果不健康，只执行 bb-browser daemon shutdown
+    // 3. 不主动 open about:blank，后续交给 MCP tool 自己拉起 daemon
+    let healthResult;
+    try {
+      healthResult = await runBeforeToolHook(this.pluginId, this.runtimeConfig);
+      console.log(`[McpToolBridge] beforeTool hook result: state=${healthResult.state}, checked=${healthResult.checked}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[McpToolBridge] beforeTool hook 执行失败: ${this.pluginId}`, message);
+
+      return buildRuntimeHookErrorResult(this.pluginId, originalToolName, message);
+    }
+
     const result = await this.mcpClient.callTool(originalToolName, args);
 
     if (!result.success) {
+      const errorMessage = result.error ?? "未知错误";
+
+      // 工具执行时仍然遇到 daemon/CDP 错误，则 reset 一次，再重试原工具一次
+      if (isRecoverableRuntimeError(errorMessage, this.runtimeConfig)) {
+        console.warn(
+          `[McpToolBridge] MCP 工具遇到可恢复 runtime 错误，准备 reset 后重试一次: ${errorMessage}`
+        );
+
+        try {
+          await runRuntimeResetPolicy(this.pluginId, this.runtimeConfig);
+
+          const retryResult = await this.mcpClient.callTool(originalToolName, args);
+
+          if (retryResult.success) {
+            return this.normalizeMcpSuccessResult(originalToolName, args, retryResult.result);
+          }
+
+          return {
+            success: false,
+            operation: {
+              type: "analyze",
+              target: originalToolName,
+            },
+            error: {
+              code: "MCP_TOOL_ERROR_AFTER_RUNTIME_RESET",
+              message: retryResult.error ?? errorMessage,
+              retryable: true,
+              category: "runtime",
+            },
+            outputRefs: [],
+          };
+        } catch (resetError) {
+          const resetMessage = resetError instanceof Error ? resetError.message : String(resetError);
+
+          return {
+            success: false,
+            operation: {
+              type: "analyze",
+              target: originalToolName,
+            },
+            error: {
+              code: "MCP_RUNTIME_RESET_FAILED",
+              message: resetMessage,
+              retryable: true,
+              category: "runtime",
+            },
+            outputRefs: [],
+          };
+        }
+      }
+
       return {
         success: false,
         operation: {
@@ -52,14 +128,22 @@ export class McpToolBridge {
         },
         error: {
           code: "MCP_TOOL_ERROR",
-          message: result.error ?? "未知错误",
+          message: errorMessage,
         },
         outputRefs: [],
       };
     }
 
+    return this.normalizeMcpSuccessResult(originalToolName, args, result.result);
+  }
+
+  private normalizeMcpSuccessResult(
+    originalToolName: string,
+    args: Record<string, unknown>,
+    rawResult: unknown
+  ): ToolResult {
     // 解析 MCP 工具返回结果
-    const mcpResult = result.result as {
+    const mcpResult = rawResult as {
       content?: Array<{
         type: string;
         text?: string;

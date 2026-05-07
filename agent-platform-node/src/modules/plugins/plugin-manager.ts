@@ -8,6 +8,7 @@ import {
   enablePlugin as repoEnablePlugin,
   getPluginById,
   listEnabledPlugins,
+  markPluginStatus,
   type PluginRecord,
   upsertPlugin,
 } from "./plugin.repository.js";
@@ -242,6 +243,32 @@ export class PluginManager {
         }
 
         console.log(`[PluginManager] MCP 插件 ${record.pluginId} 初始化成功`);
+
+        // 插件注册/启用后只做一次健康检查，不主动 reset，不阻塞插件加载
+        try {
+          const health = await adapter.checkRuntimeHealth();
+
+          if (health?.checked) {
+            console.log(
+              `[PluginManager] MCP 插件 ${record.pluginId} 注册后健康检查: ${health.state}`
+            );
+
+            if (health.state === "READY") {
+              await markPluginStatus(record.pluginId, "active");
+            } else {
+              await markPluginStatus(
+                record.pluginId,
+                "unavailable",
+                `Runtime health check: ${health.state}. ${health.rawOutput}`
+              );
+            }
+          }
+        } catch (healthError) {
+          const message = healthError instanceof Error ? healthError.message : String(healthError);
+          console.warn(`[PluginManager] MCP 插件 ${record.pluginId} 健康检查失败: ${message}`);
+          await markPluginStatus(record.pluginId, "unavailable", message);
+        }
+
         return initResult.agentPlugin;
       }
 
