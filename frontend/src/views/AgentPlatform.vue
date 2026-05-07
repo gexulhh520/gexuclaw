@@ -305,9 +305,9 @@
     >
       <header class="workspace-header">
         <div class="workspace-header-left">
-          <div class="workspace-host-title">{{ selectedWorkContext?.title || '未选择工作上下文' }}</div>
-          <div class="workspace-host-subtitle" v-if="selectedWorkContext">
-            {{ selectedWorkContext.goal || '暂无目标描述' }}
+          <div class="workspace-host-title">{{ currentSession?.title || '未选择会话' }}</div>
+          <div class="workspace-host-subtitle" v-if="currentSession">
+            {{ currentSession.description || '暂无描述' }}
           </div>
         </div>
 
@@ -334,50 +334,48 @@
       </header>
 
       <div class="workspace-content soft-scrollbar">
-        <!-- Tab: 上下文 - WorkContext 结构化展示 -->
+        <!-- Tab: 上下文 - Session 结构化展示 -->
         <div v-if="activeWorkspaceTab === '上下文'" class="workspace-tab-panel">
-          <div v-if="!selectedWorkContext" class="workspace-empty-state">
-            <div class="empty-title">暂无工作上下文</div>
-            <div class="empty-desc">发送消息开始工作后会自动创建工作上下文</div>
+          <div v-if="!currentSession" class="workspace-empty-state">
+            <div class="empty-title">暂无会话</div>
+            <div class="empty-desc">请先选择一个会话或创建新会话</div>
           </div>
           <div v-else class="workcontext-detail">
             <div class="detail-section">
-              <div class="detail-label">目标</div>
-              <div class="detail-value">{{ selectedWorkContext.goal || '暂无目标' }}</div>
+              <div class="detail-label">会话标题</div>
+              <div class="detail-value">{{ currentSession.title }}</div>
+            </div>
+            <div class="detail-section">
+              <div class="detail-label">描述</div>
+              <div class="detail-value">{{ currentSession.description || '暂无描述' }}</div>
             </div>
             <div class="detail-row">
               <div class="detail-section half">
                 <div class="detail-label">状态</div>
-                <div class="detail-value status-badge" :class="selectedWorkContext.status">
-                  {{ selectedWorkContext.status || '进行中' }}
+                <div class="detail-value status-badge" :class="currentSession.status">
+                  {{ currentSession.status || '进行中' }}
                 </div>
               </div>
               <div class="detail-section half">
-                <div class="detail-label">来源</div>
-                <div class="detail-value">{{ selectedWorkContext.source || '手动创建' }}</div>
+                <div class="detail-label">Agent 数量</div>
+                <div class="detail-value">{{ currentSession.agentIds?.length || 0 }}</div>
               </div>
             </div>
             <div class="detail-section">
-              <div class="detail-label">进度摘要</div>
-              <div class="detail-value progress-summary">{{ getWorkContextProgressSummary(selectedWorkContext) }}</div>
+              <div class="detail-label">执行记录</div>
+              <div class="detail-value">{{ workContextRuns.length }} 次运行</div>
             </div>
             <div class="detail-section">
-              <div class="detail-label">最近一次运行</div>
-              <div class="detail-value recent-run" v-if="selectedWorkContext.currentRunId">
-                Run #{{ selectedWorkContext.currentRunId }}
-              </div>
-              <div class="detail-value empty" v-else>暂无运行记录</div>
+              <div class="detail-label">产物数量</div>
+              <div class="detail-value">{{ workContextArtifacts.length }} 个产物</div>
             </div>
             <div class="detail-section">
-              <div class="detail-label">最近一次产物</div>
-              <div class="detail-value recent-artifact" v-if="selectedWorkContext.latestArtifactId">
-                Artifact #{{ selectedWorkContext.latestArtifactId }}
-              </div>
-              <div class="detail-value empty" v-else>暂无产物</div>
+              <div class="detail-label">创建时间</div>
+              <div class="detail-value">{{ formatTime(currentSession.createdAt) }}</div>
             </div>
             <div class="detail-section">
               <div class="detail-label">更新时间</div>
-              <div class="detail-value">{{ formatTime(selectedWorkContext.updatedAt) }}</div>
+              <div class="detail-value">{{ formatTime(currentSession.updatedAt) }}</div>
             </div>
           </div>
         </div>
@@ -1112,7 +1110,7 @@ import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { useRoute } from "vue-router";
 
-import { agentPlatformApi, type AgentRecord, type ProjectRecord, type AgentRunRecord, type WorkContextRecord, type AgentArtifactRecord, type AgentRunStepRecord, type ModelProfileRecord, type PluginCatalogItem } from "@/api/agentPlatform";
+import { agentPlatformApi, type AgentRecord, type ProjectRecord, type AgentRunRecord, type AgentArtifactRecord, type AgentRunStepRecord, type ModelProfileRecord, type PluginCatalogItem } from "@/api/agentPlatform";
 import AgentVersionDialog from "@/components/agent-platform/AgentVersionDialog.vue";
 
 type AgentStatus = "online" | "busy" | "idle";
@@ -1177,6 +1175,8 @@ interface SessionItem {
   id: string;
   title: string;
   description?: string;
+  status?: string;
+  createdAt?: string;
   updatedAt: string;
   agentIds: string[];
   messages: MessageItem[];
@@ -1251,14 +1251,12 @@ const conversationCollapsed = ref(false);
 const workspaceHidden = ref(false);
 const workspaceFullscreen = ref(false);
 
-// WorkContext 和 Artifact 相关状态
-const sessionWorkContexts = ref<WorkContextRecord[]>([]);
-const selectedWorkContext = ref<WorkContextRecord | null>(null);
+// Session 和 Artifact 相关状态
 const workContextArtifacts = ref<AgentArtifactRecord[]>([]);
 const sessionRuns = ref<AgentRunRecord[]>([]);
 const workContextRuns = ref<AgentRunRecord[]>([]);
 
-// 右侧工作台 Tab：围绕 WorkContext & Artifact 组织
+// 右侧工作台 Tab：围绕 Session & Artifact 组织
 const activeWorkspaceTab = ref("上下文");
 const newSessionDialogVisible = ref(false);
 const newProjectDialogVisible = ref(false);
@@ -1287,7 +1285,7 @@ const editPluginsLoading = ref(false);
 const editAllowedPluginIds = ref<string[]>([]);
 const editingAgentVersionId = ref<number | null>(null);
 
-// 右侧工作台 Tab：围绕 WorkContext & Artifact 组织
+// 右侧工作台 Tab：围绕 Session & Artifact 组织
 const workspaceTabs = ["上下文", "产物", "执行过程"];
 
 // 右侧选中的状态
@@ -1379,37 +1377,33 @@ async function selectSession(projectId: string | undefined, sessionId: string) {
     await loadSessionMessages(sourceSession);
   }
 
-  // 加载并选中该会话的 WorkContext
-  await loadAndSelectSessionWorkContext(sessionId);
+  // 加载并选中该会话的 Workbench
+  await loadAndSelectSessionWorkbench(sessionId);
 }
 
-// 加载并选中会话的 WorkContext（使用聚合接口）
-async function loadAndSelectSessionWorkContext(sessionId: string) {
+// 加载并选中会话的 Workbench（使用聚合接口）
+async function loadAndSelectSessionWorkbench(sessionId: string) {
   try {
-    console.log(`[loadAndSelectSessionWorkContext] Loading workbench for session: ${sessionId}`);
+    console.log(`[loadAndSelectSessionWorkbench] Loading workbench for session: ${sessionId}`);
     const workbench = await agentPlatformApi.getSessionWorkbench(sessionId);
-    console.log(`[loadAndSelectSessionWorkContext] Loaded workbench:`, workbench);
+    console.log(`[loadAndSelectSessionWorkbench] Loaded workbench:`, workbench);
 
-    sessionWorkContexts.value = workbench.workContexts;
+    // Session-only: 直接使用 workbench 的数据
     sessionRuns.value = workbench.runs;
+    workContextRuns.value = workbench.runs;
+    workContextArtifacts.value = workbench.artifacts;
+    selectedArtifact.value = workbench.artifacts[0] || null;
 
-    if (workbench.selectedWorkContext) {
-      selectedWorkContext.value = workbench.selectedWorkContext;
-      workContextArtifacts.value = workbench.artifacts;
-      selectedArtifact.value = workbench.artifacts[0] || null;
-      console.log(`[loadAndSelectSessionWorkContext] Selected work context: ${workbench.selectedWorkContext.workContextUid}`);
-
-      // 加载该 workContext 的 runs
-      await loadWorkContextRuns(workbench.selectedWorkContext.workContextUid);
+    if (workbench.runs.length > 0) {
+      selectedRun.value = workbench.runs[0];
+      // 加载第一个 run 的 steps
+      await loadRunSteps(workbench.runs[0].runUid);
     } else {
-      selectedWorkContext.value = null;
-      workContextArtifacts.value = [];
-      workContextRuns.value = [];
-      selectedArtifact.value = null;
       selectedRun.value = null;
+      selectedRunSteps.value = [];
     }
   } catch (error) {
-    console.error('[loadAndSelectSessionWorkContext] Failed to load workbench:', error);
+    console.error('[loadAndSelectSessionWorkbench] Failed to load workbench:', error);
   }
 }
 
@@ -1793,15 +1787,17 @@ async function selectRun(run: AgentRunRecord) {
   }
 }
 
-// 获取 WorkContext 进度摘要
-function getWorkContextProgressSummary(workContext: WorkContextRecord): string {
+// 加载 Run 的 steps
+async function loadRunSteps(runUid: string) {
   try {
-    const metadata = JSON.parse(workContext.metadataJson || '{}');
-    return metadata.progressSummary || '暂无进度摘要';
-  } catch {
-    return '暂无进度摘要';
+    const steps = await agentPlatformApi.listRunSteps(runUid);
+    selectedRunSteps.value = steps || [];
+  } catch (error) {
+    console.error('[loadRunSteps] Failed to load run steps:', error);
+    selectedRunSteps.value = [];
   }
 }
+
 
 // 格式化时间
 function formatTime(time: string | Date | undefined | null): string {
@@ -1827,30 +1823,15 @@ async function onRunCompleted(runId: string) {
   const sessionId = currentSession.value.id;
   
   try {
-    // 1. 刷新会话的 runs
-    console.log('[onRunCompleted] Reloading session runs...');
-    await loadSessionRuns(sessionId);
+    // Session-only: 直接刷新整个 workbench
+    console.log('[onRunCompleted] Reloading session workbench...');
+    await loadAndSelectSessionWorkbench(sessionId);
     
-    // 2. 刷新会话的 workContexts
-    console.log('[onRunCompleted] Reloading session work contexts...');
-    await reloadSessionWorkContexts(sessionId);
-    
-    // 3. 重新选中当前 workContext
-    console.log('[onRunCompleted] Reselecting current work context...');
-    await reselectCurrentWorkContext(sessionId, runId);
-    
-    // 4. 刷新选中 workContext 的 runs（workContext 维度）
-    if (selectedWorkContext.value) {
-      console.log('[onRunCompleted] Reloading runs for selected work context...');
-      await loadWorkContextRuns(selectedWorkContext.value.workContextUid);
-      
-      // 5. 刷新选中 workContext 的 artifacts
-      console.log('[onRunCompleted] Reloading artifacts for selected work context...');
-      await reloadArtifactsForSelectedWorkContext();
-      const latestRun = workContextRuns.value.find((item) => item.runUid === runId);
-      if (latestRun) {
-        selectedRun.value = latestRun;
-      }
+    // 选中刚完成的 run
+    const latestRun = workContextRuns.value.find((item) => item.runUid === runId);
+    if (latestRun) {
+      selectedRun.value = latestRun;
+      await loadRunSteps(runId);
     }
     
     console.log('[onRunCompleted] Data refresh completed');
@@ -1859,116 +1840,15 @@ async function onRunCompleted(runId: string) {
   }
 }
 
-// 刷新会话的 runs（session 维度）
+// Session-only: 刷新会话的 runs
 async function loadSessionRuns(sessionId: string) {
   try {
     const runs = await agentPlatformApi.listRuns({ sessionId, limit: 50 });
     console.log(`[loadSessionRuns] Loaded ${runs.length} runs for session ${sessionId}`);
-    // 更新当前会话的 runs（如果需要）
     sessionRuns.value = runs;
+    workContextRuns.value = runs;
   } catch (error) {
     console.error('[loadSessionRuns] Failed to load runs:', error);
-  }
-}
-
-// 刷新选中 workContext 的 runs（workContext 维度）
-async function loadWorkContextRuns(workContextId: string) {
-  try {
-    const runs = await agentPlatformApi.listRuns({ workContextId, limit: 50 });
-    console.log(`[loadWorkContextRuns] Loaded ${runs.length} runs for workContext ${workContextId}`);
-    workContextRuns.value = runs;
-    if (selectedRun.value) {
-      const matchedRun = runs.find((run) => run.runUid === selectedRun.value?.runUid);
-      selectedRun.value = matchedRun || runs[0] || null;
-    } else {
-      selectedRun.value = runs[0] || null;
-    }
-  } catch (error) {
-    console.error('[loadWorkContextRuns] Failed to load runs:', error);
-  }
-}
-
-// 刷新会话的 work contexts
-async function reloadSessionWorkContexts(sessionId: string) {
-  try {
-    const workContexts = await agentPlatformApi.listWorkContexts({ sessionId, limit: 50 });
-    console.log(`[reloadSessionWorkContexts] Loaded ${workContexts.length} work contexts`);
-    sessionWorkContexts.value = workContexts;
-  } catch (error) {
-    console.error('[reloadSessionWorkContexts] Failed to load work contexts:', error);
-  }
-}
-
-// 重新选中当前 work context
-async function reselectCurrentWorkContext(sessionId: string, runId: string) {
-  try {
-    // 优先选择：
-    // 1. current_run_id 对应此 run 的 workContext
-    // 2. 最近更新的 workContext
-    // 3. 第一个 workContext
-    
-    const workContexts = await agentPlatformApi.listWorkContexts({ sessionId, limit: 50 });
-    
-    // 查找 current_run_id 匹配的 workContext
-    // currentRunId 是 number，runId 是 string，需要转换后比较
-    const matchedByRun = workContexts.find(wc => wc.currentRunId?.toString() === runId);
-    if (matchedByRun) {
-      console.log(`[reselectCurrentWorkContext] Found work context by runId: ${matchedByRun.workContextUid}`);
-      selectedWorkContext.value = matchedByRun;
-      return;
-    }
-    
-    // 按 updatedAt 排序，选择最近更新的
-    const sortedByUpdate = [...workContexts].sort((a, b) => {
-      const timeA = new Date(a.updatedAt || a.createdAt).getTime();
-      const timeB = new Date(b.updatedAt || b.createdAt).getTime();
-      return timeB - timeA;
-    });
-    
-    if (sortedByUpdate.length > 0) {
-      console.log(`[reselectCurrentWorkContext] Selecting most recent work context: ${sortedByUpdate[0].workContextUid}`);
-      selectedWorkContext.value = sortedByUpdate[0];
-    }
-  } catch (error) {
-    console.error('[reselectCurrentWorkContext] Failed to reselect work context:', error);
-  }
-}
-
-// 刷新选中 workContext 的 artifacts
-// 刷新选中 WorkContext 的数据（使用聚合接口）
-async function reloadArtifactsForSelectedWorkContext() {
-  if (!selectedWorkContext.value) {
-    console.warn('[reloadArtifactsForSelectedWorkContext] No selected work context');
-    return;
-  }
-
-  try {
-    const workContextUid = selectedWorkContext.value.workContextUid;
-    const workbench = await agentPlatformApi.getWorkContextWorkbench(workContextUid);
-    console.log(`[reloadArtifactsForSelectedWorkContext] Loaded workbench:`, workbench);
-
-    // 更新 WorkContext（包含展开的元数据字段）
-    selectedWorkContext.value = workbench.workContext;
-    // 更新产物列表
-    workContextArtifacts.value = workbench.artifacts;
-    // 更新 runs 列表
-    workContextRuns.value = workbench.runs;
-    if (selectedArtifact.value) {
-      const matchedArtifact = workbench.artifacts.find(
-        (artifact) => artifact.artifactUid === selectedArtifact.value?.artifactUid,
-      );
-      selectedArtifact.value = matchedArtifact || workbench.artifacts[0] || null;
-    } else {
-      selectedArtifact.value = workbench.artifacts[0] || null;
-    }
-    if (selectedRun.value) {
-      const matchedRun = workbench.runs.find((run) => run.runUid === selectedRun.value?.runUid);
-      selectedRun.value = matchedRun || workbench.runs[0] || null;
-    } else {
-      selectedRun.value = workbench.runs[0] || null;
-    }
-  } catch (error) {
-    console.error('[reloadArtifactsForSelectedWorkContext] Failed to load workbench:', error);
   }
 }
 
@@ -2538,7 +2418,9 @@ function mapSessionRecordToSessionItem(session: import("../api/agentPlatform").S
     id: session.sessionUid,
     title: session.title,
     description: session.description || undefined,
-    updatedAt: formatRunTime(session.createdAt),
+    status: session.status,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
     agentIds,
     messages: [], // 会话初始时没有消息，需要通过其他方式加载
   };
@@ -3820,7 +3702,7 @@ onMounted(async () => {
   color: #8ea0bd;
 }
 
-/* WorkContext 详情 */
+/* Session 详情 */
 .workcontext-detail {
   display: flex;
   flex-direction: column;
