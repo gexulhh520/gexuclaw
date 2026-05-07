@@ -61,7 +61,7 @@ export class ExecutionPlanCompiler {
     return {
       planUid,
       mode,
-      workContextUid: decision.targetWorkContextUid ?? undefined,
+      sessionId: input.snapshot.session.sessionUid,
       selectedRefs,
       steps,
       finalResponseStrategy,
@@ -82,9 +82,6 @@ export class ExecutionPlanCompiler {
       case "recover_execution":
       case "verify_execution":
         return "sequential_agents";
-      case "create_work_context":
-        // create_work_context 可以只创建上下文，也可以创建后立即执行
-        return hasSteps ? "single_agent" : "direct_response";
       default:
         return "direct_response";
     }

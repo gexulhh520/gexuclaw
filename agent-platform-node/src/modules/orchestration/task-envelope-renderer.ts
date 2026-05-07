@@ -14,7 +14,7 @@ export function renderTaskEnvelopeForAgent(envelope: TaskEnvelope): string {
   lines.push(`"""`);
   lines.push(`envelopeUid: ${envelope.envelopeUid}`);
   lines.push(`parentRunUid: ${envelope.parentRunUid}`);
-  lines.push(`workContextUid: ${envelope.workContextUid}`);
+  lines.push(`sessionId: ${envelope.sessionId}`);
   lines.push(`targetAgentUid: ${envelope.targetAgentUid}`);
   lines.push(`"""`);
   lines.push("");

@@ -4,22 +4,19 @@ export const planStepDraftSchema = z.object({
   targetAgentUid: z.string().min(1),
   objective: z.string().min(1),
   inputRefIds: z.array(z.string()).default([]),
-  expectedResultKind: z
-    .enum(["answer", "artifact", "file_change", "diagnosis", "verification"]),
+  expectedResultKind: z.enum([
+    "answer",
+    "artifact",
+    "file_change",
+    "diagnosis",
+    "verification",
+  ]),
   requireVerification: z.boolean(),
-});
-
-const createWorkContextSchema = z.object({
-  title: z.string().min(1),
-  goal: z.string().min(1),
 });
 
 export const mainDecisionSchema = z.object({
   decisionType: z.enum([
     "answer_directly",
-    "create_work_context",
-    "use_existing_work_context",
-    "switch_work_context",
     "delegate",
     "multi_step_plan",
     "ask_user",
@@ -27,10 +24,6 @@ export const mainDecisionSchema = z.object({
     "verify_execution",
     "recover_execution",
   ]),
-
-  targetWorkContextUid: z.string().nullable().default(null),
-
-  createWorkContext: createWorkContextSchema.nullable().default(null),
 
   primaryRefs: z.array(z.string()).default([]),
   secondaryRefs: z.array(z.string()).default([]),
@@ -48,7 +41,6 @@ export const mainDecisionSchema = z.object({
 
   ambiguity: z
     .object({
-      candidateWorkContextUids: z.array(z.string()).default([]),
       candidateRefIds: z.array(z.string()).default([]),
       question: z.string().min(1),
     })

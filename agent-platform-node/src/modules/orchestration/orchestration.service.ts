@@ -288,7 +288,7 @@ async function createMainAgentRun(
 
 // 主聊天处理函数（立即返回，异步执行）
 export async function handleChat(input: ChatRequestInput): Promise<ChatResponse> {
-  const { sessionId, message, workContextId, selectedAgentId } = input;
+  const { sessionId, message, selectedAgentId } = input;
 
   // 1. 验证 Session 存在
   console.log(`[handleChat] Looking for session: ${sessionId}`);
@@ -316,7 +316,6 @@ export async function handleChat(input: ChatRequestInput): Promise<ChatResponse>
   // 4. 立即返回 runId，前端通过 SSE 监听进度
   return {
     message: "正在处理您的请求...",
-    workContextId: workContextId || "",
     runId: run.runUid,
     agentId: "main_agent",  // 返回主 Agent 的 ID
   };
@@ -324,10 +323,7 @@ export async function handleChat(input: ChatRequestInput): Promise<ChatResponse>
 
 // 异步处理完整的聊天流程（主 Agent 决策 + 子 Agent 执行）
 async function processChatAsync(input: ChatRequestInput, mainRunId: string): Promise<void> {
-  const { sessionId, message, workContextId, selectedAgentId } = input;
-
-  // 声明在函数顶部，确保 catch 块可以访问
-  let finalWorkContextId: string | undefined;
+  const { sessionId, message, selectedAgentId } = input;
 
   try {
     // ===== 新流程：基于 SessionRuntimeSnapshot + SessionContextIndex =====
@@ -336,7 +332,7 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
     const snapshot = await snapshotBuilder.build({
       sessionId,
       userMessage: message,
-      selectedWorkContextUid: workContextId,
+      effectiveUserMessage: message,
     });
 
     const contextIndex = contextIndexBuilder.build(snapshot);
@@ -358,52 +354,22 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       await updateMainAgentRun(
         mainRunId,
         validation.fallbackDecision.ambiguity?.question || "我需要确认一下你要继续处理哪一项。",
-        "success",
-        mainDecision.targetWorkContextUid ?? undefined
+        "success"
       );
       return;
     }
 
     const normalizedDecision = validation.normalizedDecision;
 
-    let effectiveWorkContextUid = normalizedDecision.targetWorkContextUid;
-
-    if (!effectiveWorkContextUid && normalizedDecision.createWorkContext) {
-      const created = await createWorkContext(
-        sessionId,
-        normalizedDecision.createWorkContext.title,
-        normalizedDecision.createWorkContext.goal
-      );
-      effectiveWorkContextUid = created.workContextUid;
-    }
-
-    const effectiveDecision = {
-      ...normalizedDecision,
-      targetWorkContextUid: effectiveWorkContextUid,
-    };
-
-    if (
-      effectiveDecision.decisionType === "create_work_context" &&
-      (!effectiveDecision.plan || effectiveDecision.plan.steps.length === 0)
-    ) {
-      await updateMainAgentRun(
-        mainRunId,
-        `已创建新的工作上下文「${effectiveDecision.createWorkContext?.title || "新任务"}」，但当前没有合适的执行 Agent。请先配置或选择具备相关能力的 Agent 后继续。`,
-        "success",
-        effectiveWorkContextUid ?? undefined
-      );
-      return;
-    }
-
     // ask_user: 直接返回问题给用户
-    if (effectiveDecision.decisionType === "ask_user") {
-      const question = effectiveDecision.ambiguity?.question || "我需要确认一下你要继续处理哪一项。";
-      await updateMainAgentRun(mainRunId, question, "success", effectiveWorkContextUid ?? undefined);
+    if (normalizedDecision.decisionType === "ask_user") {
+      const question = normalizedDecision.ambiguity?.question || "我需要确认一下你要继续处理哪一项。";
+      await updateMainAgentRun(mainRunId, question, "success");
       return;
     }
 
     const plan = planCompiler.compile({
-      decision: effectiveDecision,
+      decision: normalizedDecision,
       snapshot,
       contextIndex,
     });
@@ -416,15 +382,14 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
         await updateMainAgentRun(
           mainRunId,
           validation.normalizedDecision.response || "我已收到您的消息",
-          "success",
-          plan.workContextUid
+          "success"
         );
         return;
       }
 
       case "single_agent":
       case "sequential_agents": {
-        await updateMainAgentRun(mainRunId, "正在委派任务给子 Agent...", "running", plan.workContextUid);
+        await updateMainAgentRun(mainRunId, "正在委派任务给子 Agent...", "running");
         await executePlanAsync(plan, sessionId, message, mainRunId, contextIndex);
         return;
       }
@@ -437,8 +402,7 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
           await updateMainAgentRun(
             mainRunId,
             `新编排流程暂不支持 plan mode: ${plan.mode}`,
-            "failed",
-            plan.workContextUid
+            "failed"
           );
         }
         return;
@@ -456,8 +420,7 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
     await updateMainAgentRun(
       mainRunId,
       `执行失败：${error instanceof Error ? error.message : "未知错误"}`,
-      "failed",
-      finalWorkContextId
+      "failed"
     );
   }
 }
@@ -476,7 +439,6 @@ async function executePlanAsync(
     return;
   }
 
-  let finalWorkContextId = plan.workContextUid;
   let runningContextIndex = contextIndex;
 
   const stepResults: Array<{
@@ -543,7 +505,7 @@ async function executePlanAsync(
           originalUserMessage,
           taskEnvelope,
           sessionId,
-          workContextId: plan.workContextUid || "",
+          workContextId: "",
           parentRunId: mainRun.id,
           mode: "subagent",
         });
@@ -594,8 +556,7 @@ async function executePlanAsync(
             await updateMainAgentRun(
               mainRunId,
               review.finalMessage || "步骤结果不可信，已停止继续执行，避免污染后续任务。",
-              "failed",
-              finalWorkContextId
+              "failed"
             );
             return;
           }
@@ -624,8 +585,7 @@ async function executePlanAsync(
             await updateMainAgentRun(
               mainRunId,
               review.finalMessage || "当前步骤重试次数已达上限，任务已停止。",
-              "failed",
-              finalWorkContextId
+              "failed"
             );
             return;
           }
@@ -664,8 +624,7 @@ async function executePlanAsync(
             mainRunId,
             review.finalMessage ||
               `当前步骤需要重新规划：${review.replanInstruction || review.reasoning}`,
-            "failed",
-            finalWorkContextId
+            "failed"
           );
           return;
         }
@@ -684,8 +643,7 @@ async function executePlanAsync(
           await updateMainAgentRun(
             mainRunId,
             review.userQuestion || review.finalMessage || "需要你确认下一步操作。",
-            "success",
-            finalWorkContextId
+            "success"
           );
           return;
         }
@@ -704,8 +662,7 @@ async function executePlanAsync(
           await updateMainAgentRun(
             mainRunId,
             review.finalMessage || "任务执行失败。",
-            "failed",
-            finalWorkContextId
+            "failed"
           );
           return;
         }
@@ -715,8 +672,7 @@ async function executePlanAsync(
         await updateMainAgentRun(
           mainRunId,
           `步骤执行失败：未获得有效执行结果。stepUid=${resolvedStep.stepUid}`,
-          "failed",
-          finalWorkContextId
+          "failed"
         );
         return;
       }
@@ -785,7 +741,7 @@ async function executePlanAsync(
         agentUid: resolvedStep.targetAgentUid,
         summary: agentResult.summary,
         status: agentResult.status,
-        workContextUid: plan.workContextUid,
+        sessionId,
         artifacts: producedArtifacts.map((artifact) => ({
           artifactUid: artifact.artifactUid,
           title: artifact.title,
@@ -802,17 +758,12 @@ async function executePlanAsync(
           title: artifact.title,
         });
       }
-
-      if (plan.workContextUid) {
-        finalWorkContextId = plan.workContextUid;
-      }
     } catch (error) {
       console.error(`[executePlanAsync] Step failed:`, error);
       await updateMainAgentRun(
         mainRunId,
         `执行失败：${error instanceof Error ? error.message : "未知错误"}`,
-        "failed",
-        finalWorkContextId
+        "failed"
       );
       return;
     }
@@ -830,35 +781,10 @@ async function executePlanAsync(
   const finalStatus = finalSummary.status;
   const finalMessage = finalSummary.finalAnswer;
 
-  const producedArtifactRefs = allProducedArtifacts.map((artifact) => ({
-    refId: `artifact:${artifact.artifactUid}`,
-    title: artifact.title,
-  }));
-
-  const touchedRefs = extractTouchedRefsFromAgentResults(allAgentResults);
-  const openIssues = extractOpenIssuesFromAgentResults(allAgentResults);
-
-  if (finalWorkContextId) {
-    await updateWorkContextProjection({
-      workContextUid: finalWorkContextId,
-      runUid: stepResults[stepResults.length - 1]?.runUid ?? mainRunId,
-      status: finalStatus,
-      summary: finalMessage,
-      producedArtifactRefs,
-      touchedRefs: touchedRefs.map((r) => r.refId),
-      openIssues: openIssues.map((issue) => ({
-        type: issue.type,
-        summary: issue.message,
-        severity: issue.severity as "low" | "medium" | "high" | undefined,
-      })),
-    });
-  }
-
   await updateMainAgentRun(
     mainRunId,
     finalMessage,
-    finalStatus,
-    finalWorkContextId
+    finalStatus
   );
 }
 
@@ -936,7 +862,7 @@ function appendRunResultRefs(
     agentUid: string;
     summary?: string;
     status: string;
-    workContextUid?: string;
+    sessionId: string;
     artifacts?: Array<{
       artifactUid: string;
       title: string;
@@ -955,7 +881,7 @@ function appendRunResultRefs(
       kind: "run" as const,
       title: `${input.agentUid} run`,
       summary: input.summary || "",
-      workContextUid: input.workContextUid,
+      sessionId: input.sessionId,
       status: input.status,
       source: {
         table: "agent_runs" as const,
@@ -974,14 +900,6 @@ function appendRunResultRefs(
     },
   ];
 
-  if (input.workContextUid) {
-    newRelations.push({
-      fromRefId: runRefId,
-      toRefId: `wc:${input.workContextUid}`,
-      relation: "belongs_to" as const,
-    });
-  }
-
   if (input.artifacts) {
     for (const artifact of input.artifacts) {
       const artifactRefId = `artifact:${artifact.artifactUid}`;
@@ -990,7 +908,7 @@ function appendRunResultRefs(
         kind: "artifact" as const,
         title: artifact.title,
         summary: artifact.summary || artifact.artifactType,
-        workContextUid: input.workContextUid,
+        sessionId: input.sessionId,
         status: artifact.artifactRole === "pending_write" ? "pending_write" : "ready",
         source: {
           table: "agent_artifacts" as const,
@@ -1003,13 +921,6 @@ function appendRunResultRefs(
         toRefId: runRefId,
         relation: "produced" as const,
       });
-      if (input.workContextUid) {
-        newRelations.push({
-          fromRefId: artifactRefId,
-          toRefId: `wc:${input.workContextUid}`,
-          relation: "belongs_to" as const,
-        });
-      }
     }
   }
 
@@ -1047,7 +958,7 @@ function appendRunResultRefs(
           kind,
           title: resource.uri.split("/").pop() || resource.uri,
           summary: `${resource.operation || "touched"}; verified=${resource.verified ? "true" : "false"}`,
-          workContextUid: input.workContextUid,
+          sessionId: input.sessionId,
           status: resource.verified ? "verified" : "unverified",
           source: {
             uri: resource.uri,
@@ -1067,14 +978,6 @@ function appendRunResultRefs(
         toRefId: refId,
         relation,
       });
-
-      if (input.workContextUid) {
-        newRelations.push({
-          fromRefId: refId,
-          toRefId: `wc:${input.workContextUid}`,
-          relation: "belongs_to" as const,
-        });
-      }
     }
   }
 
@@ -1108,96 +1011,36 @@ function mapTouchedOperationToRelation(
   return "touched";
 }
 
-// 旧流程（fallback）
+// 旧流程（fallback）- 已简化，不再使用 WorkContext
 async function processChatAsyncOld(input: ChatRequestInput, mainRunId: string): Promise<void> {
-  const { sessionId, message, workContextId, selectedAgentId } = input;
-
-  // 声明在函数顶部，确保 catch 块可以访问
-  let finalWorkContextId: string | undefined;
+  const { sessionId, message, selectedAgentId } = input;
 
   try {
     // 获取可用 Agent 列表
     const availableAgents = await getAvailableAgents();
 
-    // ===== 第一步：初步判断 =====
-    const firstStepContext = await contextBuilder.buildMainAgentContext({
-      sessionId,
-      userMessage: message,
-      workContextId,
-    });
-
-    const firstStepDecision = await mainAgent.decideFirstStep(firstStepContext, availableAgents);
-
-    // ========== 第一步决策处理 ==========
-    // 先确定 workContextId（如果第一步就能确定的话）
-    let earlyWorkContextId: string | undefined;
-    if (firstStepDecision.candidateWorkContextId) {
-      earlyWorkContextId = firstStepDecision.candidateWorkContextId;
-    }
-
-    if (firstStepDecision.action === "respond") {
-      await updateMainAgentRun(mainRunId, firstStepDecision.response || "我已收到您的消息", "success", earlyWorkContextId);
+    // 简化处理：直接委派给选定的 Agent 或返回需要选择 Agent 的消息
+    if (selectedAgentId) {
+      await updateMainAgentRun(mainRunId, "正在委派任务给子 Agent...", "running");
+      const decision: OrchestrationDecision = {
+        action: "delegate",
+        reasoning: "用户直接选择了 Agent",
+        targetAgentId: selectedAgentId,
+        handoffNote: message,
+      };
+      await handleDelegateChainAsync(decision, sessionId, message, selectedAgentId, availableAgents, mainRunId);
       return;
     }
 
-    if (firstStepDecision.action === "clarify") {
-      await updateMainAgentRun(mainRunId, firstStepDecision.response || "请提供更多详细信息", "success", earlyWorkContextId);
-      return;
-    }
-
-    // ===== 第二步：基于详细信息做最终决策 =====
-    let workContextDetail;
-
-    if (firstStepDecision.confidence === "high" && firstStepDecision.candidateWorkContextId) {
-      workContextDetail = await contextBuilder.getWorkContextDetail(firstStepDecision.candidateWorkContextId);
-      if (!workContextDetail) {
-        const newWorkContext = await createWorkContext(sessionId, message.slice(0, 50), message);
-        workContextDetail = (await contextBuilder.getWorkContextDetail(newWorkContext.workContextUid))!;
-      }
-    } else if (firstStepDecision.confidence === "medium" && firstStepDecision.candidateWorkContextId) {
-      workContextDetail = await contextBuilder.getWorkContextDetail(firstStepDecision.candidateWorkContextId);
-      if (!workContextDetail) {
-        const newWorkContext = await createWorkContext(sessionId, message.slice(0, 50), message);
-        workContextDetail = (await contextBuilder.getWorkContextDetail(newWorkContext.workContextUid))!;
-      }
-    } else {
-      const newWorkContext = await createWorkContext(sessionId, message.slice(0, 50), message);
-      workContextDetail = (await contextBuilder.getWorkContextDetail(newWorkContext.workContextUid))!;
-    }
-
-    finalWorkContextId = workContextDetail.workContextId;
-
-    const secondStepContext = await contextBuilder.buildMainAgentContext({
-      sessionId,
-      userMessage: message,
-      workContextId: finalWorkContextId,
-    });
-
-    const finalDecision = await mainAgent.decideSecondStep(secondStepContext, workContextDetail, availableAgents);
-    finalDecision.workContextId = finalWorkContextId;
-
-    // 根据最终决策执行不同操作
-    switch (finalDecision.action) {
-      case "delegate": {
-        await updateMainAgentRun(mainRunId, "正在委派任务给子 Agent...", "running");
-        await handleDelegateChainAsync(finalDecision, sessionId, message, selectedAgentId, availableAgents, mainRunId);
-        return;
-      }
-
-      case "clarify": {
-        await updateMainAgentRun(mainRunId, finalDecision.response || "请提供更多详细信息", "success", finalWorkContextId);
-        return;
-      }
-
-      case "respond":
-      default: {
-        await updateMainAgentRun(mainRunId, finalDecision.response || "我已收到您的消息", "success", finalWorkContextId);
-        return;
-      }
-    }
+    // 没有选定 Agent，返回提示
+    await updateMainAgentRun(
+      mainRunId,
+      "我需要知道应该由哪个 Agent 来处理这个任务。请选择一个 Agent。",
+      "success"
+    );
   } catch (error) {
     console.error("[processChatAsyncOld] Error:", error);
-    await updateMainAgentRun(mainRunId, `处理失败：${error instanceof Error ? error.message : "未知错误"}`, "failed", finalWorkContextId);
+    await updateMainAgentRun(mainRunId, `处理失败：${error instanceof Error ? error.message : "未知错误"}`, "failed");
   }
 }
 
@@ -1215,7 +1058,6 @@ async function handleDelegateChain(
   if (depth >= MAX_DELEGATION_DEPTH) {
     return {
       message: `已达到最大委派深度(${MAX_DELEGATION_DEPTH})，任务执行结束。\n\n执行链路：\n${previousResults.map((r, i) => `${i + 1}. ${r.agentId}: ${r.result.slice(0, 100)}...`).join("\n")}`,
-      workContextId: decision.workContextId || "",
     };
   }
 
@@ -1224,7 +1066,6 @@ async function handleDelegateChain(
   if (!targetAgentId) {
     return {
       message: "我需要知道应该由哪个 Agent 来处理这个任务。请选择一个 Agent。",
-      workContextId: decision.workContextId || "",
     };
   }
 
@@ -1278,7 +1119,6 @@ async function handleDelegateChain(
     console.error(`[SubAgent] 执行失败: ${targetAgentId}`, error);
     return {
       message: `委派执行失败：${error instanceof Error ? error.message : "未知错误"}`,
-      workContextId,
     };
   }
 
@@ -1288,7 +1128,6 @@ async function handleDelegateChain(
   const followUpContext = await contextBuilder.buildMainAgentContext({
     sessionId,
     userMessage: followUpMessage,
-    workContextId,
   });
 
   // 添加执行历史到上下文
@@ -1313,7 +1152,6 @@ async function handleDelegateChain(
     case "clarify":
       return {
         message: followUpDecision.response || "需要进一步澄清",
-        workContextId,
         runId: runResult.runUid,
         agentId: targetAgentId,
       };
@@ -1324,7 +1162,6 @@ async function handleDelegateChain(
       const finalMessage = buildFinalResponse(previousResults, followUpDecision.response);
       return {
         message: finalMessage,
-        workContextId,
         runId: runResult.runUid,
         agentId: targetAgentId,
       };
@@ -1346,8 +1183,7 @@ async function handleDelegateChainAsync(
   if (depth >= MAX_DELEGATION_DEPTH) {
     await updateMainAgentRun(mainRunId, 
       `已达到最大委派深度(${MAX_DELEGATION_DEPTH})，任务执行结束。`, 
-      "success",
-      decision.workContextId
+      "success"
     );
     return;
   }
@@ -1357,21 +1193,9 @@ async function handleDelegateChainAsync(
   if (!targetAgentId) {
     await updateMainAgentRun(mainRunId, 
       "我需要知道应该由哪个 Agent 来处理这个任务。请选择一个 Agent。", 
-      "failed",
-      decision.workContextId
+      "failed"
     );
     return;
-  }
-
-  // 获取或创建 WorkContext
-  let workContextId = decision.workContextId;
-  if (!workContextId) {
-    const workContext = await createWorkContext(
-      sessionId,
-      userMessage.slice(0, 50),
-      userMessage
-    );
-    workContextId = workContext.workContextUid;
   }
 
   // 查询主 Agent run 的 id
@@ -1384,7 +1208,7 @@ async function handleDelegateChainAsync(
   // 执行子 Agent
   let runResult: { runUid: string; resultSummary: string | null; status: string };
   try {
-    console.log(`[SubAgent] 开始执行: ${targetAgentId}, depth=${depth}, workContext=${workContextId}, parentRunId=${mainRun.id}`);
+    console.log(`[SubAgent] 开始执行: ${targetAgentId}, depth=${depth}, parentRunId=${mainRun.id}`);
 
     const { agent, version } = await getCurrentAgentVersion(targetAgentId);
 
@@ -1394,7 +1218,7 @@ async function handleDelegateChainAsync(
       userMessage,
       handoffNote: decision.handoffNote || `请处理用户的请求：${userMessage}`,
       sessionId,
-      workContextId,
+      workContextId: "",
       parentRunId: mainRun.id,
       mode: "subagent",
     });
@@ -1416,8 +1240,7 @@ async function handleDelegateChainAsync(
     console.error(`[SubAgent] 执行失败: ${targetAgentId}`, error);
     await updateMainAgentRun(mainRunId, 
       `委派执行失败：${error instanceof Error ? error.message : "未知错误"}`, 
-      "failed",
-      workContextId
+      "failed"
     );
     return;
   }
@@ -1428,7 +1251,6 @@ async function handleDelegateChainAsync(
   const followUpContext = await contextBuilder.buildMainAgentContext({
     sessionId,
     userMessage: followUpMessage,
-    workContextId,
   });
 
   // 添加执行历史到上下文
@@ -1455,8 +1277,7 @@ async function handleDelegateChainAsync(
     case "clarify":
       await updateMainAgentRun(mainRunId, 
         followUpDecision.response || "需要进一步澄清", 
-        "success",
-        workContextId
+        "success"
       );
       break;
 
@@ -1466,14 +1287,14 @@ async function handleDelegateChainAsync(
       console.log(`[MainAgent] Building final response, results count: ${previousResults.length}, response: ${followUpDecision.response?.slice(0, 100)}`);
       const finalMessage = buildFinalResponse(previousResults, followUpDecision.response);
       console.log(`[MainAgent] Final message length: ${finalMessage.length}, content: ${finalMessage.slice(0, 100)}`);
-      await updateMainAgentRun(mainRunId, finalMessage, "success", workContextId);
+      await updateMainAgentRun(mainRunId, finalMessage, "success");
       break;
     }
   }
 }
 
 // 更新主 Agent 的 run 记录
-async function updateMainAgentRun(runUid: string, resultSummary: string, status: string, workContextId?: string) {
+async function updateMainAgentRun(runUid: string, resultSummary: string, status: string) {
   const now = nowIso();
   await db
     .update(agentRuns)
@@ -1493,16 +1314,7 @@ async function updateMainAgentRun(runUid: string, resultSummary: string, status:
     updatedAt: now,
   });
   
-  // 如果提供了 workContextId，更新 workContext 的 current_run_id 绑定
-  if (workContextId && (status === 'success' || status === 'failed')) {
-    try {
-      await updateWorkContextRunBinding(workContextId, runUid, resultSummary);
-    } catch (error) {
-      console.error(`[updateMainAgentRun] Failed to update workContext binding:`, error);
-    }
-  }
-  
-  console.log(`[MainAgent] Run updated: ${runUid}, status=${status}${workContextId ? `, workContext=${workContextId}` : ''}`);
+  console.log(`[MainAgent] Run updated: ${runUid}, status=${status}`);
 }
 
 // 构建最终响应

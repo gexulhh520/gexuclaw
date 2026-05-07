@@ -59,7 +59,7 @@ export type TaskEnvelope = {
   envelopeUid: string;
 
   parentRunUid: string;
-  workContextUid: string;
+  sessionId: string;
   targetAgentUid: string;
 
   objective: string;

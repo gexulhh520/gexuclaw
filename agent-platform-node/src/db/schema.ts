@@ -227,7 +227,13 @@ export const plugins = pgTable("plugins", {
 export const agentArtifacts = pgTable("agent_artifacts", {
   id: serial("id").primaryKey(),
   artifactUid: text("artifact_uid").notNull().unique(),
-  workContextId: integer("work_context_id").notNull(),
+
+  // 新增：Artifact 直接归属 Session
+  sessionId: text("session_id"),
+
+  // 保留旧字段兼容历史数据，但新逻辑不再写入
+  workContextId: integer("work_context_id"),
+
   runId: integer("run_id"),
   // artifactType: 产物形态类型
   // text | structured_data | page | image | link | file | collection

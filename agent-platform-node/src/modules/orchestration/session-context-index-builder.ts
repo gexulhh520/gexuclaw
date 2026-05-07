@@ -1,6 +1,6 @@
 /**
  * SessionContextIndexBuilder
- * 把 SessionRuntimeSnapshot 中的 WorkContext / Run / Step / Artifact / Agent / File 转成 refs
+ * 把 SessionRuntimeSnapshot 中的 Session / Run / Step / Artifact / Agent / File 转成 refs
  * 不判断用户意图
  */
 
@@ -9,7 +9,6 @@ import type {
   SessionContextIndex,
   ContextRef,
   ContextRelation,
-  ContextRefKind,
 } from "./orchestration.types.js";
 
 export class SessionContextIndexBuilder {
@@ -17,34 +16,29 @@ export class SessionContextIndexBuilder {
     const refs: ContextRef[] = [];
     const relations: ContextRelation[] = [];
 
-    // 1. WorkContext refs
-    for (const wc of snapshot.workContexts) {
-      const refId = `wc:${wc.workContextUid}`;
-      refs.push({
-        refId,
-        kind: "work_context",
-        title: wc.title,
-        summary: wc.summary || wc.goal || "",
-        workContextUid: wc.workContextUid,
-        status: wc.status,
-        source: { table: "work_contexts", uid: wc.workContextUid },
-        tags: ["work_context", wc.status],
-        evidence: {
-          selectedInUI: wc.signals.selectedInUI,
-          statusSignals: this.buildWorkContextStatusSignals(wc),
-        },
-        updatedAt: wc.updatedAt,
-      });
+    const sessionRefId = `session:${snapshot.session.sessionUid}`;
 
-      // topRefs 也加入
-      if (wc.topRefs) {
-        for (const topRef of wc.topRefs) {
-          if (!refs.find((r) => r.refId === topRef.refId)) {
-            refs.push(topRef);
-          }
-        }
-      }
-    }
+    // 1. Session ref
+    refs.push({
+      refId: sessionRefId,
+      kind: "session",
+      title: snapshot.session.title || snapshot.session.sessionUid,
+      summary: snapshot.session.description || "",
+      sessionId: snapshot.session.sessionUid,
+      status: snapshot.sessionState.currentStage || "active",
+      source: { table: "sessions", uid: snapshot.session.sessionUid },
+      tags: [
+        "session",
+        snapshot.sessionState.currentStage || "active",
+        snapshot.sessionState.recoverable ? "recoverable" : "",
+      ].filter(Boolean),
+      evidence: {
+        statusSignals: [
+          snapshot.sessionState.lastFailedRunUid ? "failed_run" : "",
+          snapshot.sessionState.recoverable ? "recoverable" : "",
+        ].filter(Boolean),
+      },
+    });
 
     // 2. Run refs + Step refs
     for (const run of snapshot.globalRecentRuns) {
@@ -54,24 +48,28 @@ export class SessionContextIndexBuilder {
         kind: "run",
         title: `${run.agentName} run`,
         summary: run.resultSummary || run.userMessage.slice(0, 100),
-        workContextUid: run.workContextUid,
+        sessionId: run.sessionId,
         status: run.status,
         source: { table: "agent_runs", uid: run.runUid, runUid: run.runUid },
-        tags: ["run", run.status, run.mode],
+        tags: [
+          "run",
+          run.status,
+          run.mode,
+          snapshot.sessionState.lastRecoverableRunUid === run.runUid ? "recoverable" : "",
+          snapshot.sessionState.lastFailedRunUid === run.runUid ? "last_failed" : "",
+        ].filter(Boolean),
         evidence: {
           statusSignals: run.status === "failed" ? ["failed"] : [],
         },
         updatedAt: run.createdAt,
       });
 
-      // relation: run belongs_to work_context
-      if (run.workContextUid) {
-        relations.push({
-          fromRefId: runRefId,
-          toRefId: `wc:${run.workContextUid}`,
-          relation: "belongs_to",
-        });
-      }
+      // relation: run belongs_to session
+      relations.push({
+        fromRefId: runRefId,
+        toRefId: sessionRefId,
+        relation: "belongs_to",
+      });
 
       // relation: run executed_by agent
       relations.push({
@@ -93,7 +91,7 @@ export class SessionContextIndexBuilder {
             ? `${step.toolName} ${isFailed ? "失败" : step.stepType}`
             : `${step.stepType}`,
           summary: this.buildStepSummary(step),
-          workContextUid: run.workContextUid,
+          sessionId: run.sessionId,
           status: step.toolStatus || step.stepType,
           source: {
             table: "agent_run_steps",
@@ -116,15 +114,6 @@ export class SessionContextIndexBuilder {
           relation: "belongs_to",
         });
 
-        // relation: step belongs_to work_context
-        if (run.workContextUid) {
-          relations.push({
-            fromRefId: stepRefId,
-            toRefId: `wc:${run.workContextUid}`,
-            relation: "belongs_to",
-          });
-        }
-
         // relation: step attempted_write file (从 metadata 中提取)
         if (isToolWrite && step.metadataJson) {
           const metadata = step.metadataJson as Record<string, unknown>;
@@ -137,7 +126,7 @@ export class SessionContextIndexBuilder {
                 kind: "file",
                 title: targetPath.split("/").pop() || targetPath,
                 summary: `目标文件${isFailed ? "，最近写入失败" : ""}`,
-                workContextUid: run.workContextUid,
+                sessionId: run.sessionId,
                 status: isFailed ? "write_failed" : "ok",
                 source: { table: "agent_run_steps", uri: targetPath },
                 tags: ["file", isFailed ? "write_failed" : ""].filter(Boolean),
@@ -161,21 +150,19 @@ export class SessionContextIndexBuilder {
         kind: "artifact",
         title: art.title,
         summary: art.summary || `${art.artifactType} artifact`,
-        workContextUid: art.workContextUid,
+        sessionId: art.sessionId,
         status: art.artifactRole === "pending_write" ? "pending_write" : "ready",
         source: { table: "agent_artifacts", uid: art.artifactUid },
         tags: ["artifact", art.artifactType, art.artifactRole || ""].filter(Boolean),
         updatedAt: art.createdAt,
       });
 
-      // relation: artifact belongs_to work_context
-      if (art.workContextUid) {
-        relations.push({
-          fromRefId: refId,
-          toRefId: `wc:${art.workContextUid}`,
-          relation: "belongs_to",
-        });
-      }
+      // relation: artifact belongs_to session
+      relations.push({
+        fromRefId: refId,
+        toRefId: sessionRefId,
+        relation: "belongs_to",
+      });
     }
 
     // 4. Agent refs
@@ -188,7 +175,7 @@ export class SessionContextIndexBuilder {
           title: agent.name,
           summary: agent.description || `${agent.name} Agent`,
           status: agent.status,
-          source: { table: "work_contexts", uid: agent.agentUid },
+          source: { table: "sessions", uid: agent.agentUid },
           tags: ["agent", ...(agent.capabilities || [])],
         });
       }
@@ -198,15 +185,6 @@ export class SessionContextIndexBuilder {
     console.log(`[ContextIndexBuilder] Refs详情:\n${JSON.stringify(refs.map(r => ({ refId: r.refId, kind: r.kind, title: r.title, status: r.status,summary: r.summary })), null, 2)}`);
 
     return { refs, relations };
-  }
-
-  private buildWorkContextStatusSignals(wc: SessionRuntimeSnapshot["workContexts"][0]): string[] {
-    const signals: string[] = [];
-    if (wc.signals.hasFailedRun) signals.push("failed_run");
-    if (wc.signals.hasOpenIssue) signals.push("open_issue");
-    if (wc.signals.hasRecentArtifact) signals.push("recent_artifact");
-    if (wc.signals.hasUnverifiedSideEffect) signals.push("unverified_side_effect");
-    return signals;
   }
 
   private buildStepSummary(step: SessionRuntimeSnapshot["globalRecentRuns"][0]["steps"][0]): string {

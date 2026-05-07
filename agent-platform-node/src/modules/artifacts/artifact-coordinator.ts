@@ -2,11 +2,13 @@ import { eq, inArray } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { agentArtifacts, agentRuns } from "../../db/schema.js";
 import { jsonParse, jsonStringify } from "../../shared/json.js";
+import { makeUid } from "../../shared/ids.js";
+import { nowIso } from "../../shared/time.js";
 import type { ToolArtifactCandidate, ToolResult } from "../../tools/tool-types.js";
 import type { CreateArtifactInput } from "../work-contexts/work-context.schema.js";
 import type { AgentArtifactDecision, AgentDeclaredArtifact } from "./artifact-directives.js";
 import { buildArtifactInputFromToolCandidate } from "./artifact-builder.js";
-import { createArtifact } from "../work-contexts/work-context.service.js";
+import { createArtifact as createArtifactWithWorkContext } from "../work-contexts/work-context.service.js";
 
 export type PendingArtifactCandidate = {
   candidateId: string;
@@ -51,14 +53,50 @@ export function attachCandidateIdsToToolResult(params: {
   };
 }
 
+/**
+ * 创建 Artifact（不依赖 WorkContext，直接归属 Session）
+ */
+async function createArtifactDirect(params: {
+  sessionId: string;
+  runId: number;
+  input: CreateArtifactInput;
+}) {
+  const { sessionId, runId, input } = params;
+  const now = nowIso();
+
+  const [artifact] = await db
+    .insert(agentArtifacts)
+    .values({
+      artifactUid: makeUid("artifact"),
+      sessionId,
+      runId,
+      artifactType: input.artifactType,
+      artifactRole: input.artifactRole,
+      title: input.title,
+      mimeType: input.mimeType,
+      contentText: input.contentText,
+      contentJson: jsonStringify(input.contentJson),
+      uri: input.uri,
+      status: input.status,
+      sourceRunId: input.sourceRunId,
+      sourceArtifactIdsJson: jsonStringify(input.sourceArtifactIds),
+      metadataJson: jsonStringify(input.metadata),
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+
+  return artifact;
+}
+
 export async function persistArtifactsFromToolResult(params: {
+  sessionId: string;
   workContextUid?: string;
   runId: number;
   toolResult: ToolResult;
 }) {
-  const { workContextUid, runId, toolResult } = params;
+  const { sessionId, workContextUid, runId, toolResult } = params;
 
-  if (!workContextUid) return [];
   if (!toolResult.success) return [];
   if (!toolResult.artifactCandidates?.length) return [];
 
@@ -71,7 +109,14 @@ export async function persistArtifactsFromToolResult(params: {
       sourceRunId: runId,
     });
 
-    const artifact = await createArtifact(workContextUid, input);
+    let artifact;
+    if (workContextUid) {
+      // 兼容旧逻辑：如果提供了 workContextUid，使用旧方式创建
+      artifact = await createArtifactWithWorkContext(workContextUid, input);
+    } else {
+      // 新逻辑：直接归属 Session
+      artifact = await createArtifactDirect({ sessionId, runId, input });
+    }
     created.push(artifact);
   }
 
@@ -86,14 +131,15 @@ export async function persistArtifactsFromToolResult(params: {
 }
 
 export async function persistArtifactsFromAgentDecisions(params: {
+  sessionId: string;
   workContextUid?: string;
   runId: number;
   pendingCandidates: PendingArtifactCandidate[];
   decisions: AgentArtifactDecision[];
 }) {
-  const { workContextUid, runId, pendingCandidates, decisions } = params;
+  const { sessionId, workContextUid, runId, pendingCandidates, decisions } = params;
 
-  if (!workContextUid || pendingCandidates.length === 0) {
+  if (pendingCandidates.length === 0) {
     return {
       createdArtifacts: [],
       consumedCandidateIds: [] as string[],
@@ -121,19 +167,22 @@ export async function persistArtifactsFromAgentDecisions(params: {
       continue;
     }
 
-    const artifact = await createArtifact(
-      workContextUid,
-      buildArtifactInputFromToolCandidate({
-        candidate: {
-          ...pending.candidate,
-          defaultRole: decision.artifactRole ?? pending.candidate.defaultRole,
-          title: decision.title ?? pending.candidate.title,
-        },
-        runId,
-        sourceRunId: runId,
-      }),
-    );
+    const input = buildArtifactInputFromToolCandidate({
+      candidate: {
+        ...pending.candidate,
+        defaultRole: decision.artifactRole ?? pending.candidate.defaultRole,
+        title: decision.title ?? pending.candidate.title,
+      },
+      runId,
+      sourceRunId: runId,
+    });
 
+    let artifact;
+    if (workContextUid) {
+      artifact = await createArtifactWithWorkContext(workContextUid, input);
+    } else {
+      artifact = await createArtifactDirect({ sessionId, runId, input });
+    }
     createdArtifacts.push(artifact);
   }
 
@@ -151,13 +200,14 @@ export async function persistArtifactsFromAgentDecisions(params: {
 }
 
 export async function persistDeclaredArtifacts(params: {
+  sessionId: string;
   workContextUid?: string;
   runId: number;
   declaredArtifacts: AgentDeclaredArtifact[];
 }) {
-  const { workContextUid, runId, declaredArtifacts } = params;
+  const { sessionId, workContextUid, runId, declaredArtifacts } = params;
 
-  if (!workContextUid || declaredArtifacts.length === 0) {
+  if (declaredArtifacts.length === 0) {
     return [];
   }
 
@@ -179,7 +229,12 @@ export async function persistDeclaredArtifacts(params: {
       metadata: declaredArtifact.metadata ?? {},
     };
 
-    const artifact = await createArtifact(workContextUid, input);
+    let artifact;
+    if (workContextUid) {
+      artifact = await createArtifactWithWorkContext(workContextUid, input);
+    } else {
+      artifact = await createArtifactDirect({ sessionId, runId, input });
+    }
     createdArtifacts.push(artifact);
   }
 
@@ -198,6 +253,7 @@ export async function persistDeclaredArtifacts(params: {
  * 用于保留待写入的内容，后续可以重试
  */
 export async function savePendingWriteArtifact(params: {
+  sessionId: string;
   workContextUid?: string;
   runId: number;
   targetPath: string;
@@ -205,9 +261,7 @@ export async function savePendingWriteArtifact(params: {
   failedRunUid?: string;
   failedStepRef?: string;
 }) {
-  const { workContextUid, runId, targetPath, content, failedRunUid, failedStepRef } = params;
-
-  if (!workContextUid) return null;
+  const { sessionId, workContextUid, runId, targetPath, content, failedRunUid, failedStepRef } = params;
 
   const input: CreateArtifactInput = {
     runId,
@@ -229,7 +283,12 @@ export async function savePendingWriteArtifact(params: {
     },
   };
 
-  const artifact = await createArtifact(workContextUid, input);
+  let artifact;
+  if (workContextUid) {
+    artifact = await createArtifactWithWorkContext(workContextUid, input);
+  } else {
+    artifact = await createArtifactDirect({ sessionId, runId, input });
+  }
 
   await appendRunOutputArtifactIds(runId, [artifact.artifactUid]);
 

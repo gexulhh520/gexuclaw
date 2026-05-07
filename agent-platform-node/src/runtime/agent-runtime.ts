@@ -516,6 +516,7 @@ export class AgentRuntime {
 
       if (directives.artifactDecisions.length > 0) {
         const decisionResult = await persistArtifactsFromAgentDecisions({
+          sessionId: args.input.sessionId || "",
           workContextUid: args.input.workContextId,
           runId: args.runId,
           pendingCandidates: pendingArtifactCandidates,
@@ -532,6 +533,7 @@ export class AgentRuntime {
 
       if (directives.declaredArtifacts.length > 0) {
         await persistDeclaredArtifacts({
+          sessionId: args.input.sessionId || "",
           workContextUid: args.input.workContextId,
           runId: args.runId,
           declaredArtifacts: directives.declaredArtifacts,
@@ -571,6 +573,7 @@ export class AgentRuntime {
       if (modelResult.toolCalls.length === 0) {
         if (pendingArtifactCandidates.length > 0) {
           await persistArtifactsFromToolResult({
+            sessionId: args.input.sessionId || "",
             workContextUid: args.input.workContextId,
             runId: args.runId,
             toolResult: {
@@ -702,6 +705,7 @@ export class AgentRuntime {
 
     if (pendingArtifactCandidates.length > 0) {
       await persistArtifactsFromToolResult({
+        sessionId: args.input.sessionId || "",
         workContextUid: args.input.workContextId,
         runId: args.runId,
         toolResult: {

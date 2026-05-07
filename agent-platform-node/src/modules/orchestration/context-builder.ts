@@ -9,8 +9,6 @@ export type PromptContext = {
   sessionId: string;
   sessionDescription?: string;
   userMessage: string;
-  workContexts: WorkContextBrief[];
-  selectedWorkContext?: WorkContextSummary;
   recentRuns?: RunTraceSummary[];
   availableAgents?: AgentCapabilitySummary[];
   executionHistory?: Array<{ agentId: string; result: string }>;
@@ -87,23 +85,13 @@ export class ContextBuilder {
   async buildMainAgentContext(params: {
     sessionId: string;
     userMessage: string;
-    workContextId?: string;
   }): Promise<PromptContext> {
-    const { sessionId, userMessage, workContextId } = params;
+    const { sessionId, userMessage } = params;
 
     // 1. 获取当前 Session 的信息（包括协作描述）
     const sessionInfo = await this.getSessionInfo(sessionId);
 
-    // 2. 获取当前 Session 下的 WorkContext 列表（简要信息）
-    const workContextList = await this.getSessionWorkContexts(sessionId);
-
-    // 3. 如果指定了 workContextId，获取详细信息
-    let selectedWorkContext: WorkContextSummary | undefined;
-    if (workContextId) {
-      selectedWorkContext = await this.getWorkContextSummary(workContextId);
-    }
-
-    // 4. 获取最近的 RunTrace
+    // 2. 获取最近的 RunTrace
     const recentRuns = await this.getRecentRuns(sessionId, 5);
 
     return {
@@ -111,8 +99,6 @@ export class ContextBuilder {
       sessionId,
       sessionDescription: sessionInfo?.description,
       userMessage,
-      workContexts: workContextList,
-      selectedWorkContext,
       recentRuns,
     };
   }

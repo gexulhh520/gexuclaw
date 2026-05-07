@@ -30,7 +30,7 @@ export class MainAgent {
   }): Promise<MainDecision> {
     console.log(`[MainAgent] decideWithSessionIndex 开始`);
     console.log(`[MainAgent] 用户消息: ${input.userMessage.slice(0, 100)}...`);
-    console.log(`[MainAgent] WorkContext数量: ${input.snapshot.workContexts.length}`);
+    console.log(`[MainAgent] SessionId: ${input.snapshot.session.sessionUid}`);
     console.log(`[MainAgent] Refs数量: ${input.contextIndex.refs.length}`);
 
     const systemPrompt = this.buildMainDecisionSystemPrompt();
@@ -42,8 +42,6 @@ export class MainAgent {
       temperature: 1,
     });
 
-  
-    //console.log(`[MainAgent] 决策完成的content: ${raw.content}`);
     const decision = await this.parseMainDecision(raw.content);
 
     console.log(`[MainAgent] 决策完成: ${decision.decisionType}`);
@@ -61,25 +59,8 @@ export class MainAgent {
   }): MainDecisionInput {
     return {
       userMessage: input.userMessage,
-      selectedWorkContextUid: input.snapshot.selectedWorkContextUid ?? null,
-      workContexts: input.snapshot.workContexts.map((wc) => ({
-        workContextUid: wc.workContextUid,
-        title: this.truncateText(wc.title, 100),
-        summary: this.truncateText(wc.summary || wc.goal || "", 300),
-        currentStage: wc.currentStage,
-        progressSummary: this.truncateText(wc.progressSummary, 300),
-        currentFocus: wc.currentFocus ?? null,
-        recentRefs: wc.recentRefs ?? wc.topRefs?.map((r) => r.refId) ?? [],
-        openIssues: wc.openIssues ?? [],
-        signals: {
-          selectedInUI: wc.signals.selectedInUI,
-          recentlyActive: wc.signals.recentlyActive,
-          hasFailedRun: wc.signals.hasFailedRun,
-          hasOpenIssue: wc.signals.hasOpenIssue,
-          hasRecentArtifact: wc.signals.hasRecentArtifact,
-          hasUnverifiedSideEffect: wc.signals.hasUnverifiedSideEffect,
-        },
-      })),
+      effectiveUserMessage: input.userMessage,
+      sessionState: input.snapshot.sessionState,
       refs: this.truncateRefsForDecision(input.contextIndex.refs),
       relations: input.contextIndex.relations,
       availableAgents: input.snapshot.availableAgents.map((agent) => ({
@@ -339,15 +320,12 @@ ${badOutput}`;
 
     return {
       decisionType: "ask_user",
-      targetWorkContextUid: null,
-      createWorkContext: null,
       primaryRefs: [],
       secondaryRefs: [],
       targetAgentUid: null,
       plan: null,
       response: null,
       ambiguity: {
-        candidateWorkContextUids: [],
         candidateRefIds: [],
         question: "我需要确认一下你要继续处理哪一项。",
       },
@@ -369,7 +347,6 @@ ${badOutput}`;
   }> {
     console.log(`[MainAgent] 第一步决策开始`);
     console.log(`[MainAgent] 用户消息: ${promptContext.userMessage.slice(0, 100)}...`);
-    console.log(`[MainAgent] 可用WorkContext数量: ${promptContext.workContexts.length}`);
 
     const systemPrompt = this.buildFirstStepSystemPrompt(availableAgents);
     const userPrompt = this.buildFirstStepUserPrompt(promptContext);
@@ -465,14 +442,6 @@ ${agentDescriptions}
 
   // 构建第一步的 User Prompt
   private buildFirstStepUserPrompt(context: PromptContext): string {
-    const workContextsInfo = context.workContexts
-      .map(
-        (ctx) => `- ${ctx.workContextId}: ${ctx.title}
-    目标: ${ctx.goal}
-    状态: ${ctx.status}`
-      )
-      .join("\n");
-
     // 会话协作描述
     const sessionCollaboration = context.sessionDescription
       ? `## 当前会话的协作目标\n${context.sessionDescription}\n`
@@ -482,13 +451,8 @@ ${agentDescriptions}
 """${context.userMessage}"""
 
 ${sessionCollaboration}
-## 当前 Session 的 WorkContext 列表
-${workContextsInfo || "暂无 WorkContext"}
 
-## 当前选中的 WorkContext
-${context.selectedWorkContext ? `- ${context.selectedWorkContext.workContextId}: ${context.selectedWorkContext.title}` : "无"}
-
-请做初步匹配判断：用户意图与哪个 WorkContext 相关？置信度如何？`;
+请做初步匹配判断：用户意图是什么？置信度如何？`;
   }
 
   // 解析第一步决策
@@ -727,15 +691,6 @@ ${agentDescriptions}
 
   // 构建用户 Prompt
   private buildUserPrompt(context: PromptContext): string {
-    const workContextsInfo = context.workContexts
-      .map(
-        (ctx) => `- ${ctx.workContextId}: ${ctx.title}
-    目标: ${ctx.goal}
-    状态: ${ctx.status}
-    更新时间: ${ctx.updatedAt}`
-      )
-      .join("\n");
-
     const recentRunsInfo = context.recentRuns
       ?.map(
         (run) => `- Run ${run.runId}: Agent=${run.agentId}, 状态=${run.status}
@@ -748,30 +703,20 @@ ${agentDescriptions}
 ## 用户消息
 """${context.userMessage}"""
 
-## 当前 Session 的 WorkContext 列表
-${workContextsInfo || "暂无 WorkContext"}
-
 ## 最近的执行记录
 ${recentRunsInfo}
-
-## 当前选中的 WorkContext
-${context.selectedWorkContext ? `- ${context.selectedWorkContext.workContextId}: ${context.selectedWorkContext.title}` : "无"}
 
 请根据以上信息，判断应该如何响应用户。`;
   }
 
   // 解析 LLM 决策响应
-  private parseDecision(content: string, context: PromptContext): OrchestrationDecision {
+  private parseDecision(content: string, _context: PromptContext): OrchestrationDecision {
     try {
       // 尝试提取 JSON
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const decision = JSON.parse(jsonMatch[0]) as OrchestrationDecision;
-        return {
-          ...decision,
-          // 如果没有指定 workContextId 但有选中的，使用选中的
-          workContextId: decision.workContextId || context.selectedWorkContext?.workContextId,
-        };
+        return decision;
       }
     } catch {
       // JSON 解析失败，使用默认决策
@@ -800,12 +745,12 @@ ${context.selectedWorkContext ? `- ${context.selectedWorkContext.workContextId}:
       sourceAgentId: "main_agent",
       targetAgentId: decision.targetAgentId,
       mode: "subagent",
-      workContextId: decision.workContextId || makeUid("work_context"),
+      sessionId,
       userMessage,
       handoffNote: decision.handoffNote || "请完成用户请求的任务",
       authority: {
-        scope: "work_context",
-        canRead: ["work_context", "run_trace", "artifact"],
+        scope: "session",
+        canRead: ["session", "run_trace", "artifact"],
         canWrite: ["agent_run", "agent_run_step", "artifact"],
       },
       expectedResult: "task_completion_or_clarification",
@@ -949,15 +894,6 @@ ${executionHistory}
 ## 最新执行结果（重点分析）
 Agent: ${lastResult?.agentId || "无"}
 结果: ${lastResult?.result.slice(0, 500) || "无"}...
-
-## 当前 WorkContext
-${context.selectedWorkContext
-        ? `- 标题: ${context.selectedWorkContext.title}
-- 目标: ${context.selectedWorkContext.goal}
-- 状态: ${context.selectedWorkContext.status}
-- 当前阶段: ${context.selectedWorkContext.currentStage || "未设置"}`
-        : "无选中 WorkContext"
-      }
 
 ## 用户原始请求
 """${context.userMessage}"""

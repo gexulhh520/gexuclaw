@@ -8,7 +8,7 @@
 /* -------------------------------------------------------------------------- */
 
 export type ContextRefKind =
-  | "work_context"
+  | "session"
   | "run"
   | "step"
   | "artifact"
@@ -25,11 +25,11 @@ export type ContextRef = {
   title: string;
   summary: string;
 
-  workContextUid?: string;
+  sessionId?: string;
   status?: string;
 
   source: {
-    table?: "work_contexts" | "agent_runs" | "agent_run_steps" | "agent_artifacts";
+    table?: "sessions" | "agent_runs" | "agent_run_steps" | "agent_artifacts";
     uid?: string;
     runUid?: string;
     stepIndex?: number;
@@ -108,7 +108,6 @@ export type RuntimeRunTrace = {
   status: string;
 
   sessionId?: string;
-  workContextUid?: string;
   parentRunId?: number;
 
   userMessage: string;
@@ -121,87 +120,41 @@ export type RuntimeRunTrace = {
 };
 
 /* -------------------------------------------------------------------------- */
-/*                               WorkContextCard                              */
-/* -------------------------------------------------------------------------- */
-
-export type WorkContextCard = {
-  workContextUid: string;
-  title: string;
-  goal: string;
-  status: string;
-
-  summary?: string;
-  progressSummary?: string;
-  currentStage?: string;
-  nextAction?: string;
-
-  currentFocus?: {
-    refId: string;
-    kind: string;
-    title: string;
-  } | null;
-
-  recentRefs?: string[];
-
-  openIssues?: Array<{
-    refId?: string;
-    summary: string;
-    severity?: "low" | "medium" | "high";
-    status: "open" | "resolved";
-  }>;
-
-  updatedAt: string;
-
-  latestRun?: {
-    runUid: string;
-    agentUid: string;
-    agentName?: string;
-    status: string;
-    summary?: string;
-    errorMessage?: string;
-  };
-
-  latestArtifact?: {
-    artifactUid: string;
-    title: string;
-    artifactType: string;
-    summary?: string;
-  };
-
-  signals: {
-    selectedInUI: boolean;
-    recentlyActive: boolean;
-    hasFailedRun: boolean;
-    hasOpenIssue: boolean;
-    hasRecentArtifact: boolean;
-    hasUnverifiedSideEffect?: boolean;
-  };
-
-  topRefs?: ContextRef[];
-};
-
-/* -------------------------------------------------------------------------- */
 /*                             SessionRuntimeSnapshot                         */
 /* -------------------------------------------------------------------------- */
 
 export type SessionRuntimeSnapshot = {
   userMessage: string;
+  effectiveUserMessage: string;
 
   session: {
     sessionUid: string;
     title?: string;
     description?: string;
+    metadata?: Record<string, unknown>;
   };
 
-  selectedWorkContextUid?: string;
-
-  workContexts: WorkContextCard[];
+  sessionState: {
+    currentStage?: string;
+    recoverable?: boolean;
+    lastEffectiveUserMessage?: string;
+    lastRecoverableRunUid?: string;
+    lastFailedRunUid?: string;
+    lastSuccessfulRunUid?: string;
+    recentRefs?: string[];
+    openIssues?: Array<{
+      refId?: string;
+      summary: string;
+      severity?: "low" | "medium" | "high";
+      status: "open" | "resolved";
+    }>;
+  };
 
   globalRecentRuns: RuntimeRunTrace[];
 
   globalRecentArtifacts: Array<{
     artifactUid: string;
-    workContextUid?: string;
+    sessionId?: string;
     title: string;
     artifactType: string;
     artifactRole?: string;
@@ -224,44 +177,13 @@ export type SessionRuntimeSnapshot = {
 
 export type MainDecisionInput = {
   userMessage: string;
-  selectedWorkContextUid?: string | null;
-
-  workContexts: WorkContextDecisionCard[];
+  effectiveUserMessage: string;
+  sessionState: SessionRuntimeSnapshot["sessionState"];
 
   refs: ContextRef[];
   relations: ContextRelation[];
 
   availableAgents: AgentDecisionCard[];
-};
-
-export type WorkContextDecisionCard = {
-  workContextUid: string;
-  title: string;
-  summary?: string;
-
-  currentStage?: string;
-  progressSummary?: string;
-  currentFocus?: {
-    refId: string;
-    kind: string;
-    title: string;
-  } | null;
-  recentRefs?: string[];
-  openIssues?: Array<{
-    refId?: string;
-    summary: string;
-    severity?: "low" | "medium" | "high";
-    status: "open" | "resolved";
-  }>;
-
-  signals: {
-    selectedInUI: boolean;
-    recentlyActive: boolean;
-    hasFailedRun: boolean;
-    hasOpenIssue: boolean;
-    hasRecentArtifact: boolean;
-    hasUnverifiedSideEffect?: boolean;
-  };
 };
 
 export type AgentDecisionCard = {
@@ -279,22 +201,12 @@ export type AgentDecisionCard = {
 export type MainDecision = {
   decisionType:
     | "answer_directly"
-    | "create_work_context"
-    | "use_existing_work_context"
-    | "switch_work_context"
     | "delegate"
     | "multi_step_plan"
     | "ask_user"
     | "explain_trace"
     | "verify_execution"
     | "recover_execution";
-
-  targetWorkContextUid: string | null;
-
-  createWorkContext: {
-    title: string;
-    goal: string;
-  } | null;
 
   primaryRefs: string[];
   secondaryRefs: string[];
@@ -314,7 +226,6 @@ export type MainDecision = {
   response: string | null;
 
   ambiguity: {
-    candidateWorkContextUids: string[];
     candidateRefIds: string[];
     question: string;
   } | null;
@@ -336,7 +247,7 @@ export type ExecutionPlan = {
     | "sequential_agents"
     | "parallel_agents";
 
-  workContextUid?: string;
+  sessionId: string;
 
   selectedRefs: string[];
 

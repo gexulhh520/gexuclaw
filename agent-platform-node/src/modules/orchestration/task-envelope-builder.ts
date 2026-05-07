@@ -41,7 +41,7 @@ export class TaskEnvelopeBuilder {
     return {
       envelopeUid: makeUid("envelope"),
       parentRunUid,
-      workContextUid: plan.workContextUid || "",
+      sessionId: plan.sessionId || "",
       targetAgentUid: step.targetAgentUid,
       objective: step.objective,
       originalUserMessage: undefined,
