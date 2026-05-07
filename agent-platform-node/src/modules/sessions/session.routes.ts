@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { ok } from "../../shared/api-response.js";
 import { createSessionSchema } from "./session.schema.js";
-import { createSession, getSessionByUid, getSessionWorkbench, listSessions } from "./session.service.js";
+import { createSession, getSessionByUid, getSessionWorkbench, listSessions, listArtifactsBySession } from "./session.service.js";
 
 export async function registerSessionRoutes(app: FastifyInstance) {
   // 列出会话
@@ -41,6 +41,15 @@ export async function registerSessionRoutes(app: FastifyInstance) {
     "/api/agent-platform/sessions/:sessionUid/workbench",
     async (request) => {
       return ok(await getSessionWorkbench(request.params.sessionUid));
+    }
+  );
+
+  // 获取会话的 artifacts
+  // GET /api/agent-platform/sessions/:sessionUid/artifacts
+  app.get<{ Params: { sessionUid: string } }>(
+    "/api/agent-platform/sessions/:sessionUid/artifacts",
+    async (request) => {
+      return ok(await listArtifactsBySession(request.params.sessionUid));
     }
   );
 }

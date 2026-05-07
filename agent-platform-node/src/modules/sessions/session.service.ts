@@ -118,3 +118,15 @@ export async function getSessionWorkbench(sessionUid: string) {
     artifacts: artifactList,
   };
 }
+
+// 获取会话的 artifacts
+export async function listArtifactsBySession(sessionUid: string) {
+  await getSessionByUid(sessionUid);
+
+  return db
+    .select()
+    .from(agentArtifacts)
+    .where(eq(agentArtifacts.sessionId, sessionUid))
+    .orderBy(desc(agentArtifacts.id))
+    .limit(100);
+}
