@@ -88,7 +88,7 @@ export class PluginManager {
 
     for (const record of enabledPlugins) {
       try {
-        const agentPlugin = this.buildAgentPluginFromRecord(record);
+        const agentPlugin = await this.buildAgentPluginFromRecord(record);
         if (agentPlugin) {
           this.registry.registerPlugin(agentPlugin);
           console.log(`[PluginManager] 加载插件: ${record.pluginId} (${record.providerType})`);
@@ -112,7 +112,7 @@ export class PluginManager {
     await repoEnablePlugin(pluginId);
 
     // 重新加载到注册表
-    const agentPlugin = this.buildAgentPluginFromRecord(record);
+    const agentPlugin = await this.buildAgentPluginFromRecord(record);
     if (agentPlugin) {
       this.registry.registerPlugin(agentPlugin);
     }
@@ -157,7 +157,7 @@ export class PluginManager {
     if (!record) throw new Error(`插件不存在: ${pluginId}`);
 
     if (record.enabled) {
-      const agentPlugin = this.buildAgentPluginFromRecord(record);
+      const agentPlugin = await this.buildAgentPluginFromRecord(record);
       if (agentPlugin) {
         this.registry.registerPlugin(agentPlugin);
       }
@@ -200,7 +200,7 @@ export class PluginManager {
   /**
    * 根据数据库记录构建 AgentPlugin
    */
-  private buildAgentPluginFromRecord(record: PluginRecord) {
+  private async buildAgentPluginFromRecord(record: PluginRecord) {
     switch (record.providerType) {
       case "builtin_code": {
         // 从代码中查找对应的 builtin 插件
@@ -222,28 +222,27 @@ export class PluginManager {
       }
 
       case "mcp": {
-        // MCP 插件当前阶段只做配置校验，不实际拉起
+        // MCP 插件：实际拉起 MCP 服务器
         const adapter = new McpPluginAdapter(record.pluginId);
-        const result = adapter.loadConfig(record.configJson);
+        const loadResult = adapter.loadConfig(record.configJson);
 
-        if (!result.success) {
-          console.warn(`[PluginManager] MCP 插件 ${record.pluginId} 配置校验失败: ${result.error}`);
+        if (!loadResult.success || !loadResult.config) {
+          console.warn(`[PluginManager] MCP 插件 ${record.pluginId} 配置加载失败: ${loadResult.error}`);
           return null;
         }
 
         this.mcpAdapters.set(record.pluginId, adapter);
 
-        // 返回一个 stub AgentPlugin
-        return {
-          pluginId: record.pluginId,
-          pluginType: "external" as const,
-          name: record.name,
-          description: record.description,
-          providerType: "mcp" as const,
-          status: record.enabled ? "active" as const : "disabled" as const,
-          createdAt: record.createdAt,
-          updatedAt: record.updatedAt,
-        };
+        // 初始化 MCP 连接
+        const initResult = await adapter.initialize(loadResult.config);
+
+        if (!initResult.success || !initResult.agentPlugin) {
+          console.error(`[PluginManager] MCP 插件 ${record.pluginId} 初始化失败: ${initResult.error}`);
+          return null;
+        }
+
+        console.log(`[PluginManager] MCP 插件 ${record.pluginId} 初始化成功`);
+        return initResult.agentPlugin;
       }
 
       default:

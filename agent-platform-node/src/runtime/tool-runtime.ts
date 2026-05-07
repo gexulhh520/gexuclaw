@@ -3,6 +3,7 @@ import { getTool, listTools, registerTool } from "../tools/tool-registry.js";
 import type { PluginRegistry } from "../modules/plugins/plugin-registry.js";
 import type { ToolDefinition } from "../tools/tool-types.js";
 import { createFilesystemTools } from "../modules/plugins/builtins/filesystem-core/filesystem-tools.js";
+import { McpPluginAdapter } from "../modules/plugins/adapters/mcp-plugin-adapter.js";
 
 /**
  * 工具运行时
@@ -117,8 +118,26 @@ export class ToolRuntime {
       return this.executeFilesystemTool(toolId, input);
     }
 
+    // 检查是否是 MCP 插件工具
+    const mcpResult = await this.executeMcpPluginTool(fullToolName, input);
+    if (mcpResult !== null) {
+      return mcpResult;
+    }
+
     // 其他插件使用 mock 实现
     return this.executeMockPluginTool(pluginId, toolId, input);
+  }
+
+  /**
+   * 执行 MCP 插件工具
+   * @param fullToolName 完整工具名（格式: pluginId__toolId）
+   * @param input 工具输入
+   * @returns 工具结果，如果不是 MCP 工具则返回 null
+   */
+  private async executeMcpPluginTool(fullToolName: string, input: unknown) {
+    const registry = McpPluginAdapter.getToolBridgeRegistry();
+    const result = await registry.executeTool(fullToolName, input as Record<string, unknown>);
+    return result;
   }
 
   /**
