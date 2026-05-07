@@ -73,17 +73,26 @@ export class McpToolBridge {
       .map((c) => c.text)
       .join("\n") ?? "";
 
+    const success = !mcpResult?.isError;
+
     return {
-      success: !mcpResult?.isError,
+      success,
       operation: {
-        type: "analyze",
-        target: originalToolName,
+        type: inferOperationType(originalToolName),
+        target: inferOperationTarget(originalToolName, args),
+        targetKind: inferTargetKind(originalToolName, args),
+      },
+      verification: {
+        required: false,
+        status: success ? "not_applicable" : "failed",
+        method: "mcp_tool_result",
+        evidence: textContent,
       },
       data: {
         result: mcpResult,
         textContent,
       },
-      outputRefs: [],
+      outputRefs: buildOutputRefs(originalToolName, args, mcpResult),
     };
   }
 
@@ -160,4 +169,75 @@ export class McpToolBridgeRegistry {
   getRegisteredPluginIds(): string[] {
     return Array.from(this.bridges.keys());
   }
+}
+
+function inferOperationType(toolName: string): "read" | "write" | "edit" | "append" | "delete" | "list" | "search" | "analyze" | "generate" | "verify" {
+  const name = toolName.toLowerCase();
+
+  if (name.includes("read") || name.includes("get") || name.includes("snapshot")) return "read";
+  if (name.includes("open") || name.includes("create") || name.includes("new")) return "write";
+  if (name.includes("write") || name.includes("fill") || name.includes("type")) return "write";
+  if (name.includes("edit") || name.includes("update")) return "edit";
+  if (name.includes("delete") || name.includes("remove") || name.includes("close")) return "delete";
+  if (name.includes("list")) return "list";
+  if (name.includes("search")) return "search";
+  if (name.includes("verify") || name.includes("check")) return "verify";
+
+  return "analyze";
+}
+
+function inferOperationTarget(toolName: string, args: Record<string, unknown>): string {
+  const candidates = [
+    args.url,
+    args.uri,
+    args.path,
+    args.filePath,
+    args.target,
+    args.query,
+    args.name,
+  ];
+
+  for (const item of candidates) {
+    if (typeof item === "string" && item.trim()) {
+      return item;
+    }
+  }
+
+  return toolName;
+}
+
+function inferTargetKind(
+  toolName: string,
+  args: Record<string, unknown>
+): "file" | "artifact" | "url" | "db_record" | "external_resource" | undefined {
+  const url = args.url || args.uri;
+
+  if (typeof url === "string" && /^https?:\/\//i.test(url)) {
+    return "url";
+  }
+
+  if (typeof args.path === "string" || typeof args.filePath === "string") {
+    return "file";
+  }
+
+  return "external_resource";
+}
+
+function buildOutputRefs(
+  toolName: string,
+  args: Record<string, unknown>,
+  mcpResult: unknown
+) {
+  const target = inferOperationTarget(toolName, args);
+
+  if (!target || target === toolName) {
+    return [];
+  }
+
+  return [
+    {
+      uri: target,
+      role: "result" as const,
+    },
+  ];
 }

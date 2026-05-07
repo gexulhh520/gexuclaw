@@ -15,11 +15,15 @@ export function evaluateStepResult(input: {
   const { step, agentResult } = input;
   const issues: string[] = [];
 
+  const blockingOpenIssues = agentResult.openIssues.filter(
+    (issue) => issue.severity === "high" || issue.severity === "medium"
+  );
+
   if (agentResult.status === "failed") {
     issues.push("Agent run failed.");
   }
 
-  for (const issue of agentResult.openIssues) {
+  for (const issue of blockingOpenIssues) {
     issues.push(issue.message);
   }
 
@@ -43,9 +47,7 @@ export function evaluateStepResult(input: {
     );
 
     if (unverifiedFileTouches.length > 0) {
-      issues.push(
-        `There are ${unverifiedFileTouches.length} unverified file changes.`
-      );
+      issues.push(`There are ${unverifiedFileTouches.length} unverified file changes.`);
     }
   }
 
@@ -84,7 +86,7 @@ export function evaluateStepResult(input: {
     }
   }
 
-  if (issues.length === 0 && agentResult.status === "success") {
+  if (issues.length === 0) {
     return {
       status: "success",
       issues: [],

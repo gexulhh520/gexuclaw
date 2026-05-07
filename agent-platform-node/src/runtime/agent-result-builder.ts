@@ -180,13 +180,11 @@ export async function buildAgentResult(input: {
   }
 
   // 6. 从 failed operations 生成 openIssues
-  const openIssues: AgentResult["openIssues"] = operations
-    .filter((op) => op.status === "failed")
-    .map((op) => ({
-      type: op.operationType ?? "tool_execution",
-      message: `${op.toolName || "tool"} 执行失败：${op.errorMessage || "未知错误"}`,
-      severity: "high" as const,
-    }));
+  const openIssues: AgentResult["openIssues"] = buildOpenIssues({
+    inputStatus: input.status,
+    summary: input.summary,
+    operations,
+  });
 
   // 7. 生成 retryAdvice
   const retryAdvice: AgentResult["retryAdvice"] = {
@@ -250,4 +248,52 @@ function createTouchedResourceFromOperation(input: {
     operation: operationType,
     verified: normalizeVerificationStatus(verification),
   };
+}
+
+function buildOpenIssues(input: {
+  inputStatus: "success" | "partial_success" | "failed";
+  summary: string;
+  operations: AgentResult["operations"];
+}): AgentResult["openIssues"] {
+  const { inputStatus, summary, operations } = input;
+
+  const failedOps = operations.filter((op) => op.status === "failed");
+
+  if (failedOps.length === 0) {
+    return [];
+  }
+
+  /**
+   * 如果 run 已经有最终 summary，并且状态是 partial_success，
+   * 说明执行过程虽然出现过失败，但子 Agent 已经给出了最终结果。
+   *
+   * 此时 failed operation 不应默认升级为 high openIssue。
+   * 它应该作为 operations trace 保留。
+   * 是否影响后续继续执行，由主 Agent 在 step review 中结合：
+   * - Objective 是否完成
+   * - summary 是否可信
+   * - verification 是否通过
+   * - producedArtifacts / touchedResources / outputRefs 是否可用
+   * 综合判断。
+   */
+  if (inputStatus === "partial_success" && summary.trim().length > 0) {
+    return failedOps.map((op) => ({
+      type: op.operationType ?? "tool_execution",
+      message: `${op.toolName || "tool"} 曾执行失败：${op.errorMessage || "未知错误"}。该失败作为执行轨迹保留，不直接判定为当前关键问题。`,
+      severity: "low" as const,
+    }));
+  }
+
+  /**
+   * 如果 run 本身 failed，失败工具调用才默认是 high issue。
+   */
+  if (inputStatus === "failed") {
+    return failedOps.map((op) => ({
+      type: op.operationType ?? "tool_execution",
+      message: `${op.toolName || "tool"} 执行失败：${op.errorMessage || "未知错误"}`,
+      severity: "high" as const,
+    }));
+  }
+
+  return [];
 }

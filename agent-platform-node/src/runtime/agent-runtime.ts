@@ -105,6 +105,49 @@ type RunStepInsert = {
   metadata?: unknown;
 };
 
+type RunLoopResult = {
+  summary: string;
+  stepsCount: number;
+  hasFailedTool: boolean;
+  hasUnverifiedSideEffect: boolean;
+  hasFinalAnswer: boolean;
+};
+
+function determineRunStatus(result: RunLoopResult): "success" | "partial_success" | "failed" {
+  /**
+   * 状态判断原则：
+   *
+   * 1. 有 final answer：
+   *    说明子 Agent 已经自然收束，并给出了最终结果。
+   *    此时中间工具失败不应该直接导致 failed。
+   *    如果存在工具失败或未验证副作用，先标记为 partial_success，
+   *    后续由主 Agent 结合 summary、verification、openIssues 判断是否继续。
+   *
+   * 2. 没有 final answer：
+   *    说明执行没有正常收束。
+   *    如果此时存在工具失败，可以判定 failed。
+   *
+   * 3. unverified side effect 不是失败，只是需要进一步验收。
+   */
+  if (result.hasFinalAnswer) {
+    if (result.hasFailedTool || result.hasUnverifiedSideEffect) {
+      return "partial_success";
+    }
+
+    return "success";
+  }
+
+  if (result.hasFailedTool) {
+    return "failed";
+  }
+
+  if (result.hasUnverifiedSideEffect) {
+    return "partial_success";
+  }
+
+  return "success";
+}
+
 function resolveArtifactDirectiveConfigFromTaskEnvelope(
   taskEnvelope?: TaskEnvelope
 ): ArtifactDirectiveConfig {
@@ -216,11 +259,7 @@ export class AgentRuntime {
       const finishedAt = nowIso();
 
       // 根据工具执行结果计算最终状态
-      const finalStatus = result.hasFailedTool
-        ? "failed"
-        : result.hasUnverifiedSideEffect
-          ? "partial_success"
-          : "success";
+      const finalStatus = determineRunStatus(result);
 
       // 构建标准 AgentResult
       const agentResult = await buildAgentResult({
@@ -555,6 +594,7 @@ export class AgentRuntime {
           stepsCount: stepIndex - 1,
           hasFailedTool,
           hasUnverifiedSideEffect,
+          hasFinalAnswer: true,
         };
       }
 
@@ -676,6 +716,7 @@ export class AgentRuntime {
       stepsCount: stepIndex - 1,
       hasFailedTool,
       hasUnverifiedSideEffect,
+      hasFinalAnswer: false,
     };
   }
 

@@ -1097,6 +1097,34 @@ ${context.selectedWorkContext
 5. 系统基础规则验收 ruleEvaluation
 6. 已完成 step 的简要结果
 
+## 子 Agent 步骤验收规则
+
+你验收的是"当前步骤 Objective 是否最终完成"，不是判断执行过程中是否出现过错误。
+
+最高优先级：
+
+1. currentStep.objective 是否完成
+2. taskEnvelope.objective 是否完成
+3. agentResult.summary 是否明确说明任务完成
+4. 是否存在验证证据：
+   - agentResult.operations[].verification.status === "verified"
+   - agentResult.touchedResources[].verified === true
+   - agentResult.producedArtifacts 非空
+   - agentResult.operations[].verification.evidence 中存在可用证据
+5. 当前是否仍存在会影响后续继续执行的关键问题
+
+重要规则：
+
+- 不要仅因为 agentResult.operations 中存在 failed 操作就判定失败。
+- failed operation 是过程 trace，不一定是最终失败。
+- 子 Agent 可能通过其他工具、其他路径、重试、间接方式完成任务。
+- 不要求失败工具必须被同一个工具或同一个目标的后续成功操作修复。
+- 对于任何执行型任务，最终可观察结果、验证证据、产物状态、子 Agent 最终说明，优先级高于中间某一次工具调用失败。
+- 如果 agentResult.status 是 partial_success，但 summary 明确说明目标完成，且 ruleEvaluation 没有阻塞问题，应该 decision=continue。
+- 如果 agentResult.openIssues 只有 low severity，且最终结果可用，应该 decision=continue。
+- 只有在核心 Objective 没完成、缺少必要结果、缺少必要验证，或当前仍存在会影响后续继续执行的关键问题时，才 retry_same_agent / fail。
+- safeToUseProducedRefs 表示后续步骤是否可以使用本步骤的结果。如果核心目标完成，即使中间有非阻塞错误，也应该为 true。
+
 你的任务：
 判断当前 step 是否可以被接受，以及下一步应该怎么做。
 
