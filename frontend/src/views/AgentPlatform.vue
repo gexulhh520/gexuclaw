@@ -553,6 +553,9 @@
                       <div v-else-if="isBase64Image(selectedArtifact.contentText)" class="base64-image-container">
                         <img :src="selectedArtifact.contentText" :alt="selectedArtifact.title" class="preview-image" />
                       </div>
+                      <div v-else-if="getBase64ImageFromContentJson(selectedArtifact.contentJson)" class="base64-image-container">
+                        <img :src="getBase64ImageFromContentJson(selectedArtifact.contentJson)" :alt="selectedArtifact.title" class="preview-image" />
+                      </div>
                       <div v-else class="image-placeholder">
                         <div class="placeholder-icon">🖼️</div>
                         <div class="placeholder-text">图片数据</div>
@@ -2119,6 +2122,21 @@ function getPageMeta(artifact: AgentArtifactRecord) {
 function isBase64Image(text: string): boolean {
   if (!text) return false;
   return /^data:image\/[a-z]+;base64,/.test(text);
+}
+
+// 从 contentJson 中提取 base64 图片数据
+function getBase64ImageFromContentJson(contentJson: string): string | null {
+  if (!contentJson || contentJson === '{}') return null;
+  try {
+    const data = JSON.parse(contentJson);
+    if (data && data.encoding === 'base64' && typeof data.data === 'string' && data.data) {
+      const mimeType = data.mimeType || 'image/png';
+      return `data:${mimeType};base64,${data.data}`;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 // 图片加载错误处理
