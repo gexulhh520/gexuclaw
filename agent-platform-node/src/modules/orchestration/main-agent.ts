@@ -35,6 +35,7 @@ export class MainAgent {
 
     const systemPrompt = this.buildMainDecisionSystemPrompt();
     const decisionInput = this.buildMainDecisionInput(input);
+    console.log(`[MainAgent] 决策输入: ${JSON.stringify(decisionInput, null, 2)}`);
 
     const raw = await this.modelClient.complete({
       systemPrompt,
@@ -738,11 +739,17 @@ ${context.sessionDescription || "无特定目标"}
       2
     );
 
+    console.log(`[MainAgent][reviewStepOutcome] userPrompt length=${userPrompt.length}`);
+    console.log(`[MainAgent][reviewStepOutcome] userPrompt content: ${userPrompt.substring(0, 3000)}`);
+
     const response = await this.modelClient.complete({
       systemPrompt,
       userMessage: userPrompt,
       temperature: 0.3,
     });
+
+    console.log(`[MainAgent][reviewStepOutcome] model response length=${response.content.length}`);
+    console.log(`[MainAgent][reviewStepOutcome] model response content: ${response.content.substring(0, 3000)}`);
 
     return this.parseStepOutcomeReview(response.content);
   }
@@ -810,14 +817,27 @@ ${context.sessionDescription || "无特定目标"}
     try {
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+        const jsonStr = jsonMatch[0];
+        console.log(`[MainAgent][parseStepOutcomeReview] extracted JSON length=${jsonStr.length}`);
+        console.log(`[MainAgent][parseStepOutcomeReview] JSON content: ${jsonStr.substring(0, 2000)}`);
+
+        const parsed = JSON.parse(jsonStr);
+        console.log(`[MainAgent][parseStepOutcomeReview] JSON parsed successfully`);
+
         const validated = stepOutcomeReviewSchema.safeParse(parsed);
         if (validated.success) {
+          console.log(`[MainAgent][parseStepOutcomeReview] schema validation passed`);
           return validated.data;
+        } else {
+          console.warn(`[MainAgent][parseStepOutcomeReview] schema validation failed:`, validated.error);
         }
+      } else {
+        console.warn(`[MainAgent][parseStepOutcomeReview] no JSON match found in content`);
+        console.log(`[MainAgent][parseStepOutcomeReview] raw content: ${content.substring(0, 2000)}`);
       }
-    } catch {
-      // 解析失败
+    } catch (error) {
+      console.error(`[MainAgent][parseStepOutcomeReview] JSON parse error:`, error);
+      console.log(`[MainAgent][parseStepOutcomeReview] raw content: ${content.substring(0, 2000)}`);
     }
 
     // 返回默认的保守决策
