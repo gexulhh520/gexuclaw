@@ -30,6 +30,8 @@ import { registerPluginReadItemTool } from "../modules/plugins/plugin-tools.js";
 import { renderTaskEnvelopeForAgent } from "../modules/orchestration/task-envelope-renderer.js";
 import type { TaskEnvelope } from "../modules/orchestration/task-envelope.types.js";
 import { buildAgentResult } from "./agent-result-builder.js";
+import { buildLlmToolMessageContent } from "./tool-result-llm-view.js";
+import { buildVisualObservationIfNeeded } from "./vision-observation-builder.js";
 
 // 扩展 RunAgentInput 类型，添加 runUid 用于事件推送
 type RunAgentInputExtended = {
@@ -668,10 +670,36 @@ export class AgentRuntime {
           metadata: toolEndMetadata,
         });
 
+        const visualObservation = await buildVisualObservationIfNeeded({
+          toolResult: decoratedToolResult.toolResult,
+          modelClient: this.modelClient,
+          provider: args.profile.provider,
+          modelName: args.profile.modelName,
+          baseUrl: args.profile.baseUrl,
+        });
+
+        if (visualObservation) {
+          await this.createStep({
+            runId: args.runId,
+            stepIndex: stepIndex++,
+            stepType: "observation",
+            content: visualObservation.summary,
+            output: visualObservation,
+            metadata: {
+              source: "vision_model",
+              parentToolCallId: toolCall.id,
+              parentToolName: toolCall.name,
+            },
+          });
+        }
+
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id,
-          content: jsonStringify(decoratedToolResult.toolResult),
+          content: buildLlmToolMessageContent({
+            toolResult: decoratedToolResult.toolResult,
+            visualObservation,
+          }),
         });
       }
       console.log(`[AgentRuntime] 第 ${turn + 1} 轮完成，消息数:`, messages.length);

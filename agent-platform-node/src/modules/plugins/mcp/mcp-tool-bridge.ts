@@ -8,6 +8,13 @@ import {
   runRuntimeResetPolicy,
 } from "./mcp-runtime-hook.js";
 
+type McpContentItem = {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+};
+
 export type McpToolBridgeConfig = {
   pluginId: string;
   mcpClient: McpClient;
@@ -142,20 +149,33 @@ export class McpToolBridge {
     args: Record<string, unknown>,
     rawResult: unknown
   ): ToolResult {
-    // 解析 MCP 工具返回结果
     const mcpResult = rawResult as {
-      content?: Array<{
-        type: string;
-        text?: string;
-        data?: unknown;
-      }>;
+      content?: McpContentItem[];
       isError?: boolean;
     };
 
-    const textContent = mcpResult?.content
-      ?.filter((c) => c.type === "text")
-      .map((c) => c.text)
-      .join("\n") ?? "";
+    const content = Array.isArray(mcpResult?.content) ? mcpResult.content : [];
+
+    const textContent = content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text ?? "")
+      .filter(Boolean)
+      .join("\n");
+
+    const imageItems = content
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => item.type === "image" && typeof item.data === "string");
+
+    const imageRefs = imageItems.map(({ item, index }) => {
+      const mimeType = item.mimeType || "image/png";
+      return {
+        refId: `${originalToolName}:image:${index + 1}`,
+        mimeType,
+        contentIndex: index,
+        sizeChars: item.data?.length ?? 0,
+        canHydrateToVisionMessage: true,
+      };
+    });
 
     const success = !mcpResult?.isError;
 
@@ -170,13 +190,48 @@ export class McpToolBridge {
         required: false,
         status: success ? "not_applicable" : "failed",
         method: "mcp_tool_result",
-        evidence: textContent,
+        evidence: {
+          textContent,
+          imageCount: imageRefs.length,
+        },
       },
       data: {
-        result: mcpResult,
         textContent,
+        imageCount: imageRefs.length,
+        images: imageRefs,
+        resultSummary:
+          imageRefs.length > 0
+            ? `工具返回了 ${imageRefs.length} 张图片，图片已保存为 artifact，可用于视觉模型分析。`
+            : textContent,
       },
-      outputRefs: buildOutputRefs(originalToolName, args, mcpResult),
+      artifactCandidates: imageItems.map(({ item, index }) => {
+        const mimeType = item.mimeType || "image/png";
+
+        return {
+          kind: "image" as const,
+          title: `MCP 图片结果 - ${originalToolName} #${index + 1}`,
+          mimeType,
+          contentJson: {
+            encoding: "base64",
+            data: item.data!,
+            mimeType,
+          },
+          metadata: {
+            source: "mcp",
+            toolName: originalToolName,
+            contentIndex: index,
+            sizeChars: item.data!.length,
+          },
+          defaultRole: "intermediate" as const,
+        };
+      }),
+      outputRefs: [
+        ...buildOutputRefs(originalToolName, args, mcpResult),
+        ...imageRefs.map((image) => ({
+          refId: image.refId,
+          role: "result" as const,
+        })),
+      ],
     };
   }
 

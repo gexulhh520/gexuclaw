@@ -15,13 +15,13 @@ export const stepOutcomeReviewSchema = z.object({
 
   issues: z.array(z.string()).default([]),
 
-  retryInstruction: z.string().optional(),
+  retryInstruction: z.string().nullable().optional(),
 
-  replanInstruction: z.string().optional(),
+  replanInstruction: z.string().nullable().optional(),
 
-  userQuestion: z.string().optional(),
+  userQuestion: z.string().nullable().optional(),
 
-  finalMessage: z.string().optional(),
+  finalMessage: z.string().nullable().optional(),
 
   reasoning: z.string().min(1),
 });

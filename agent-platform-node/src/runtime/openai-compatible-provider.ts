@@ -121,7 +121,7 @@ export class OpenAICompatibleProvider {
     return messages.map((message) => {
       const normalized: Record<string, unknown> = {
         role: message.role,
-        content: message.content ?? "",
+        content: message.content,
       };
 
       if (message.tool_call_id) {

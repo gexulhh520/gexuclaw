@@ -5,9 +5,23 @@ import {
   type OpenAICompatibleProviderConfig,
 } from "./provider-config.js";
 
+export type TextContentPart = {
+  type: "text";
+  text: string;
+};
+
+export type ImageUrlContentPart = {
+  type: "image_url";
+  image_url: {
+    url: string;
+  };
+};
+
+export type ChatContent = string | Array<TextContentPart | ImageUrlContentPart>;
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: ChatContent;
   tool_call_id?: string;
   tool_calls?: Array<{
     id: string;
@@ -197,14 +211,17 @@ export class ModelClient {
   }
 
   private invokeMock(input: ModelClientInput): ModelClientResult {
-    const latestUser =
-      [...input.messages].reverse().find((message) => message.role === "user")?.content ?? "";
+    const latestUser = contentToText(
+      [...input.messages].reverse().find((message) => message.role === "user")?.content
+    );
 
-    const latestTool =
-      [...input.messages].reverse().find((message) => message.role === "tool")?.content ?? "";
+    const latestTool = contentToText(
+      [...input.messages].reverse().find((message) => message.role === "tool")?.content
+    );
 
-    const systemMessage =
-      input.messages.find((message) => message.role === "system")?.content ?? "";
+    const systemMessage = contentToText(
+      input.messages.find((message) => message.role === "system")?.content
+    );
 
     const artifactDirectivesEnabled =
       systemMessage.includes("Artifact directives are enabled for this task.") ||
@@ -291,4 +308,17 @@ export class ModelClient {
       return null;
     }
   }
+}
+
+export function contentToText(content: ChatContent | undefined): string {
+  if (!content) return "";
+
+  if (typeof content === "string") {
+    return content;
+  }
+
+  return content
+    .filter((part): part is TextContentPart => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
 }
