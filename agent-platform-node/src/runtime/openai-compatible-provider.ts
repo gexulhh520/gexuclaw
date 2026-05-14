@@ -65,6 +65,7 @@ export class OpenAICompatibleProvider {
       bodyChars: JSON.stringify(body).length,
       timeoutMs,
     });
+    // console.log("[OpenAICompatibleProvider] request body:", JSON.stringify(body, null, 2));
 
     try {
       const completion = await this.client.chat.completions.create(

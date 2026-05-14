@@ -28,6 +28,7 @@ import {
   type StepRetryState,
 } from "./step-repair-policy.js";
 import { buildRetryTaskEnvelope } from "./retry-task-envelope.js";
+import { buildMainChatHistoryMessages } from "./main-chat-history-builder.js";
 
 const runtime = new AgentRuntime({ pluginRegistry });
 const mainAgent = new MainAgent();
@@ -483,24 +484,29 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       effectiveUserMessage,
     });
 
+    const mainHistoryMessages = await buildMainChatHistoryMessages({
+      sessionId,
+      limit: 6,
+    });
+
     const snapshot = await snapshotBuilder.build({
       sessionId,
       userMessage: message,
       effectiveUserMessage,
     });
 
-    const contextIndex = contextIndexBuilder.build(snapshot);
-
     const mainDecision = await mainAgent.decideWithSessionIndex({
       userMessage: message,
       snapshot,
-      contextIndex,
+      mainHistoryMessages,
     });
+
+    const emptyContextIndex = { refs: [], relations: [] };
 
     const validation = decisionValidator.validate({
       decision: mainDecision,
       snapshot,
-      contextIndex,
+      contextIndex: emptyContextIndex,
     });
 
     if (!validation.valid) {
@@ -526,7 +532,7 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
     const plan = planCompiler.compile({
       decision: normalizedDecision,
       snapshot,
-      contextIndex,
+      contextIndex: emptyContextIndex,
     });
 
     switch (plan.mode) {
@@ -553,12 +559,14 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
           "running"
         );
 
+        const executionContextIndex = contextIndexBuilder.build(snapshot);
+
         await executePlanAsync(
           plan,
           sessionId,
           effectiveUserMessage,
           mainRunId,
-          contextIndex
+          executionContextIndex
         );
 
         return;

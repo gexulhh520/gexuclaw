@@ -14,12 +14,12 @@ export class DecisionContractValidator {
   validate(input: {
     decision: MainDecision;
     snapshot: SessionRuntimeSnapshot;
-    contextIndex: SessionContextIndex;
+    contextIndex?: SessionContextIndex;
   }): ValidationResult {
-    const { decision, contextIndex } = input;
+    const { decision } = input;
     const issues: string[] = [];
 
-    const validRefIds = new Set(contextIndex.refs.map((ref) => ref.refId));
+    const validRefIds = new Set(input.contextIndex?.refs.map((ref) => ref.refId) ?? []);
     const validAgentUids = new Set(input.snapshot.availableAgents.map((a) => a.agentUid));
 
     // 1. primaryRefs 校验

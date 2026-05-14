@@ -83,7 +83,8 @@ export class ModelClient {
 
   async complete(input: {
     systemPrompt: string;
-    userMessage: string;
+    userMessage?: string;
+    messages?: ChatMessage[];
     provider?: string;
     modelName?: string;
     baseUrl?: string | null;
@@ -94,15 +95,19 @@ export class ModelClient {
     const providerName =
       input.provider || process.env.DEFAULT_MODEL_PROVIDER || "mock";
 
+    const messages: ChatMessage[] = [
+      { role: "system", content: input.systemPrompt },
+      ...(input.messages ?? [
+        { role: "user", content: input.userMessage ?? "" },
+      ]),
+    ];
+
     if (providerName === "mock") {
       const result = await this.invoke({
         provider: "mock",
         modelName: "mock-model",
         params: {},
-        messages: [
-          { role: "system", content: input.systemPrompt },
-          { role: "user", content: input.userMessage },
-        ],
+        messages,
         tools: [],
       });
 
@@ -114,7 +119,7 @@ export class ModelClient {
       baseUrl: input.baseUrl,
       modelName: input.modelName,
     });
- //console.log("[MainAgent] getProviderConfig:", config);
+
     const result = await this.invoke({
       provider: providerName,
       modelName: input.modelName || config.defaultModel,
@@ -124,13 +129,10 @@ export class ModelClient {
         maxTokens: input.maxTokens ?? config.defaultMaxTokens ?? 1000,
         timeoutMs: input.timeoutMs ?? config.timeoutMs,
       },
-      messages: [
-        { role: "system", content: input.systemPrompt },
-        { role: "user", content: input.userMessage },
-      ],
+      messages,
       tools: [],
     });
-    //console.log("[MainAgent] invoke result.content:", result.content);
+
     return { content: result.content };
   }
 

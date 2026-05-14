@@ -1,9 +1,10 @@
 import { ModelClient } from "../../runtime/model-client.js";
+import type { ChatMessage } from "../../runtime/model-client.js";
 import { makeUid } from "../../shared/ids.js";
 import type { OrchestrationDecision, DelegateEnvelope } from "./orchestration.schema.js";
 import type { PromptContext, AgentCapabilitySummary, WorkContextDetail } from "./context-builder.js";
 import { mainDecisionSchema } from "./main-decision.schema.js";
-import type { SessionRuntimeSnapshot, SessionContextIndex, MainDecision, MainDecisionInput } from "./orchestration.types.js";
+import type { SessionRuntimeSnapshot, SessionContextIndex, MainDecision } from "./orchestration.types.js";
 import { stepOutcomeReviewSchema, type StepOutcomeReview } from "./step-outcome-review.schema.js";
 import { finalResultSummarySchema, type FinalResultSummary } from "./final-result-summary.schema.js";
 import type { ExecutionPlan } from "./orchestration.types.js";
@@ -20,27 +21,37 @@ export class MainAgent {
   }
 
   /**
-   * 基于 SessionRuntimeSnapshot + SessionContextIndex 做结构化决策
+   * 基于 SessionRuntimeSnapshot + 主对话历史 做结构化决策
    * 输出 MainDecision JSON
    */
   async decideWithSessionIndex(input: {
     userMessage: string;
     snapshot: SessionRuntimeSnapshot;
-    contextIndex: SessionContextIndex;
+    mainHistoryMessages?: ChatMessage[];
   }): Promise<MainDecision> {
     console.log(`[MainAgent] decideWithSessionIndex 开始`);
     console.log(`[MainAgent] 用户消息: ${input.userMessage.slice(0, 100)}...`);
     console.log(`[MainAgent] SessionId: ${input.snapshot.session.sessionUid}`);
-    console.log(`[MainAgent] Refs数量: ${input.contextIndex.refs.length}`);
+    console.log(`[MainAgent] 历史消息数: ${input.mainHistoryMessages?.length ?? 0}`);
 
-    const systemPrompt = this.buildMainDecisionSystemPrompt();
-    const decisionInput = this.buildMainDecisionInput(input);
-    console.log(`[MainAgent] 决策输入: ${JSON.stringify(decisionInput, null, 2)}`);
+    const systemPrompt = this.buildMainDecisionSystemPrompt(
+      input.snapshot.availableAgents
+    );
+
+    const currentInput = this.buildCurrentMainDecisionInput(input);
+
+    console.log(`[MainAgent] 当前决策输入: ${JSON.stringify(currentInput, null, 2)}`);
 
     const raw = await this.modelClient.complete({
       systemPrompt,
-      userMessage: JSON.stringify(decisionInput, null, 2),
-      temperature: 1,
+      messages: [
+        ...(input.mainHistoryMessages ?? []),
+        {
+          role: "user",
+          content: JSON.stringify(currentInput, null, 2),
+        },
+      ],
+      temperature: 0.3,
     });
 
     const decision = await this.parseMainDecision(raw.content);
@@ -53,35 +64,25 @@ export class MainAgent {
     return decision;
   }
 
-  private buildMainDecisionInput(input: {
+  private buildCurrentMainDecisionInput(input: {
     userMessage: string;
     snapshot: SessionRuntimeSnapshot;
-    contextIndex: SessionContextIndex;
-  }): MainDecisionInput {
+  }) {
+    const sessionState = input.snapshot.sessionState;
+
     return {
       userMessage: input.userMessage,
       effectiveUserMessage: input.snapshot.effectiveUserMessage,
-      sessionState: input.snapshot.sessionState,
-      refs: this.truncateRefsForDecision(input.contextIndex.refs),
-      relations: input.contextIndex.relations,
-      availableAgents: input.snapshot.availableAgents.map((agent) => ({
-        agentUid: agent.agentUid,
-        name: agent.name,
-        description: this.truncateText(agent.description, 200),
-        capabilities: agent.capabilities,
-      })),
+      sessionState: {
+        currentStage: sessionState.currentStage,
+        recoverable: sessionState.recoverable,
+        lastRecoverableRunUid: sessionState.lastRecoverableRunUid,
+        lastFailedRunUid: sessionState.lastFailedRunUid,
+        lastSuccessfulRunUid: sessionState.lastSuccessfulRunUid,
+        recentRefs: sessionState.recentRefs?.slice(0, 5) ?? [],
+        openIssues: sessionState.openIssues?.slice(0, 5) ?? [],
+      },
     };
-  }
-
-  private truncateRefsForDecision(refs: SessionContextIndex["refs"]): SessionContextIndex["refs"] {
-    const MAX_SUMMARY_LENGTH = 300;
-    const MAX_TITLE_LENGTH = 100;
-
-    return refs.map((ref) => ({
-      ...ref,
-      title: this.truncateText(ref.title, MAX_TITLE_LENGTH),
-      summary: this.truncateText(ref.summary, MAX_SUMMARY_LENGTH),
-    }));
   }
 
   private truncateText(text: string | undefined | null, maxLength: number): string {
@@ -122,8 +123,8 @@ export class MainAgent {
 1. 所有顶层字段都必须存在。
 2. 缺失数组字段用 []。
 3. 缺失对象字段用 null。
-4. primaryRefs、secondaryRefs、plan.steps[].inputRefIds 必须来自输入 refs[].refId。
-5. targetAgentUid、plan.steps[].targetAgentUid 必须来自 availableAgents[].agentUid。
+4. 当前常规决策不提供 refs / relations，所以 primaryRefs、secondaryRefs、plan.steps[].inputRefIds 默认输出 []。
+5. targetAgentUid、plan.steps[].targetAgentUid 必须来自系统提示中的可用子 Agent 列表。
 6. plan 只有执行型决策填写，否则为 null。
 7. response 只有 answer_directly 填写，否则为 null。
 8. ambiguity 只有 ask_user 填写，否则为 null。
@@ -148,25 +149,42 @@ export class MainAgent {
 }`;
   }
 
-  private buildMainDecisionSystemPrompt(): string {
+  private buildMainDecisionSystemPrompt(
+    availableAgents: SessionRuntimeSnapshot["availableAgents"]
+  ): string {
     const contract = this.getMainDecisionJsonContract();
     const fallbackExample = this.getAskUserFallbackExample();
+
+    const agentDescriptions = availableAgents
+      .map((agent) => {
+        const capabilities = agent.capabilities?.length
+          ? agent.capabilities.join(", ")
+          : "无";
+        const description = this.truncateText(agent.description, 200);
+
+        return `- ${agent.agentUid}: ${agent.name}
+  描述: ${description}
+  能力: ${capabilities}`;
+      })
+      .join("\n");
 
     return `你是主 Agent 的结构化决策器，不是执行器。
 
 你会收到：
-1. userMessage：用户本轮原始消息
-2. effectiveUserMessage：系统恢复后的真实任务消息；如果用户说"继续/重试"，这里可能是上一轮失败任务
-3. sessionState：当前会话状态
-4. ContextRefs：当前 Session 下的 refs
-5. ContextRelations：refs 之间的关系
-6. availableAgents：可用 Agent 列表
+1. 历史 messages：最近几轮用户与主 Agent 的对话
+2. 当前 userMessage：用户本轮原始消息
+3. 当前 effectiveUserMessage：系统恢复后的真实任务消息；如果用户说"继续/重试"，这里可能是上一轮失败任务
+4. 当前 sessionState：极简会话状态
+
+可用子 Agent：
+${agentDescriptions || "无可用子 Agent"}
 
 你必须输出一个合法 MainDecision JSON。
 不要输出 Markdown。
 不要输出代码块。
 不要输出解释性文字。
-不要编造不存在的 refId、agentUid。
+不要编造不存在的 agentUid。
+当前常规决策不提供 refs / relations，因此 primaryRefs、secondaryRefs、plan.steps[].inputRefIds 通常应为空数组。
 
 ${contract}
 
@@ -178,19 +196,14 @@ ${fallbackExample}
 1. 如果用户只是问候、普通问答，使用 answer_directly。
 2. 如果任务明确且单个 Agent 可以完成，使用 delegate。
 3. 如果任务需要多个步骤，使用 multi_step_plan。
-4. 如果 userMessage 是"继续/重试/接着"，要优先参考 effectiveUserMessage、sessionState.lastRecoverableRunUid、failed/recoverable refs。
+4. 如果 userMessage 是"继续/重试/接着"，要优先参考 effectiveUserMessage 和 sessionState。
 5. 如果 sessionState.currentStage=blocked 或 recoverable=true，优先考虑 recover_execution。
-6. 如果用户表达执行失败、报错、没生效、没写入，优先关注 tags/status/evidence 中包含 failed、error、unverified、write_failed 的 refs。
-7. primaryRefs 是本轮主要处理对象。
-8. secondaryRefs 是相关但本轮不主要处理的对象。
-9. primaryRefs、secondaryRefs、plan.steps[].inputRefIds 必须来自 refs[].refId。
-10. targetAgentUid、plan.steps[].targetAgentUid 必须来自 availableAgents[].agentUid。
-11. 如果多个候选都强且无法判断主次，decisionType 必须是 ask_user。
-12. answer_directly 必须填写 response。
-13. ask_user 必须填写 ambiguity.question。
-14. delegate、recover_execution、verify_execution、multi_step_plan 必须填写 plan.steps。
-15. reasoning 只写简短内部理由，不超过 300 字。
-16. 如果 plan 中有多个 steps，后续步骤依赖前面步骤结果时，后续步骤的 inputRefIds 可以先留空或引用已有 refs；系统会通过 dependsOn 自动传递前一步 produced refs。`;
+6. targetAgentUid、plan.steps[].targetAgentUid 必须来自上面的可用子 Agent 列表。
+7. 当前常规决策没有加载 refs / relations，所以 primaryRefs、secondaryRefs、plan.steps[].inputRefIds 默认输出 []。
+8. answer_directly 必须填写 response。
+9. ask_user 必须填写 ambiguity.question。
+10. delegate、recover_execution、verify_execution、multi_step_plan 必须填写 plan.steps。
+11. reasoning 只写简短内部理由，不超过 300 字。`;
   }
 
   private async parseMainDecision(content: string): Promise<MainDecision> {
