@@ -54,6 +54,7 @@ type RunAgentInputExtended = {
     maxSteps: number;
   };
   userMessage: string;
+  historyMessages?: ChatMessage[];
   handoffNote?: string;
   originalUserMessage?: string;
   taskEnvelope?: TaskEnvelope;
@@ -83,6 +84,7 @@ type RunAgentInput = {
     maxSteps: number;
   };
   userMessage: string;
+  historyMessages?: ChatMessage[];
   handoffNote?: string;
   originalUserMessage?: string;
   taskEnvelope?: TaskEnvelope;
@@ -104,6 +106,15 @@ type RunStepInsert = {
   output?: unknown;
   metadata?: unknown;
 };
+
+function sanitizeHistoryMessages(messages: ChatMessage[] | undefined): ChatMessage[] {
+  return (messages ?? [])
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+}
 
 type RunLoopResult = {
   summary: string;
@@ -459,8 +470,11 @@ export class AgentRuntime {
     console.log(effectiveUserMessage);
     console.log("========== END USER MESSAGE ==========\n");
 
+    const historyMessages = sanitizeHistoryMessages(args.input.historyMessages);
+
     const messages: ChatMessage[] = [
       { role: "system", content: systemMessage },
+      ...historyMessages,
       { role: "user", content: effectiveUserMessage },
     ];
 

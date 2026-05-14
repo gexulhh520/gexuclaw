@@ -11,7 +11,7 @@ import { MainAgent, type CandidateDomainAgent } from "./main-agent.js";
 import { runEventBus } from "../../shared/event-bus.js";
 import { pluginRegistry } from "../plugins/plugin-registry-instance.js";
 import { buildMainChatHistoryMessages } from "./main-chat-history-builder.js";
-import { buildDomainAgentHistoryTurns } from "./domain-agent-history-builder.js";
+import { buildDomainAgentHistoryMessages } from "./domain-agent-history-builder.js";
 import type {
   DomainAgentPlan,
   DomainPlanStep,
@@ -408,11 +408,6 @@ function buildDomainAgentStepTaskMessage(input: {
     summary: string;
     status: string;
   }>;
-  historyTurns: Array<{
-    taskMessage: string;
-    resultSummary: string;
-    status: string;
-  }>;
 }): string {
   const planText = input.plan.steps
     .map((step, index) => {
@@ -426,22 +421,6 @@ function buildDomainAgentStepTaskMessage(input: {
         .map((step) => `- ${step.stepUid}: ${step.summary}`)
         .join("\n")
     : "暂无。";
-
-  const historyText = input.historyTurns.length
-    ? input.historyTurns
-        .map((turn, index) => {
-          return `### Turn ${index + 1}
-Task from MainAgent:
-${turn.taskMessage}
-
-${input.selectedAgent.name} Summary:
-${turn.resultSummary}
-
-Status:
-${turn.status}`;
-        })
-        .join("\n\n")
-    : "暂无历史任务摘要。";
 
   return `你是当前任务选定的领域执行Agent：${input.selectedAgent.name}。
 
@@ -464,9 +443,6 @@ stepUid: ${input.currentStep.stepUid}
 objective: ${input.currentStep.objective}
 expectedResult: ${input.currentStep.expectedResult}
 doneCriteria: ${input.currentStep.doneCriteria}
-
-## 你的历史任务摘要
-${historyText}
 
 ## 执行要求
 - 只执行当前步骤，不要擅自扩展到其他步骤。
@@ -657,7 +633,7 @@ async function executeDomainAgentPlan(input: {
     const currentStep = steps[i];
     console.log(`[executeDomainAgentPlan] Executing step ${i + 1}/${steps.length}: ${currentStep.stepUid}`);
 
-    const historyTurns = await buildDomainAgentHistoryTurns({
+    const historyMessages = await buildDomainAgentHistoryMessages({
       sessionId: input.sessionId,
       agentId: input.selectedAgent.agent.id,
       limit: 3,
@@ -673,7 +649,6 @@ async function executeDomainAgentPlan(input: {
       plan: input.plan,
       currentStep,
       completedSteps,
-      historyTurns,
     });
 
     let retryCount = 0;
@@ -686,6 +661,9 @@ async function executeDomainAgentPlan(input: {
           agentRecord: input.selectedAgent.agent,
           versionRecord: input.selectedAgent.version,
           userMessage: stepTaskMessage,
+          historyMessages,
+          originalUserMessage: undefined,
+          taskEnvelope: undefined,
           sessionId: input.sessionId,
           parentRunId: mainRun.id,
           mode: "subagent",
@@ -694,7 +672,7 @@ async function executeDomainAgentPlan(input: {
         stepResult = {
           summary: runResult.summary || "执行完成",
           status: runResult.status,
-          agentResult: runResult as unknown as AgentResult,
+          agentResult: runResult.agentResult,
         };
 
         if (runResult.status === "success" || runResult.status === "partial_success") {

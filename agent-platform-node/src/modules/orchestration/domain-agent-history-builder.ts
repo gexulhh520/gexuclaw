@@ -1,18 +1,13 @@
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { agentRuns } from "../../db/schema.js";
+import type { ChatMessage } from "../../runtime/model-client.js";
 
-export type DomainAgentHistoryTurn = {
-  taskMessage: string;
-  resultSummary: string;
-  status: string;
-};
-
-export async function buildDomainAgentHistoryTurns(input: {
+export async function buildDomainAgentHistoryMessages(input: {
   sessionId: string;
   agentId: number;
   limit?: number;
-}): Promise<DomainAgentHistoryTurn[]> {
+}): Promise<ChatMessage[]> {
   const limit = input.limit ?? 3;
 
   const runs = await db
@@ -34,9 +29,23 @@ export async function buildDomainAgentHistoryTurns(input: {
     .orderBy(desc(agentRuns.id))
     .limit(limit);
 
-  return runs.reverse().map((run) => ({
-    taskMessage: run.userMessage,
-    resultSummary: run.resultSummary ?? "",
-    status: run.status,
-  }));
+  return runs.reverse().flatMap((run): ChatMessage[] => {
+    const messages: ChatMessage[] = [];
+
+    if (run.userMessage?.trim()) {
+      messages.push({
+        role: "user",
+        content: run.userMessage,
+      });
+    }
+
+    if (run.resultSummary?.trim()) {
+      messages.push({
+        role: "assistant",
+        content: run.resultSummary,
+      });
+    }
+
+    return messages;
+  });
 }
