@@ -1,75 +1,29 @@
 import { desc, eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { agents, agentRuns, agentArtifacts, agentVersions, modelProfiles, sessions } from "../../db/schema.js";
+import { agents, agentRuns, sessions, agentVersions } from "../../db/schema.js";
 import { notFound } from "../../shared/errors.js";
 import { makeUid } from "../../shared/ids.js";
 import { jsonParse, jsonStringify } from "../../shared/json.js";
 import { nowIso } from "../../shared/time.js";
 import { getCurrentAgentVersion } from "../agents/agent.service.js";
 import { AgentRuntime } from "../../runtime/agent-runtime.js";
-import { MainAgent } from "./main-agent.js";
+import { MainAgent, type CandidateDomainAgent } from "./main-agent.js";
 import { runEventBus } from "../../shared/event-bus.js";
 import { pluginRegistry } from "../plugins/plugin-registry-instance.js";
-import { SessionRuntimeSnapshotBuilder } from "./session-runtime-snapshot-builder.js";
-import { SessionContextIndexBuilder } from "./session-context-index-builder.js";
-import { DecisionContractValidator } from "./decision-contract-validator.js";
-import { ExecutionPlanCompiler } from "./execution-plan-compiler.js";
-import { TaskEnvelopeBuilder } from "./task-envelope-builder.js";
-import { renderTaskEnvelopeForAgent } from "./task-envelope-renderer.js";
-import type { ChatRequestInput, ChatResponse, OrchestrationDecision, DelegateEnvelope } from "./orchestration.schema.js";
-import type { AgentCapabilitySummary } from "./context-builder.js";
-import type { AgentResult } from "../../runtime/agent-result.js";
-import { evaluateStepResult } from "./step-result-evaluator.js";
-import {
-  createStepRetryState,
-  recordRetryAttempt,
-  MAX_STEP_RETRIES,
-  MAX_TOTAL_REPAIRS,
-  type StepRetryState,
-} from "./step-repair-policy.js";
-import { buildRetryTaskEnvelope } from "./retry-task-envelope.js";
 import { buildMainChatHistoryMessages } from "./main-chat-history-builder.js";
+import { buildDomainAgentHistoryTurns } from "./domain-agent-history-builder.js";
+import type {
+  DomainAgentPlan,
+  DomainPlanStep,
+} from "./domain-agent-planning.schema.js";
+import type { ChatRequestInput, ChatResponse } from "./orchestration.schema.js";
+import type { AgentResult } from "../../runtime/agent-result.js";
 
 const runtime = new AgentRuntime({ pluginRegistry });
 const mainAgent = new MainAgent();
-const snapshotBuilder = new SessionRuntimeSnapshotBuilder();
-const contextIndexBuilder = new SessionContextIndexBuilder();
-const decisionValidator = new DecisionContractValidator();
-const planCompiler = new ExecutionPlanCompiler();
-const taskEnvelopeBuilder = new TaskEnvelopeBuilder();
 
-const ENABLE_LEGACY_FALLBACK = false;
-
-// 最大链式委派深度，防止无限循环
-const MAX_DELEGATION_DEPTH = 5;
-
-// 获取可用 Agent 列表
-async function getAvailableAgents(): Promise<AgentCapabilitySummary[]> {
-  const agents = await db.query.agents.findMany({
-    where: (agents, { eq }) => eq(agents.status, "active"),
-  });
-
-  return agents.map((agent) => {
-    const capabilities = jsonParse<string[]>(agent.capabilitiesJson, []);
-    
-    // 获取该 Agent 挂载的插件信息
-    const attachedPlugins = pluginRegistry.getPluginsForAgent(agent.id);
-    const plugins = attachedPlugins.map((p) => ({
-      pluginId: p.pluginId,
-      name: p.name,
-      description: p.description || "",
-    }));
-    
-    return {
-      agentId: agent.agentUid,
-      name: agent.name,
-      description: agent.description || "",
-      type: agent.type,
-      capabilities,
-      plugins: plugins.length > 0 ? plugins : undefined,
-    };
-  });
-}
+// 最大步骤重试次数
+const MAX_STEP_RETRIES = 3;
 
 // 判断是否是继续/重试类消息
 function isContinuationMessage(message: string): boolean {
@@ -251,121 +205,138 @@ async function markSessionCompleted(input: {
   });
 }
 
-// 获取或创建主 Agent 记录
+// 构建轻量级会话状态
+async function buildLightSessionState(sessionId: string) {
+  const metadata = await getSessionMetadata(sessionId);
+
+  return {
+    currentStage: metadata.currentStage,
+    recoverable: metadata.recoverable,
+    lastMainSummary: metadata.progressSummary,
+    lastSelectedAgentUid: metadata.lastSelectedAgentUid,
+    lastSubAgentSummary: metadata.lastSubAgentSummary,
+  };
+}
+
+// 获取候选DomainAgent列表
+async function getCandidateDomainAgents(sessionId: string): Promise<
+  Array<{
+    agent: typeof agents.$inferSelect;
+    version: typeof agentVersions.$inferSelect;
+    summary: CandidateDomainAgent;
+  }>
+> {
+  const [session] = await db
+    .select({ agentIdsJson: sessions.agentIdsJson })
+    .from(sessions)
+    .where(eq(sessions.sessionUid, sessionId))
+    .limit(1);
+
+  if (!session) {
+    throw notFound("Session not found", { sessionId });
+  }
+
+  const agentUids = jsonParse<string[]>(session.agentIdsJson, []);
+
+  if (agentUids.length < 1) {
+    throw new Error("当前会话没有绑定任何领域Agent");
+  }
+
+  const result = [];
+
+  for (const agentUid of agentUids) {
+    const { agent, version } = await getCurrentAgentVersion(agentUid);
+
+    result.push({
+      agent,
+      version,
+      summary: buildDomainAgentSummary({ agent, version }),
+    });
+  }
+
+  return result;
+}
+
+// 构建DomainAgent摘要
+function buildDomainAgentSummary(input: {
+  agent: typeof agents.$inferSelect;
+  version: typeof agentVersions.$inferSelect;
+}): CandidateDomainAgent {
+  const capabilities = jsonParse<string[]>(input.agent.capabilitiesJson, []);
+
+  return {
+    agentUid: input.agent.agentUid,
+    name: input.agent.name,
+    description: input.agent.description || "",
+    capabilities,
+    skillSummary: summarizeSkillText(input.version.skillText),
+  };
+}
+
+function summarizeSkillText(skillText: string | null | undefined): string {
+  if (!skillText) return "";
+
+  return skillText.length > 800 ? skillText.slice(0, 800) + "..." : skillText;
+}
+
+// 获取或创建主Agent记录
 async function getOrCreateMainAgent() {
   const now = nowIso();
-  
-  // 查找已有的 main_agent
+
   let mainAgent = await db.query.agents.findFirst({
     where: eq(agents.agentUid, "main_agent"),
   });
-  
-  if (mainAgent) {
-    console.log(`[MainAgent] Found existing main_agent: ${mainAgent.id}, currentVersionId: ${mainAgent.currentVersionId}`);
-    
-    // 如果存在但没有 currentVersionId，需要创建版本
-    if (!mainAgent.currentVersionId) {
-      console.log("[MainAgent] Existing agent has no version, creating one...");
-      
-      // 先查找一个可用的 model profile
-      const [defaultProfile] = await db.select().from(modelProfiles).limit(1);
-      
-      // 创建初始版本
-      const [version] = await db
-        .insert(agentVersions)
-        .values({
-          agentId: mainAgent.id,
-          version: 1,
-          modelProfileId: defaultProfile?.id || 1,
-          systemPrompt: "你是 AI Assistant，负责理解用户需求并智能委派给合适的 Agent 执行。",
-          skillText: "任务分析、Agent 选择、结果汇总",
-          allowedToolsJson: "[]",
-          contextPolicyJson: "{}",
-          modelParamsOverrideJson: "{}",
-          maxSteps: 5,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning();
-      
-      console.log(`[MainAgent] Created version ${version.version} for existing agent`);
-      
-      // 更新 agent 的 currentVersionId
-      await db
-        .update(agents)
-        .set({ currentVersionId: version.id, updatedAt: now })
-        .where(eq(agents.id, mainAgent.id));
-      
-      // 返回更新后的 agent
-      const [updatedAgent] = await db.select().from(agents).where(eq(agents.id, mainAgent.id));
-      return updatedAgent!;
-    }
-    
+
+  if (mainAgent && mainAgent.currentVersionId) {
     return mainAgent;
   }
-  
-  // 创建 main_agent
-  console.log("[MainAgent] Creating main_agent record...");
-  
-  // 先查找一个可用的 model profile
-  const [defaultProfile] = await db.select().from(modelProfiles).limit(1);
-  console.log(`[MainAgent] Using model profile: ${defaultProfile?.id || 1}`);
-  
-  [mainAgent] = await db
-    .insert(agents)
-    .values({
-      agentUid: "main_agent",
-      name: "AI Assistant",
-      description: "负责智能委派和任务编排的主 Agent",
-      type: "orchestrator",
-      status: "active",
-      capabilitiesJson: jsonStringify(["orchestration", "delegation", "task_management"]),
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
-  
-  console.log(`[MainAgent] Created main_agent: ${mainAgent.id}`);
-  
-  // 创建初始版本
-  try {
-    const [version] = await db
-      .insert(agentVersions)
+
+  if (!mainAgent) {
+    [mainAgent] = await db
+      .insert(agents)
       .values({
-        agentId: mainAgent.id,
-        version: 1,
-        modelProfileId: defaultProfile?.id || 1,
-        systemPrompt: "你是 AI Assistant，负责理解用户需求并智能委派给合适的 Agent 执行。",
-        skillText: "任务分析、Agent 选择、结果汇总",
-        allowedToolsJson: "[]",
-        contextPolicyJson: "{}",
-        modelParamsOverrideJson: "{}",
-        maxSteps: 5,
+        agentUid: "main_agent",
+        name: "AI Assistant",
+        description: "负责智能委派和任务编排的主Agent",
+        type: "orchestrator",
+        status: "active",
+        capabilitiesJson: jsonStringify(["orchestration", "delegation", "task_management"]),
         createdAt: now,
         updatedAt: now,
       })
       .returning();
-    
-    console.log(`[MainAgent] Created main_agent version: ${version.version}`);
-    
-    // 更新 agent 的 currentVersionId
-    await db
-      .update(agents)
-      .set({ currentVersionId: version.id, updatedAt: now })
-      .where(eq(agents.id, mainAgent.id));
-    
-    console.log(`[MainAgent] Updated main_agent currentVersionId to ${version.id}`);
-    
-    // 返回更新后的 mainAgent
-    const [updatedAgent] = await db.select().from(agents).where(eq(agents.id, mainAgent.id));
-    return updatedAgent!;
-  } catch (e) {
-    console.error("[MainAgent] Failed to create version:", e);
-    throw e;
   }
+
+  // 创建初始版本
+  const [version] = await db
+    .insert(agentVersions)
+    .values({
+      agentId: mainAgent!.id,
+      version: 1,
+      modelProfileId: 1,
+      systemPrompt: "你是AI Assistant，负责理解用户需求并智能委派给合适的Agent执行。",
+      skillText: "任务分析、Agent选择、结果汇总",
+      allowedToolsJson: "[]",
+      contextPolicyJson: "{}",
+      modelParamsOverrideJson: "{}",
+      maxSteps: 5,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+
+  // 更新agent的currentVersionId
+  await db
+    .update(agents)
+    .set({ currentVersionId: version.id, updatedAt: now })
+    .where(eq(agents.id, mainAgent!.id));
+
+  // 返回更新后的agent
+  const [updatedAgent] = await db.select().from(agents).where(eq(agents.id, mainAgent!.id));
+  return updatedAgent!;
 }
 
-// 创建主 Agent 的 run 记录（用于 respond/clarify 等直接回复场景）
+// 创建主Agent的run记录
 async function createMainAgentRun(
   sessionId: string,
   userMessage: string,
@@ -375,65 +346,141 @@ async function createMainAgentRun(
   const now = nowIso();
   const runUid = makeUid("run");
 
-  // 获取或创建主 Agent
-  console.log("[createMainAgentRun] Getting or creating main agent...");
   const mainAgentRecord = await getOrCreateMainAgent();
-  console.log(`[createMainAgentRun] Main agent: ${mainAgentRecord.agentUid}`);
-  
-  console.log("[createMainAgentRun] Getting current agent version...");
-  const { agent, version } = await getCurrentAgentVersion(mainAgentRecord.agentUid);
-  console.log(`[createMainAgentRun] Agent version: ${version.version}`);
-
-  const snapshot = {
-    agent: {
-      id: agent.id,
-      agentUid: agent.agentUid,
-      name: agent.name,
-      type: agent.type,
-    },
-    version: {
-      id: version.id,
-      version: version.version,
-      allowedTools: jsonParse<string[]>(version.allowedToolsJson, []),
-      contextPolicy: jsonParse<Record<string, unknown>>(version.contextPolicyJson, {}),
-    },
-    modelProfile: {
-      id: 0,
-      profileUid: "main-agent-profile",
-      provider: "system",
-      modelName: "main-agent",
-    },
-  };
 
   const [run] = await db
     .insert(agentRuns)
     .values({
       runUid,
-      agentId: agent.id,
-      agentVersionId: version.id,
+      agentId: mainAgentRecord.id,
+      agentVersionId: mainAgentRecord.currentVersionId!,
       sessionId,
       mode: "main",
       status,
       userMessage,
       resultSummary,
-      snapshotJson: jsonStringify(snapshot),
       createdAt: now,
       updatedAt: now,
       startedAt: now,
-      finishedAt: now,
+      finishedAt: status !== "running" ? now : undefined,
     })
     .returning();
-
-  console.log(`[MainAgent] Run created: ${run.runUid} for session: ${sessionId}, agent: ${agent.name}`);
 
   return run;
 }
 
-// 主聊天处理函数（立即返回，异步执行）
-export async function handleChat(input: ChatRequestInput): Promise<ChatResponse> {
-  const { sessionId, message, selectedAgentId } = input;
+// 更新主Agent的run记录
+async function updateMainAgentRun(runUid: string, resultSummary: string, status: string) {
+  const now = nowIso();
+  await db
+    .update(agentRuns)
+    .set({
+      resultSummary,
+      status,
+      updatedAt: now,
+      finishedAt: status === "success" || status === "failed" ? now : undefined,
+    })
+    .where(eq(agentRuns.runUid, runUid));
 
-  // 1. 验证 Session 存在
+  runEventBus.emitRunStatus(runUid, {
+    runId: runUid,
+    status,
+    resultSummary,
+    updatedAt: now,
+  });
+
+  console.log(`[MainAgent] Run updated: ${runUid}, status=${status}`);
+}
+
+// 构建DomainAgent步骤任务消息
+function buildDomainAgentStepTaskMessage(input: {
+  originalUserMessage: string;
+  effectiveUserMessage: string;
+  selectedAgent: {
+    agentUid: string;
+    name: string;
+  };
+  plan: DomainAgentPlan;
+  currentStep: DomainPlanStep;
+  completedSteps: Array<{
+    stepUid: string;
+    objective: string;
+    summary: string;
+    status: string;
+  }>;
+  historyTurns: Array<{
+    taskMessage: string;
+    resultSummary: string;
+    status: string;
+  }>;
+}): string {
+  const planText = input.plan.steps
+    .map((step, index) => {
+      return `${index + 1}. ${step.stepUid}: ${step.objective}
+   完成标准: ${step.doneCriteria}`;
+    })
+    .join("\n");
+
+  const completedText = input.completedSteps.length
+    ? input.completedSteps
+        .map((step) => `- ${step.stepUid}: ${step.summary}`)
+        .join("\n")
+    : "暂无。";
+
+  const historyText = input.historyTurns.length
+    ? input.historyTurns
+        .map((turn, index) => {
+          return `### Turn ${index + 1}
+Task from MainAgent:
+${turn.taskMessage}
+
+${input.selectedAgent.name} Summary:
+${turn.resultSummary}
+
+Status:
+${turn.status}`;
+        })
+        .join("\n\n")
+    : "暂无历史任务摘要。";
+
+  return `你是当前任务选定的领域执行Agent：${input.selectedAgent.name}。
+
+## 原始用户消息
+${input.originalUserMessage}
+
+## 当前有效任务消息
+${input.effectiveUserMessage}
+
+## 当前总计划
+${input.plan.objective}
+
+${planText}
+
+## 已完成步骤摘要
+${completedText}
+
+## 当前执行步骤
+stepUid: ${input.currentStep.stepUid}
+objective: ${input.currentStep.objective}
+expectedResult: ${input.currentStep.expectedResult}
+doneCriteria: ${input.currentStep.doneCriteria}
+
+## 你的历史任务摘要
+${historyText}
+
+## 执行要求
+- 只执行当前步骤，不要擅自扩展到其他步骤。
+- 你自己判断需要加载哪些技能和工具。
+- 你自己管理执行过程、产物和结果。
+- 不要依赖MainAgent提供refs/relations。
+- 如果需要引用历史产物，你自己通过领域内工具或产物目录查询。
+- 执行结束后给出简洁摘要，说明是否完成、产物是什么、是否需要用户补充信息。`;
+}
+
+// 主聊天处理函数
+export async function handleChat(input: ChatRequestInput): Promise<ChatResponse> {
+  const { sessionId, message } = input;
+
   console.log(`[handleChat] Looking for session: ${sessionId}`);
   const [session] = await db.select().from(sessions).where(eq(sessions.sessionUid, sessionId));
   if (!session) {
@@ -442,7 +489,6 @@ export async function handleChat(input: ChatRequestInput): Promise<ChatResponse>
   }
   console.log(`[handleChat] Session found: ${session.sessionUid}`);
 
-  // 2. 创建主 Agent 的 run 记录，状态为 running
   console.log("[handleChat] Creating main agent run...");
   let run;
   try {
@@ -452,26 +498,23 @@ export async function handleChat(input: ChatRequestInput): Promise<ChatResponse>
     console.error("[handleChat] Failed to create run:", e);
     throw e;
   }
-  
-  // 3. 异步执行完整的决策和执行流程
+
   processChatAsync(input, run.runUid);
-  
-  // 4. 立即返回 runId，前端通过 SSE 监听进度
+
   return {
     message: "正在处理您的请求...",
     runId: run.runUid,
-    agentId: "main_agent",  // 返回主 Agent 的 ID
+    agentId: "main_agent",
   };
 }
 
-// 异步处理完整的聊天流程（主 Agent 决策 + 子 Agent 执行）
+// 异步处理完整的聊天流程
 async function processChatAsync(input: ChatRequestInput, mainRunId: string): Promise<void> {
   const { sessionId, message } = input;
-
   let effectiveUserMessage = message;
 
   try {
-    console.log("[processChatAsync] Session-only orchestration flow...");
+    console.log("[processChatAsync] Domain-agent orchestration flow...");
 
     effectiveUserMessage = await resolveEffectiveUserMessage({
       sessionId,
@@ -484,115 +527,84 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
       effectiveUserMessage,
     });
 
+    const candidateAgents = await getCandidateDomainAgents(sessionId);
+
     const mainHistoryMessages = await buildMainChatHistoryMessages({
       sessionId,
       limit: 6,
     });
 
-    const snapshot = await snapshotBuilder.build({
-      sessionId,
+    const planningDecision = await mainAgent.planWithDomainAgents({
       userMessage: message,
       effectiveUserMessage,
-    });
-
-    const mainDecision = await mainAgent.decideWithSessionIndex({
-      userMessage: message,
-      snapshot,
       mainHistoryMessages,
+      candidateAgents: candidateAgents.map((item) => item.summary),
+      sessionState: await buildLightSessionState(sessionId),
     });
 
-    const emptyContextIndex = { refs: [], relations: [] };
+    if (planningDecision.decisionType === "answer_directly") {
+      const response = planningDecision.response || "我已收到。";
 
-    const validation = decisionValidator.validate({
-      decision: mainDecision,
-      snapshot,
-      contextIndex: emptyContextIndex,
-    });
+      await updateMainAgentRun(mainRunId, response, "success");
 
-    if (!validation.valid) {
-      const question =
-        validation.fallbackDecision.ambiguity?.question ||
-        "我需要确认下一步操作。";
+      await markSessionCompleted({
+        sessionId,
+        runUid: mainRunId,
+        effectiveUserMessage,
+        summary: response,
+      });
 
-      await updateMainAgentRun(mainRunId, question, "success");
       return;
     }
 
-    const normalizedDecision = validation.normalizedDecision;
-
-    if (normalizedDecision.decisionType === "ask_user") {
-      const question =
-        normalizedDecision.ambiguity?.question ||
-        "我需要确认下一步操作。";
+    if (planningDecision.decisionType === "ask_user") {
+      const question = planningDecision.question || "请补充更多信息。";
 
       await updateMainAgentRun(mainRunId, question, "success");
+
       return;
     }
 
-    const plan = planCompiler.compile({
-      decision: normalizedDecision,
-      snapshot,
-      contextIndex: emptyContextIndex,
+    if (planningDecision.decisionType !== "execute_plan") {
+      throw new Error(`Unsupported decisionType: ${planningDecision.decisionType}`);
+    }
+
+    if (!planningDecision.selectedAgentUid || !planningDecision.plan) {
+      throw new Error("MainAgent returned execute_plan without selectedAgentUid or plan");
+    }
+
+    const selected = candidateAgents.find(
+      (item) => item.agent.agentUid === planningDecision.selectedAgentUid
+    );
+
+    if (!selected) {
+      throw new Error(`Selected agent not found in session candidates: ${planningDecision.selectedAgentUid}`);
+    }
+
+    const finalMessage = await executeDomainAgentPlan({
+      sessionId,
+      mainRunId,
+      originalUserMessage: message,
+      effectiveUserMessage,
+      selectedAgent: selected,
+      plan: planningDecision.plan,
     });
 
-    switch (plan.mode) {
-      case "direct_response": {
-        const response = normalizedDecision.response || "我已收到您的消息";
+    await updateMainAgentRun(mainRunId, finalMessage, "success");
 
-        await updateMainAgentRun(mainRunId, response, "success");
+    await markSessionCompleted({
+      sessionId,
+      runUid: mainRunId,
+      effectiveUserMessage,
+      summary: finalMessage,
+    });
 
-        await markSessionCompleted({
-          sessionId,
-          runUid: mainRunId,
-          effectiveUserMessage,
-          summary: response,
-        });
-
-        return;
-      }
-
-      case "single_agent":
-      case "sequential_agents": {
-        await updateMainAgentRun(
-          mainRunId,
-          "正在委派任务给子 Agent...",
-          "running"
-        );
-
-        const executionContextIndex = contextIndexBuilder.build(snapshot);
-
-        await executePlanAsync(
-          plan,
-          sessionId,
-          effectiveUserMessage,
-          mainRunId,
-          executionContextIndex
-        );
-
-        return;
-      }
-
-      default: {
-        const error = new Error(`暂不支持 plan mode: ${plan.mode}`);
-
-        await markSessionBlocked({
-          sessionId,
-          runUid: mainRunId,
-          effectiveUserMessage,
-          error,
-        });
-
-        await updateMainAgentRun(
-          mainRunId,
-          error.message,
-          "failed"
-        );
-
-        return;
-      }
-    }
+    await patchSessionMetadata(sessionId, {
+      lastSelectedAgentUid: selected.agent.agentUid,
+      lastSelectedAgentName: selected.agent.name,
+    });
   } catch (error) {
-    console.error("[processChatAsync] Session-only flow error:", error);
+    console.error("[processChatAsync] Domain-agent flow error:", error);
 
     await markSessionBlocked({
       sessionId,
@@ -603,932 +615,173 @@ async function processChatAsync(input: ChatRequestInput, mainRunId: string): Pro
 
     await updateMainAgentRun(
       mainRunId,
-      `执行失败：${error instanceof Error ? error.message : "未知错误"}。任务已记录，你可以发送"继续"重试。`,
+      `执行失败：${error instanceof Error ? error.message : "未知错误"}。`,
       "failed"
     );
   }
 }
 
-// 执行计划（新流程）
-async function executePlanAsync(
-  plan: import("./orchestration.types.js").ExecutionPlan,
-  sessionId: string,
-  originalUserMessage: string,
-  mainRunId: string,
-  contextIndex: import("./orchestration.types.js").SessionContextIndex
-): Promise<void> {
-  const [mainRun] = await db.select({ id: agentRuns.id }).from(agentRuns).where(eq(agentRuns.runUid, mainRunId));
+// 执行DomainAgent计划
+async function executeDomainAgentPlan(input: {
+  sessionId: string;
+  mainRunId: string;
+  originalUserMessage: string;
+  effectiveUserMessage: string;
+  selectedAgent: {
+    agent: typeof agents.$inferSelect;
+    version: typeof agentVersions.$inferSelect;
+    summary: CandidateDomainAgent;
+  };
+  plan: DomainAgentPlan;
+}): Promise<string> {
+  const [mainRun] = await db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(eq(agentRuns.runUid, input.mainRunId))
+    .limit(1);
+
   if (!mainRun) {
-    console.error(`[executePlanAsync] Main run not found: ${mainRunId}`);
-    return;
+    throw new Error(`Main run not found: ${input.mainRunId}`);
   }
 
-  let runningContextIndex = contextIndex;
-
-  const stepResults: Array<{
+  const completedSteps: Array<{
     stepUid: string;
-    agentUid: string;
-    runUid: string;
-    status: "success" | "partial_success" | "failed";
+    objective: string;
     summary: string;
-    issues?: string[];
-    agentResult?: AgentResult;
+    status: string;
   }> = [];
 
-  const allProducedArtifacts: Array<{
-    artifactUid: string;
-    title: string;
-  }> = [];
+  const steps = input.plan.steps;
 
-  const allAgentResults: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < steps.length; i++) {
+    const currentStep = steps[i];
+    console.log(`[executeDomainAgentPlan] Executing step ${i + 1}/${steps.length}: ${currentStep.stepUid}`);
 
-  type StepExecutionContext = {
-    producedRefsByStepUid: Map<string, string[]>;
-    runRefByStepUid: Map<string, string>;
-  };
+    const historyTurns = await buildDomainAgentHistoryTurns({
+      sessionId: input.sessionId,
+      agentId: input.selectedAgent.agent.id,
+      limit: 3,
+    });
 
-  const executionContext: StepExecutionContext = {
-    producedRefsByStepUid: new Map(),
-    runRefByStepUid: new Map(),
-  };
+    const stepTaskMessage = buildDomainAgentStepTaskMessage({
+      originalUserMessage: input.originalUserMessage,
+      effectiveUserMessage: input.effectiveUserMessage,
+      selectedAgent: {
+        agentUid: input.selectedAgent.agent.agentUid,
+        name: input.selectedAgent.agent.name,
+      },
+      plan: input.plan,
+      currentStep,
+      completedSteps,
+      historyTurns,
+    });
 
-  const retryState = createStepRetryState();
+    let retryCount = 0;
+    let stepSuccess = false;
+    let stepResult: { summary: string; status: string; agentResult?: AgentResult } | null = null;
 
-  for (const step of plan.steps) {
-    try {
-      console.log(`[executePlanAsync] Executing step: ${step.stepUid}, agent: ${step.targetAgentUid}`);
-
-      const { agent, version } = await getCurrentAgentVersion(step.targetAgentUid);
-
-      const resolvedInputRefIds = resolveStepInputRefIds(step, executionContext);
-
-      const resolvedStep = {
-        ...step,
-        inputRefIds: resolvedInputRefIds,
-      };
-
-      let taskEnvelope = await taskEnvelopeBuilder.build({
-        step: resolvedStep,
-        plan,
-        contextIndex: runningContextIndex,
-        parentRunUid: mainRunId,
-        originalUserMessage,
-      });
-
-      let acceptedRun: Awaited<ReturnType<typeof runtime.run>> | null = null;
-      let acceptedAgentResult: AgentResult | null = null;
-      let acceptedEvaluationIssues: string[] = [];
-
-      while (true) {
-        console.log(`[executePlanAsync] TaskEnvelope:\n${JSON.stringify(taskEnvelope, null, 2)}`);
-
-        const run = await runtime.run({
-          agentRecord: agent,
-          versionRecord: version,
-          userMessage: originalUserMessage,
-          originalUserMessage,
-          taskEnvelope,
-          sessionId,
+    while (retryCount < MAX_STEP_RETRIES && !stepSuccess) {
+      try {
+        const runResult = await runtime.run({
+          agentRecord: input.selectedAgent.agent,
+          versionRecord: input.selectedAgent.version,
+          userMessage: stepTaskMessage,
+          sessionId: input.sessionId,
           parentRunId: mainRun.id,
           mode: "subagent",
         });
 
-        const agentResult = run.agentResult;
+        stepResult = {
+          summary: runResult.summary || "执行完成",
+          status: runResult.status,
+          agentResult: runResult as unknown as AgentResult,
+        };
 
-        const evaluation = evaluateStepResult({
-          step: resolvedStep,
-          agentResult,
-        });
-
-        const review = await mainAgent.reviewStepOutcome({
-          originalUserMessage,
-          currentPlan: plan,
-          currentStep: resolvedStep,
-          taskEnvelope,
-          agentResult,
-          ruleEvaluation: evaluation,
-          stepResultsSoFar: stepResults.map((item) => ({
-            stepUid: item.stepUid,
-            agentUid: item.agentUid,
-            runUid: item.runUid,
-            status: item.status,
-            summary: item.summary,
-            issues: item.issues,
-          })),
-        });
-
-        console.log(
-          `[executePlanAsync] MainAgent step review: ${review.decision}, safe=${review.safeToUseProducedRefs}, confidence=${review.confidence}`
-        );
-
-        if (review.decision === "continue") {
-          if (!review.safeToUseProducedRefs) {
-            stepResults.push({
-              stepUid: resolvedStep.stepUid,
-              agentUid: resolvedStep.targetAgentUid,
-              runUid: run.runUid,
-              status: "failed",
-              summary: agentResult.summary,
-              issues: [
-                "MainAgent review returned continue but safeToUseProducedRefs=false.",
-                ...review.issues,
-              ],
-              agentResult,
-            });
-
-            await updateMainAgentRun(
-              mainRunId,
-              review.finalMessage || "步骤结果不可信，已停止继续执行，避免污染后续任务。",
-              "failed"
-            );
-            return;
-          }
-
-          acceptedRun = run;
-          acceptedAgentResult = agentResult;
-          acceptedEvaluationIssues = review.issues;
-          break;
-        }
-
-        if (review.decision === "retry_same_agent") {
-          if (!canRetryStep({ stepUid: resolvedStep.stepUid, retryState })) {
-            stepResults.push({
-              stepUid: resolvedStep.stepUid,
-              agentUid: resolvedStep.targetAgentUid,
-              runUid: run.runUid,
-              status: "failed",
-              summary: agentResult.summary,
-              issues: [
-                "Retry limit reached.",
-                ...review.issues,
-              ],
-              agentResult,
-            });
-
-            await updateMainAgentRun(
-              mainRunId,
-              review.finalMessage || "当前步骤重试次数已达上限，任务已停止。",
-              "failed"
-            );
-            return;
-          }
-
-          recordRetryAttempt({
-            stepUid: resolvedStep.stepUid,
-            issues: review.issues.length > 0 ? review.issues : evaluation.issues,
-            retryState,
-          });
-
-          taskEnvelope = buildRetryTaskEnvelope({
-            originalEnvelope: taskEnvelope,
-            retryAttempt: retryState.attemptsByStepUid.get(resolvedStep.stepUid) ?? 1,
-            previousRunUid: run.runUid,
-            validationIssues: review.issues.length > 0 ? review.issues : evaluation.issues,
-            instruction:
-              review.retryInstruction ||
-              "只修复当前 Objective，不要扩展任务范围，不要执行其他步骤。只能使用 TaskEnvelope 中明确给出的输入资源。",
-          });
-
-          continue;
-        }
-
-        if (review.decision === "replan_remaining") {
-          stepResults.push({
-            stepUid: resolvedStep.stepUid,
-            agentUid: resolvedStep.targetAgentUid,
-            runUid: run.runUid,
-            status: "failed",
-            summary: agentResult.summary,
-            issues: review.issues,
-            agentResult,
-          });
-
-          await updateMainAgentRun(
-            mainRunId,
-            review.finalMessage ||
-              `当前步骤需要重新规划：${review.replanInstruction || review.reasoning}`,
-            "failed"
-          );
-          return;
-        }
-
-        if (review.decision === "ask_user") {
-          stepResults.push({
-            stepUid: resolvedStep.stepUid,
-            agentUid: resolvedStep.targetAgentUid,
-            runUid: run.runUid,
-            status: "partial_success",
-            summary: agentResult.summary,
-            issues: review.issues,
-            agentResult,
-          });
-
-          await updateMainAgentRun(
-            mainRunId,
-            review.userQuestion || review.finalMessage || "需要你确认下一步操作。",
-            "success"
-          );
-          return;
-        }
-
-        if (review.decision === "fail") {
-          stepResults.push({
-            stepUid: resolvedStep.stepUid,
-            agentUid: resolvedStep.targetAgentUid,
-            runUid: run.runUid,
-            status: "failed",
-            summary: agentResult.summary,
-            issues: review.issues,
-            agentResult,
-          });
-
-          await updateMainAgentRun(
-            mainRunId,
-            review.finalMessage || "任务执行失败。",
-            "failed"
-          );
-          return;
-        }
-      }
-
-      if (!acceptedRun || !acceptedAgentResult) {
-        await updateMainAgentRun(
-          mainRunId,
-          `步骤执行失败：未获得有效执行结果。stepUid=${resolvedStep.stepUid}`,
-          "failed"
-        );
-        return;
-      }
-
-      const run = acceptedRun;
-      const agentResult = acceptedAgentResult;
-
-      console.log(`[executePlanAsync] Step accepted: ${run.runUid}, status: ${agentResult.status}`);
-
-      const producedArtifacts = run.runId
-        ? await db
-            .select({
-              artifactUid: agentArtifacts.artifactUid,
-              title: agentArtifacts.title,
-              artifactType: agentArtifacts.artifactType,
-              artifactRole: agentArtifacts.artifactRole,
-              contentText: agentArtifacts.contentText,
-            })
-            .from(agentArtifacts)
-            .where(eq(agentArtifacts.runId, run.runId))
-        : [];
-
-      console.log(`[executePlanAsync] Step produced ${producedArtifacts.length} artifacts`);
-
-      allAgentResults.push(agentResult as unknown as Record<string, unknown>);
-
-      stepResults.push({
-        stepUid: resolvedStep.stepUid,
-        agentUid: resolvedStep.targetAgentUid,
-        runUid: run.runUid,
-        status: acceptedEvaluationIssues.length > 0 ? "partial_success" : (agentResult.status === "needs_clarification" ? "partial_success" : agentResult.status),
-        summary: agentResult.summary || "",
-        issues: acceptedEvaluationIssues,
-        agentResult,
-      });
-
-      const producedRefIds: string[] = [];
-      const runRefId = `run:${run.runUid}`;
-      producedRefIds.push(runRefId);
-
-      for (const artifact of producedArtifacts) {
-        producedRefIds.push(`artifact:${artifact.artifactUid}`);
-      }
-
-      const touchedResources = agentResult.touchedResources || [];
-
-      for (const resource of touchedResources) {
-        if (!resource.uri) continue;
-
-        if (resource.type === "file") {
-          producedRefIds.push(`file:${resource.uri}`);
-        } else if (resource.type === "url") {
-          producedRefIds.push(`url:${resource.uri}`);
+        if (runResult.status === "success" || runResult.status === "partial_success") {
+          stepSuccess = true;
         } else {
-          producedRefIds.push(`resource:${resource.uri}`);
+          retryCount++;
+          if (retryCount < MAX_STEP_RETRIES) {
+            console.log(`[executeDomainAgentPlan] Step ${currentStep.stepUid} failed, retrying (${retryCount}/${MAX_STEP_RETRIES})...`);
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
         }
+      } catch (error) {
+        retryCount++;
+        console.error(`[executeDomainAgentPlan] Step ${currentStep.stepUid} error:`, error);
+        if (retryCount >= MAX_STEP_RETRIES) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
-
-      executionContext.producedRefsByStepUid.set(resolvedStep.stepUid, [
-        ...new Set(producedRefIds),
-      ]);
-      executionContext.runRefByStepUid.set(resolvedStep.stepUid, runRefId);
-
-      runningContextIndex = appendRunResultRefs(runningContextIndex, {
-        runUid: run.runUid,
-        agentUid: resolvedStep.targetAgentUid,
-        summary: agentResult.summary,
-        status: agentResult.status,
-        sessionId,
-        artifacts: producedArtifacts.map((artifact) => ({
-          artifactUid: artifact.artifactUid,
-          title: artifact.title,
-          artifactType: artifact.artifactType,
-          artifactRole: artifact.artifactRole,
-          summary: artifact.contentText?.slice(0, 300),
-        })),
-        agentResult: agentResult as unknown as Record<string, unknown>,
-      });
-
-      for (const artifact of producedArtifacts) {
-        allProducedArtifacts.push({
-          artifactUid: artifact.artifactUid,
-          title: artifact.title,
-        });
-      }
-    } catch (error) {
-      console.error(`[executePlanAsync] Step failed:`, error);
-
-      await markSessionBlocked({
-        sessionId,
-        runUid: mainRunId,
-        effectiveUserMessage: originalUserMessage,
-        error,
-      });
-
-      await updateMainAgentRun(
-        mainRunId,
-        `执行失败：${error instanceof Error ? error.message : "未知错误"}。任务已记录，你可以发送"继续"重试。`,
-        "failed"
-      );
-
-      return;
     }
-  }
 
-  const finalSummary = await mainAgent.generateFinalResultSummary({
-    originalUserMessage,
-    plan,
-    stepResults,
-    allProducedArtifacts,
-  });
-
-  const finalStatus = finalSummary.status;
-  const finalMessage = finalSummary.finalAnswer;
-
-  await updateMainAgentRun(
-    mainRunId,
-    finalMessage,
-    finalStatus
-  );
-
-  if (finalStatus === "success") {
-    await markSessionCompleted({
-      sessionId,
-      runUid: mainRunId,
-      effectiveUserMessage: originalUserMessage,
-      summary: finalMessage,
-    });
-  } else {
-    await markSessionBlocked({
-      sessionId,
-      runUid: mainRunId,
-      effectiveUserMessage: originalUserMessage,
-      error: new Error(finalMessage),
-    });
-  }
-}
-
-function canRetryStep(input: {
-  stepUid: string;
-  retryState: StepRetryState;
-}): boolean {
-  const attempts = input.retryState.attemptsByStepUid.get(input.stepUid) ?? 0;
-  return attempts < MAX_STEP_RETRIES && input.retryState.totalRepairAttempts < MAX_TOTAL_REPAIRS;
-}
-
-function resolveStepInputRefIds(
-  step: import("./orchestration.types.js").ExecutionPlan["steps"][0],
-  executionContext: {
-    producedRefsByStepUid: Map<string, string[]>;
-  }
-): string[] {
-  const refs = new Set<string>(step.inputRefIds || []);
-
-  for (const depStepUid of step.dependsOn || []) {
-    const producedRefs = executionContext.producedRefsByStepUid.get(depStepUid) || [];
-    for (const refId of producedRefs) {
-      refs.add(refId);
+    if (!stepSuccess || !stepResult) {
+      throw new Error(`步骤 ${currentStep.stepUid} 执行失败，已达到最大重试次数`);
     }
-  }
 
-  return [...refs];
-}
+    completedSteps.push({
+      stepUid: currentStep.stepUid,
+      objective: currentStep.objective,
+      summary: stepResult.summary,
+      status: stepResult.status,
+    });
 
-function composeExecutionResult(results: Array<{
-  stepUid: string;
-  agentUid: string;
-  runUid: string;
-  status: string;
-  summary: string;
-}>): string {
-  if (results.length === 0) return "任务执行完成。";
-
-  if (results.length === 1) {
-    return results[0].summary || "任务执行完成。";
-  }
-
-  return results
-    .map((r, index) => {
-      const title = `${index + 1}. ${r.agentUid}：${r.status}`;
-      return `${title}\n${r.summary || "无摘要"}`;
-    })
-    .join("\n\n");
-}
-
-function composeStepFailureMessage(input: {
-  step: import("./orchestration.types.js").ExecutionPlan["steps"][0];
-  evaluation: import("./step-result-evaluator.js").StepEvaluation;
-  repairDecision: import("./step-repair-policy.js").AutoRepairAction;
-  previousRunUid: string;
-}): string {
-  const { step, evaluation, repairDecision, previousRunUid } = input;
-
-  const lines = [
-    `步骤 ${step.stepUid}（${step.targetAgentUid}）执行失败：`,
-    `  - 评估状态：${evaluation.status}`,
-    `  - 失败原因：`,
-    ...evaluation.issues.map((issue) => `    - ${issue}`),
-    `  - 自动修复决策：${repairDecision}`,
-    `  - 上次运行：${previousRunUid}`,
-  ];
-
-  return lines.join("\n");
-}
-
-function appendRunResultRefs(
-  index: import("./orchestration.types.js").SessionContextIndex,
-  input: {
-    runUid: string;
-    agentUid: string;
-    summary?: string;
-    status: string;
-    sessionId: string;
-    artifacts?: Array<{
-      artifactUid: string;
-      title: string;
-      artifactType: string;
-      artifactRole?: string | null;
-      summary?: string;
-    }>;
-    agentResult?: Record<string, unknown>;
-  }
-): import("./orchestration.types.js").SessionContextIndex {
-  const runRefId = `run:${input.runUid}`;
-
-  const newRefs: import("./orchestration.types.js").ContextRef[] = [
-    {
-      refId: runRefId,
-      kind: "run" as const,
-      title: `${input.agentUid} run`,
-      summary: input.summary || "",
-      sessionId: input.sessionId,
-      status: input.status,
-      source: {
-        table: "agent_runs" as const,
-        uid: input.runUid,
-        runUid: input.runUid,
-      },
-      tags: ["run", input.status, input.agentUid],
-    },
-  ];
-
-  const newRelations: import("./orchestration.types.js").ContextRelation[] = [
-    {
-      fromRefId: runRefId,
-      toRefId: `agent:${input.agentUid}`,
-      relation: "executed_by" as const,
-    },
-  ];
-
-  if (input.artifacts) {
-    for (const artifact of input.artifacts) {
-      const artifactRefId = `artifact:${artifact.artifactUid}`;
-      newRefs.push({
-        refId: artifactRefId,
-        kind: "artifact" as const,
-        title: artifact.title,
-        summary: artifact.summary || artifact.artifactType,
-        sessionId: input.sessionId,
-        status: artifact.artifactRole === "pending_write" ? "pending_write" : "ready",
-        source: {
-          table: "agent_artifacts" as const,
-          uid: artifact.artifactUid,
+    if (currentStep.requireReview && stepResult.agentResult) {
+      const review = await mainAgent.reviewDomainStep({
+        originalUserMessage: input.originalUserMessage,
+        selectedAgent: {
+          agentUid: input.selectedAgent.agent.agentUid,
+          name: input.selectedAgent.agent.name,
+          skillSummary: input.selectedAgent.summary.skillSummary,
         },
-        tags: ["artifact", artifact.artifactType, artifact.artifactRole || ""].filter(Boolean),
+        plan: input.plan,
+        currentStep,
+        completedSteps,
+        subAgentReport: {
+          status: stepResult.agentResult.status,
+          summary: stepResult.agentResult.summary,
+          producedArtifacts: stepResult.agentResult.producedArtifacts || [],
+          touchedResources: stepResult.agentResult.touchedResources || [],
+          openIssues: stepResult.agentResult.openIssues || [],
+          retryAdvice: stepResult.agentResult.retryAdvice,
+        },
       });
-      newRelations.push({
-        fromRefId: artifactRefId,
-        toRefId: runRefId,
-        relation: "produced" as const,
-      });
-    }
-  }
 
-  // 处理 touchedResources
-  const touchedResources = input.agentResult?.touchedResources as
-    | Array<{
-        type?: string;
-        uri?: string;
-        operation?: string;
-        verified?: boolean;
-      }>
-    | undefined;
+      console.log(`[executeDomainAgentPlan] Step review decision: ${review.decision}`);
 
-  if (touchedResources) {
-    for (const resource of touchedResources) {
-      if (!resource.uri) continue;
-
-      const refId =
-        resource.type === "file"
-          ? `file:${resource.uri}`
-          : resource.type === "url"
-            ? `url:${resource.uri}`
-            : `resource:${resource.uri}`;
-
-      const kind: import("./orchestration.types.js").ContextRefKind =
-        resource.type === "file"
-          ? "file"
-          : resource.type === "url"
-            ? "url"
-            : "resource";
-
-      if (!newRefs.find((r) => r.refId === refId) && !index.refs.find((r) => r.refId === refId)) {
-        newRefs.push({
-          refId,
-          kind,
-          title: resource.uri.split("/").pop() || resource.uri,
-          summary: `${resource.operation || "touched"}; verified=${resource.verified ? "true" : "false"}`,
-          sessionId: input.sessionId,
-          status: resource.verified ? "verified" : "unverified",
-          source: {
-            uri: resource.uri,
-          },
-          tags: [
-            resource.type || "resource",
-            resource.operation || "unknown",
-            resource.verified ? "verified" : "unverified",
-          ],
-        });
+      if (review.decision === "fail") {
+        throw new Error(`步骤 ${currentStep.stepUid} 被判定为失败: ${review.reason}`);
       }
 
-      const relation = mapTouchedOperationToRelation(resource.operation);
+      if (review.decision === "ask_user") {
+        const question = review.userQuestion || "需要您确认如何继续。";
+        await updateMainAgentRun(input.mainRunId, question, "success");
+        return question;
+      }
 
-      newRelations.push({
-        fromRefId: runRefId,
-        toRefId: refId,
-        relation,
-      });
+      if (review.decision === "retry_current_step" && retryCount < MAX_STEP_RETRIES) {
+        i--;
+        retryCount++;
+        console.log(`[executeDomainAgentPlan] Retrying step ${currentStep.stepUid} as per review`);
+        continue;
+      }
+
+      if (review.decision === "replan_remaining") {
+        console.log(`[executeDomainAgentPlan] Replaining remaining steps: ${review.replanInstruction}`);
+      }
     }
   }
 
-  return {
-    refs: [...index.refs, ...newRefs],
-    relations: [...index.relations, ...newRelations],
-  };
-}
-
-function mapTouchedOperationToRelation(
-  operation?: string
-): import("./orchestration.types.js").ContextRelation["relation"] {
-  const op = (operation || "").toLowerCase();
-
-  if (["read", "fetch", "open", "visit", "navigate", "crawl", "scrape"].some((k) => op.includes(k))) {
-    return "read";
-  }
-
-  if (["write", "create", "save", "append"].some((k) => op.includes(k))) {
-    return "wrote";
-  }
-
-  if (["edit", "update", "modify", "patch"].some((k) => op.includes(k))) {
-    return "modified";
-  }
-
-  if (["delete", "remove"].some((k) => op.includes(k))) {
-    return "deleted";
-  }
-
-  return "touched";
-}
-
-// 旧流程（fallback）- 已简化，不再使用 WorkContext
-async function processChatAsyncOld(input: ChatRequestInput, mainRunId: string): Promise<void> {
-  const { sessionId, message, selectedAgentId } = input;
-
-  try {
-    // 获取可用 Agent 列表
-    const availableAgents = await getAvailableAgents();
-
-    // 简化处理：直接委派给选定的 Agent 或返回需要选择 Agent 的消息
-    if (selectedAgentId) {
-      await updateMainAgentRun(mainRunId, "正在委派任务给子 Agent...", "running");
-      const decision: OrchestrationDecision = {
-        action: "delegate",
-        reasoning: "用户直接选择了 Agent",
-        targetAgentId: selectedAgentId,
-        handoffNote: message,
-      };
-      await handleDelegateChainAsync(decision, sessionId, message, selectedAgentId, availableAgents, mainRunId);
-      return;
-    }
-
-    // 没有选定 Agent，返回提示
-    await updateMainAgentRun(
-      mainRunId,
-      "我需要知道应该由哪个 Agent 来处理这个任务。请选择一个 Agent。",
-      "success"
-    );
-  } catch (error) {
-    console.error("[processChatAsyncOld] Error:", error);
-    await updateMainAgentRun(mainRunId, `处理失败：${error instanceof Error ? error.message : "未知错误"}`, "failed");
-  }
-}
-
-// 处理链式委派
-async function handleDelegateChain(
-  decision: OrchestrationDecision,
-  sessionId: string,
-  userMessage: string,
-  selectedAgentId: string | undefined,
-  availableAgents: AgentCapabilitySummary[],
-  depth: number = 0,
-  previousResults: Array<{ agentId: string; result: string }> = []
-): Promise<ChatResponse> {
-  // 防止无限循环
-  if (depth >= MAX_DELEGATION_DEPTH) {
-    return {
-      message: `已达到最大委派深度(${MAX_DELEGATION_DEPTH})，任务执行结束。\n\n执行链路：\n${previousResults.map((r, i) => `${i + 1}. ${r.agentId}: ${r.result.slice(0, 100)}...`).join("\n")}`,
-    };
-  }
-
-  // 确定目标 Agent
-  const targetAgentId = decision.targetAgentId || selectedAgentId;
-  if (!targetAgentId) {
-    return {
-      message: "我需要知道应该由哪个 Agent 来处理这个任务。请选择一个 Agent。",
-    };
-  }
-
-  // 执行子 Agent
-  let runResult: { runUid: string; resultSummary: string | null; status: string };
-  try {
-    console.log(`[SubAgent] 开始执行: ${targetAgentId}, depth=${depth}`);
-    console.log(`[SubAgent] HandoffNote: ${decision.handoffNote?.slice(0, 200)}...`);
-
-    const { agent, version } = await getCurrentAgentVersion(targetAgentId);
-
-    const run = await runtime.run({
-      agentRecord: agent,
-      versionRecord: version,
-      userMessage,
-      handoffNote: decision.handoffNote || `请处理用户的请求：${userMessage}`,
-      sessionId,
-      mode: "subagent",
-    });
-
-    runResult = {
-      runUid: run.runUid,
-      resultSummary: run.summary,
-      status: run.status,
-    };
-
-    // 打印子 Agent 返回结果
-    console.log(`[SubAgent] 执行完成: ${targetAgentId}`);
-    console.log(`[SubAgent] RunID: ${runResult.runUid}`);
-    console.log(`[SubAgent] Status: ${runResult.status}`);
-    console.log(`[SubAgent] ResultSummary: ${runResult.resultSummary?.slice(0, 500) || "无摘要"}`);
-
-    // 记录执行结果
-    previousResults.push({
-      agentId: targetAgentId,
-      result: run.summary || "执行完成",
-    });
-  } catch (error) {
-    console.error(`[SubAgent] 执行失败: ${targetAgentId}`, error);
-    return {
-      message: `委派执行失败：${error instanceof Error ? error.message : "未知错误"}`,
-    };
-  }
-
-  // 子 Agent 执行完成后，主 Agent 再次判断是否需要继续委派
-  const followUpMessage = `子 Agent ${targetAgentId} 执行完成，结果：${runResult.resultSummary || "无摘要"}。\n\n用户原始请求：${userMessage}`;
-
-  // 汇总所有执行结果，生成最终回复
-  const finalMessage = buildFinalResponse(previousResults, followUpMessage);
-  return {
-    message: finalMessage,
-    runId: runResult.runUid,
-    agentId: targetAgentId,
-  };
-}
-
-// 异步处理链式委派（不阻塞 HTTP 响应）
-async function handleDelegateChainAsync(
-  decision: OrchestrationDecision,
-  sessionId: string,
-  userMessage: string,
-  selectedAgentId: string | undefined,
-  availableAgents: AgentCapabilitySummary[],
-  mainRunId: string,
-  depth: number = 0,
-  previousResults: Array<{ agentId: string; result: string }> = []
-): Promise<void> {
-  // 防止无限循环
-  if (depth >= MAX_DELEGATION_DEPTH) {
-    await updateMainAgentRun(mainRunId, 
-      `已达到最大委派深度(${MAX_DELEGATION_DEPTH})，任务执行结束。`, 
-      "success"
-    );
-    return;
-  }
-
-  // 确定目标 Agent
-  const targetAgentId = decision.targetAgentId || selectedAgentId;
-  if (!targetAgentId) {
-    await updateMainAgentRun(mainRunId, 
-      "我需要知道应该由哪个 Agent 来处理这个任务。请选择一个 Agent。", 
-      "failed"
-    );
-    return;
-  }
-
-  // 查询主 Agent run 的 id
-  const [mainRun] = await db.select({ id: agentRuns.id }).from(agentRuns).where(eq(agentRuns.runUid, mainRunId));
-  if (!mainRun) {
-    console.error(`[handleDelegateChainAsync] Main run not found: ${mainRunId}`);
-    return;
-  }
-
-  // 执行子 Agent
-  let runResult: { runUid: string; resultSummary: string | null; status: string };
-  try {
-    console.log(`[SubAgent] 开始执行: ${targetAgentId}, depth=${depth}, parentRunId=${mainRun.id}`);
-
-    const { agent, version } = await getCurrentAgentVersion(targetAgentId);
-
-    const run = await runtime.run({
-      agentRecord: agent,
-      versionRecord: version,
-      userMessage,
-      handoffNote: decision.handoffNote || `请处理用户的请求：${userMessage}`,
-      sessionId,
-      parentRunId: mainRun.id,
-      mode: "subagent",
-    });
-
-    runResult = {
-      runUid: run.runUid,
-      resultSummary: run.summary,
-      status: run.status,
-    };
-
-    console.log(`[SubAgent] 执行完成: ${targetAgentId}, RunID: ${runResult.runUid}`);
-
-    // 记录执行结果
-    previousResults.push({
-      agentId: targetAgentId,
-      result: run.summary || "执行完成",
-    });
-  } catch (error) {
-    console.error(`[SubAgent] 执行失败: ${targetAgentId}`, error);
-    await updateMainAgentRun(mainRunId, 
-      `委派执行失败：${error instanceof Error ? error.message : "未知错误"}`, 
-      "failed"
-    );
-    return;
-  }
-
-  // 子 Agent 执行完成后，汇总所有执行结果，生成最终回复
-  const followUpMessage = `子 Agent ${targetAgentId} 执行完成，结果：${runResult.resultSummary || "无摘要"}。\n\n用户原始请求：${userMessage}`;
-
-  const finalMessage = buildFinalResponse(previousResults, followUpMessage);
-  await updateMainAgentRun(mainRunId, finalMessage, "success");
-}
-
-// 更新主 Agent 的 run 记录
-async function updateMainAgentRun(runUid: string, resultSummary: string, status: string) {
-  const now = nowIso();
-  await db
-    .update(agentRuns)
-    .set({
-      resultSummary,
-      status,
-      updatedAt: now,
-      finishedAt: status === 'success' || status === 'failed' ? now : undefined,
-    })
-    .where(eq(agentRuns.runUid, runUid));
-  
-  // 发布状态更新事件，让 SSE 推送给前端
-  runEventBus.emitRunStatus(runUid, {
-    runId: runUid,
-    status,
-    resultSummary,
-    updatedAt: now,
-  });
-  
-  console.log(`[MainAgent] Run updated: ${runUid}, status=${status}`);
-}
-
-// 构建最终响应
-function buildFinalResponse(results: Array<{ agentId: string; result: string }>, summary?: string): string {
-  if (results.length === 1) {
-    return summary || results[0].result;
-  }
-
-  const executionChain = results
-    .map((r, i) => `${i + 1}. **${r.agentId}**\n   ${r.result.slice(0, 200)}...`)
-    .join("\n\n");
-
-  return `${summary || "多 Agent 协作完成"}\n\n**执行链路：**\n\n${executionChain}`;
-}
-
-function extractTouchedRefsFromAgentResults(
-  results: Array<Record<string, unknown>>
-): Array<{ refId: string; title?: string }> {
-  return Array.from(
-    new Set(
-      results.flatMap((result) => {
-        const resources = Array.isArray(result.touchedResources)
-          ? result.touchedResources
-          : [];
-
-        return resources
-          .map((resource) => {
-            if (!resource || typeof resource !== "object") return null;
-
-            const item = resource as {
-              type?: string;
-              uri?: string;
-              operation?: string;
-              verified?: boolean;
-            };
-
-            if (!item.uri) return null;
-
-            if (item.type === "file") return `file:${item.uri}`;
-            if (item.type === "artifact") {
-              return item.uri.startsWith("artifact:")
-                ? item.uri
-                : `artifact:${item.uri}`;
-            }
-            if (item.type === "url") return `url:${item.uri}`;
-            if (item.type === "db_record") return `db:${item.uri}`;
-
-            return `resource:${item.uri}`;
-          })
-          .filter((ref): ref is string => Boolean(ref));
-      })
-    )
-  )
-    .slice(0, 20)
-    .map((refId) => ({ refId }));
-}
-
-function extractOpenIssuesFromAgentResults(
-  results: Array<Record<string, unknown>>
-): Array<{
-  type?: string;
-  message: string;
-  severity?: string;
-}> {
-  const allIssues = results.flatMap((result) => {
-    const issues = Array.isArray(result.openIssues)
-      ? result.openIssues
-      : [];
-
-    return issues
-      .map((issue) => {
-        if (!issue || typeof issue !== "object") return null;
-
-        const item = issue as {
-          refId?: string;
-          type?: string;
-          message?: string;
-          summary?: string;
-          severity?: "low" | "medium" | "high";
-        };
-
-        const message =
-          item.message ||
-          item.summary ||
-          (item.type ? `执行问题：${item.type}` : "执行过程中出现问题");
-
-        return {
-          type: item.type,
-          message,
-          severity: item.severity ?? "medium",
-        };
-      })
-      .filter((issue): issue is NonNullable<typeof issue> => Boolean(issue));
+  const finalMessage = await mainAgent.summarizeDomainPlanResult({
+    originalUserMessage: input.originalUserMessage,
+    selectedAgent: {
+      agentUid: input.selectedAgent.agent.agentUid,
+      name: input.selectedAgent.agent.name,
+    },
+    plan: input.plan,
+    completedSteps,
   });
 
-  return allIssues.slice(0, 10);
+  return finalMessage;
 }
-
-
